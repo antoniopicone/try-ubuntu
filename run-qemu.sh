@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Boots the live ISO (see build.sh) in qemu-system-aarch64 with UEFI (edk2),
-# hardware acceleration (hvf on macOS, kvm on Linux) and a virtio-gpu display
-# (the desktop renders in software, llvmpipe). The live session starts in
+# hardware acceleration (hvf on macOS, kvm on Linux) and a virtio-gpu display.
+# On Apple Silicon it uses the QEMU from qemu/build.sh when it's there
+# (dist/qemu-macos-arm64, which install.sh downloads from the release): the
+# desktop then renders on the Mac's GPU (virtio-gpu-gl, VirGL -> ANGLE ->
+# Metal) and, on macOS 26 with an M3 or newer, the guest gets nested
+# virtualization (/dev/kvm). Any other QEMU (Homebrew's, the distro's) works
+# too, with the desktop rendered in software (llvmpipe). The live session starts in
 # the host's language, taken from the shell's locale (LC_ALL, LC_MESSAGES,
 # LANG; on macOS the system's when those are unset) and passed to the guest
 # through QEMU's fw_cfg (live-locale.service picks it up).
@@ -25,7 +30,13 @@ Usage: ./run-qemu.sh [options]
   --headless     no window: serial console only (login on ttyAMA0)
   --serial       also attach the serial console to this terminal when
                  there is a window (it's always there with --headless)
-  --vnc DISPLAY  graphics over VNC instead of a window (e.g. :1 -> port 5901)
+  --vnc DISPLAY  graphics over VNC instead of a window (e.g. :1 -> port 5901;
+                 no GPU acceleration)
+  --no-gpu       render the desktop in software even when QEMU could use
+                 the host's GPU
+  --no-nested    don't expose virtualization extensions (EL2) to the guest
+  --qemu PATH    qemu-system-aarch64 to use (default: the one built by
+                 qemu/build.sh, if any, else the one on PATH)
   --persist[=FILE]  keep changes (and snapper snapshots) across reboots on a
                  qcow2 disk. On by default (dist/persist.qcow2, 32G, created
                  on first use); it only works with the ISO build that set it up
@@ -48,6 +59,9 @@ vnc=""
 persist="$project_dir/dist/persist.qcow2"
 ssh_port=2222
 vars=""
+gpu=1
+nested=1
+qemu=""
 while (($#)); do
   case "$1" in
     --iso)  iso=$2; shift 2 ;;
@@ -59,6 +73,9 @@ while (($#)); do
     --headless) headless=1; shift ;;
     --serial) serial=1; shift ;;
     --vnc)  vnc=$2; shift 2 ;;
+    --no-gpu) gpu=0; shift ;;
+    --no-nested) nested=0; shift ;;
+    --qemu) qemu=$2; shift 2 ;;
     --persist) persist="$project_dir/dist/persist.qcow2"; shift ;;
     --persist=*) persist=${1#*=}; shift ;;
     --no-persist) persist=""; shift ;;
@@ -70,9 +87,15 @@ done
 
 [[ -f "$iso" ]] || {
   echo "ISO not found: $iso (run ./build.sh first, or install.sh to download it)" >&2; exit 1; }
-qemu=$(command -v qemu-system-aarch64 || true)
-[[ -n "$qemu" ]] || {
-  echo "qemu-system-aarch64 not found (macOS: brew install qemu)" >&2; exit 1; }
+# The QEMU built by qemu/build.sh (install.sh puts it in the same place),
+# else the system's.
+bundled="$project_dir/dist/qemu-macos-arm64/bin/qemu-system-aarch64"
+if [[ -z "$qemu" && -x "$bundled" && $(uname -s) == Darwin && $(uname -m) == arm64 ]]; then
+  qemu=$bundled
+fi
+[[ -n "$qemu" ]] || qemu=$(command -v qemu-system-aarch64 || true)
+[[ -n "$qemu" && -x "$qemu" ]] || {
+  echo "qemu-system-aarch64 not found (macOS: ./qemu/build.sh or brew install qemu)" >&2; exit 1; }
 
 # Defaults from the host: half of its CPUs, a third of its RAM (min 4 GiB).
 if [[ -z "$cpus" ]]; then
@@ -148,9 +171,24 @@ if [[ -n "$persist" ]]; then
   )
 fi
 
+machine=virt
 case "$(uname -s)" in
   Darwin) if [[ $(uname -m) == arm64 ]]; then
-            accel=(-accel hvf -cpu host)
+            # HVF has no usable guest PMU: don't advertise one.
+            accel=(-accel hvf -cpu host,pmu=off)
+            # Nested virtualization: EL2 in the guest, with Hypervisor.framework's
+            # GICv3. It needs macOS 26 and an M3 or newer; rather than guess
+            # from the model, ask QEMU to create (and quit) such a machine.
+            # macOS 15 can pass this probe and then fail at boot, hence the
+            # version check.
+            if ((nested)) && (( $(sw_vers -productVersion | cut -d. -f1) >= 26 )) &&
+               printf '%s\n' '{"execute":"qmp_capabilities"}' '{"execute":"quit"}' |
+                 "$qemu" -machine virt,gic-version=3,virtualization=on \
+                   -accel hvf,kernel-irqchip=on -cpu host,pmu=off -smp 1 -m 128M \
+                   -nodefaults -display none -S -qmp stdio >/dev/null 2>&1; then
+              machine=virt,gic-version=3,virtualization=on
+              accel=(-accel hvf,kernel-irqchip=on -cpu host,pmu=off)
+            fi
           else
             accel=(-accel tcg -cpu max)   # Intel Mac: arm64 is emulated
           fi ;;
@@ -162,6 +200,32 @@ case "$(uname -s)" in
   *)      accel=(-accel tcg -cpu max) ;;
 esac
 
+# At EL2 under HVF, edk2's timer interrupt (the EL2 physical timer) never
+# fires: anything in the firmware that waits, Limine's menu included, hangs.
+# Linux doesn't use that timer, so with nested virtualization QEMU loads the
+# kernel itself (edk2 still starts it, without waiting on anything): the
+# ISO's kernel, initramfs and the command line of Limine's default entry.
+# No Limine menu, then: --no-nested for it (e.g. to boot a snapshot).
+kernel_args=()
+if [[ "$machine" == *virtualization=on* ]]; then
+  stamp=$(stat -f '%z-%m' "$iso")
+  kdir="$project_dir/dist/.kernel-$(basename "$iso" .iso)"
+  if [[ "$(cat "$kdir/stamp" 2>/dev/null)" != "$stamp" ]]; then
+    rm -rf "$kdir"; mkdir -p "$kdir"
+    tar -xf "$iso" -C "$kdir" live/Image live/initrd boot/limine/limine.conf
+    echo "$stamp" > "$kdir/stamp"
+  fi
+  # limine.conf: ${NAME}=value macros, then the first entry's cmdline.
+  cmdline=$(awk '
+    /^\$\{[A-Z_]+\}=/ { i = index($0, "="); macro[substr($0, 1, i - 1)] = substr($0, i + 1); next }
+    /^[ \t]*cmdline:/ { sub(/^[ \t]*cmdline:[ \t]*/, "")
+                        for (m in macro) while ((i = index($0, m)) > 0)
+                          $0 = substr($0, 1, i - 1) macro[m] substr($0, i + length(m))
+                        print; exit }' "$kdir/boot/limine/limine.conf")
+  [[ -n "$cmdline" ]] || { echo "No kernel command line in the ISO's limine.conf" >&2; exit 1; }
+  kernel_args=(-kernel "$kdir/live/Image" -initrd "$kdir/live/initrd" -append "$cmdline")
+fi
+
 # Serial console on the terminal only when asked (always with --headless):
 # otherwise the guest's boot and console output would flood it.
 if ((headless || serial)); then
@@ -170,8 +234,21 @@ else
   serial_args=(-serial null)
 fi
 
+# GPU acceleration (VirGL) needs a QEMU with virtio-gpu-gl-pci and an
+# OpenGL display: on macOS that's the one from qemu/build.sh, whose Cocoa
+# window renders through ANGLE (OpenGL ES) on Metal. It follows the window's
+# size and the display's refresh rate.
+if ((gpu)) && [[ -z "$vnc" && $(uname -s) == Darwin ]] &&
+   "$qemu" -device help 2>/dev/null | grep -q '"virtio-gpu-gl-pci"'; then
+  gpu=1
+else
+  gpu=0
+fi
+
 if ((headless)); then
   display=(-display none)
+elif ((gpu)); then
+  display=(-device virtio-gpu-gl-pci -display cocoa,gl=es,zoom-to-fit=on,left-command-key=on)
 else
   display=(-device virtio-gpu-pci)
   if [[ -n "$vnc" ]]; then
@@ -182,9 +259,19 @@ else
   display+=(-device qemu-xhci -device usb-kbd -device usb-tablet)
 fi
 
+# Free-page reporting gives the RAM the guest frees back to macOS: with
+# HVF that needs the patch in qemu/build.sh's QEMU (without it, QEMU can't
+# remap the pages), so only there.
+balloon_args=()
+if [[ "${accel[1]}" == hvf* ]] && LC_ALL=C grep -aqF 'HVF free-page backing replacement failed' "$qemu"; then
+  balloon_args=(-device virtio-balloon-pci,free-page-reporting=on)
+elif [[ "${accel[1]}" == kvm ]]; then
+  balloon_args=(-device virtio-balloon-pci,free-page-reporting=on)
+fi
+
 exec "$qemu" \
   -name "Ubuntu Live" \
-  -machine virt "${accel[@]}" -smp "$cpus" -m "$mem" \
+  -machine "$machine" "${accel[@]}" -smp "$cpus" -m "$mem" \
   -drive if=pflash,format=raw,unit=0,readonly=on,file="$code" \
   -drive if=pflash,format=raw,unit=1,file="$vars" \
   -device virtio-scsi-pci,id=scsi0 \
@@ -193,6 +280,8 @@ exec "$qemu" \
   ${persist_args[@]+"${persist_args[@]}"} \
   -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:"$ssh_port"-:22 \
   -device virtio-rng-pci \
+  ${balloon_args[@]+"${balloon_args[@]}"} \
+  ${kernel_args[@]+"${kernel_args[@]}"} \
   ${lang_args[@]+"${lang_args[@]}"} \
   -boot menu=on,splash-time=0 \
   "${display[@]}" \

@@ -1,6 +1,6 @@
 #!/bin/sh
-# Downloads the live ISO from the latest GitHub release, installs QEMU if
-# it's missing and boots the ISO with run-qemu.sh. Meant to be piped into sh:
+# Downloads the live ISO from the latest GitHub release, gets QEMU and boots
+# the ISO with run-qemu.sh. Meant to be piped into sh:
 #
 #   curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --lang de_DE --no-persist
@@ -13,6 +13,10 @@
 #
 # The ISO matching the host's CPU is used when the release has one;
 # otherwise the arm64 one, emulated (slow).
+#
+# QEMU: on Apple Silicon, the release's build (qemu/build.sh: GPU
+# acceleration and nested virtualization), in $TRY_UBUNTU_DIR/dist; on an
+# Intel Mac Homebrew's, on Linux the distribution's.
 set -eu
 
 REPO=${TRY_UBUNTU_REPO:-antoniopicone/try-ubuntu}
@@ -44,9 +48,34 @@ linux_firmware_found() {
   return 1
 }
 
+# The release's QEMU for Apple Silicon (see qemu/build.sh), unless this
+# release's is already there. Returns 1 when the release has none.
+install_qemu_release() {
+  qemu_tgz=qemu-macos-arm64.tar.gz
+  printf '%s\n' "$sums" | grep -q " \*\{0,1\}$qemu_tgz\$" || return 1
+  qemu_stamp="$dist/qemu-macos-arm64.release"
+  if [ -x "$dist/qemu-macos-arm64/bin/qemu-system-aarch64" ] &&
+     [ "$(cat "$qemu_stamp" 2>/dev/null || true)" = "$tag" ]; then
+    return 0
+  fi
+  say "Downloading QEMU for Apple Silicon ($tag)"
+  tmp=$(mktemp -d "$dist/.qemu.XXXXXX")
+  curl -fL --progress-bar -o "$tmp/$qemu_tgz" "$base/$qemu_tgz" </dev/null || {
+    rm -rf "$tmp"; die "QEMU download failed; run this again"; }
+  if [ "$(sha256 "$tmp/$qemu_tgz")" != "$(printf '%s\n' "$sums" | grep " \*\{0,1\}$qemu_tgz\$" | cut -d' ' -f1)" ]; then
+    rm -rf "$tmp"; die "checksum mismatch for $qemu_tgz; run this again"
+  fi
+  tar -xzf "$tmp/$qemu_tgz" -C "$tmp"
+  rm -rf "$dist/qemu-macos-arm64"
+  mv "$tmp/qemu-macos-arm64" "$dist/qemu-macos-arm64"
+  rm -rf "$tmp"
+  printf '%s\n' "$tag" > "$qemu_stamp"
+}
+
 install_qemu() {
   case "$os" in
     Darwin)
+      [ "$arch" = arm64 ] && install_qemu_release && return 0
       has qemu-system-aarch64 && return 0
       has brew || die "QEMU is missing and Homebrew isn't installed: see https://brew.sh, then run this again"
       say "Installing QEMU (brew install qemu)"

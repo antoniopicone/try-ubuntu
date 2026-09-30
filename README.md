@@ -14,7 +14,7 @@ A live ISO of a minimal Ubuntu for arm64, to try the amazing penguin ;)
 
 On macOS or Linux, one command downloads the ISO from the
 [latest release](https://github.com/antoniopicone/try-ubuntu/releases/latest),
-installs QEMU if it's missing and boots the live session:
+gets QEMU and boots the live session:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh
@@ -30,9 +30,12 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
   now releases only have `ubuntu-live-arm64.iso`: it runs with hardware
   acceleration on Apple Silicon (hvf) and arm64 Linux (kvm), and emulated
   (TCG, slow) on x86_64.
-- **QEMU**: installed with Homebrew on macOS (`brew install qemu`), and on
-  Linux with apt (Debian, Ubuntu), dnf (Fedora) or pacman (Arch), together
-  with the aarch64 UEFI firmware. It uses sudo.
+- **QEMU**: on Apple Silicon, the release's own build (see
+  [QEMU for Apple Silicon](#qemu-for-apple-silicon)), with GPU acceleration
+  and nested virtualization; nothing gets installed system-wide. On an Intel
+  Mac it's Homebrew's (`brew install qemu`), and on Linux it's installed with
+  apt (Debian, Ubuntu), dnf (Fedora) or pacman (Arch), together with the
+  aarch64 UEFI firmware (this uses sudo).
 - **Files**: the ISO, the persistent disk and `run-qemu.sh` go in
   `~/.local/share/try-ubuntu` (set `TRY_UBUNTU_DIR` to change it). The ISO
   is checked against the release's `SHA256SUMS`, and an interrupted
@@ -45,6 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
 
 ```bash
 ./build.sh --xkb it          # → dist/ubuntu-live-arm64.iso (~1.4 GB)
+./qemu/build.sh              # macOS: → dist/qemu-macos-arm64 (optional, GPU + nested virtualization)
 ./run-qemu.sh                # boot it in a window (--serial: serial console in the terminal too)
 ./run-qemu.sh --lang de_DE   # boot in German instead of the host's language
 ./run-qemu.sh --no-persist   # RAM only (by default changes and snapshots go to a persistent disk)
@@ -213,13 +217,18 @@ takes ~6 minutes once GNOME is cached.
 
 `run-qemu.sh` uses `qemu-system-aarch64` with hvf (macOS) or kvm (Linux),
 edk2 UEFI firmware, a virtio-scsi CD-ROM, virtio-gpu, and user networking
-with SSH on `localhost:2222` (`ssh -p 2222 ubuntu@localhost`).
+with SSH on `localhost:2222` (`ssh -p 2222 ubuntu@localhost`). On Apple
+Silicon it takes the QEMU in `dist/qemu-macos-arm64` when it's there (see
+below), otherwise the one on `PATH`.
 
 | Option | |
 |---|---|
-| *(none)* | the ISO in a Cocoa window with virtio-gpu; the desktop renders in software (llvmpipe) |
+| *(none)* | the ISO in a Cocoa window. With `dist/qemu-macos-arm64`, the desktop renders on the Mac's GPU (virtio-gpu-gl) and the guest has `/dev/kvm` where the Mac allows it; with any other QEMU, it renders in software (llvmpipe) on a virtio-gpu |
 | `--lang LOCALE` | language of the live session, e.g. `it_IT` or `de` (default: the host's, see below) |
-| `--vnc :1` | graphics over VNC at `127.0.0.1:5901` instead of a window |
+| `--vnc :1` | graphics over VNC at `127.0.0.1:5901` instead of a window (software rendering) |
+| `--no-gpu` | software rendering (llvmpipe) even with the GPU-enabled QEMU |
+| `--no-nested` | no virtualization extensions in the guest, and the Limine menu back (with nested virtualization the kernel boots directly, see below) |
+| `--qemu PATH` | the `qemu-system-aarch64` to use |
 | `--headless` | no graphics at all: login on the serial console |
 | `--serial` | with a window, also attach the serial console to the terminal |
 | `--persist[=FILE]` | the persistent qcow2 disk, **on by default** (`dist/persist.qcow2`, 32G, created on first use) |
@@ -235,6 +244,47 @@ monitor (`Ctrl-A X` quits QEMU, `Ctrl-A C` opens the monitor).
 QEMU runs with `-boot menu=on,splash-time=0`. edk2 takes its boot timeout
 from QEMU, so instead of waiting ~5 s on the TianoCore logo it starts Limine
 right away (~0.6 s). Limine keeps its own menu and timeout.
+
+### QEMU for Apple Silicon
+
+Homebrew's QEMU has no virglrenderer and its Cocoa window has no OpenGL,
+so the guest only gets a framebuffer and GNOME renders in software.
+[qemu/build.sh](qemu/build.sh) builds one that has both, following
+[Try Omarchy](https://github.com/omacom/try-omarchy)'s runtime:
+
+- **QEMU 11.1.1**, `aarch64-softmmu` only, HVF only (no TCG), with the
+  Cocoa display, OpenGL, virglrenderer and slirp, plus `qemu-img`
+- **GPU**: the guest's Mesa virgl driver → `virtio-gpu-gl-pci` →
+  **virglrenderer** 1.3.0 (with startergo's macOS patches) → **ANGLE**
+  (OpenGL ES) → **Metal**, and the Cocoa window shows the result as a
+  texture (`-display cocoa,gl=es`). The guest resolution follows the
+  window, HiDPI included
+- **nested virtualization**: on macOS 26 with an M3 or newer, run-qemu.sh
+  starts the guest at EL2 with Hypervisor.framework's GICv3
+  (`virtualization=on`, `kernel-irqchip=on`), after checking with a tiny
+  throwaway VM that the Mac supports it. The guest then has `/dev/kvm`, for
+  VMs inside the live session. Elsewhere it boots as before. At EL2 the
+  firmware's timer never fires under HVF, so edk2 and Limine hang on
+  anything that waits (Limine's countdown stays at 5): with nested
+  virtualization, run-qemu.sh takes the kernel, the initramfs and the
+  default entry's command line from the ISO and has QEMU load them, with no
+  Limine menu. Use `--no-nested` to get the menu (e.g. to boot a snapshot)
+- **memory**: free-page reporting (`virtio-balloon`) hands the RAM the guest
+  frees back to macOS
+- the patches in [qemu/patches](qemu/patches/README.md): Cocoa GL, the GPU
+  fixes, HVF fixes (among them a crash on writes to the UEFI flash)
+
+Everything it downloads is pinned by sha256: the QEMU, virglrenderer,
+dtc and keycodemapdb sources, ANGLE and libepoxy (startergo's bottles), and
+GLib, gettext, PCRE2, Pixman and libslirp as Homebrew's arm64_sequoia
+bottles, fetched straight from ghcr.io. It needs only Xcode's command line
+tools, `python3` and `pkg-config`, and takes ~10 minutes. The result, in
+`dist/qemu-macos-arm64` (~170 MB, most of it the edk2 firmware; 11 MB as
+a tarball), is self-contained: the libraries are
+relocated next to the binaries and everything is ad-hoc signed, QEMU with
+the `com.apple.security.hypervisor` entitlement. It runs on macOS 15 or
+newer. Releases ship it as `qemu-macos-arm64.tar.gz`, which install.sh
+downloads.
 
 ### The host's language
 
@@ -392,8 +442,10 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   [overlay/etc/netplan](overlay/etc/netplan/01-network-manager-all.yaml),
   as on Ubuntu Desktop, so the network menu and Settings work.
   systemd-networkd is off.
-- **Rendering**: GNOME Shell uses llvmpipe on a display-only virtio-gpu. It
-  needs no patch.
+- **Rendering**: with the QEMU from `qemu/build.sh`, GNOME Shell and the
+  apps render with Mesa's virgl driver, on the host's GPU. With any other
+  QEMU, GNOME Shell uses llvmpipe on a display-only virtio-gpu. Neither
+  needs a patch.
 - **ufw** is on at boot. It denies incoming traffic except SSH (22/tcp)
   and mDNS (5353/udp).
 
@@ -411,7 +463,10 @@ git tag v1.0.0 && git push origin v1.0.0
 - The GNOME 51 backport (`/cache/gnome-repo`) is kept in the Actions cache.
   Only the first build, or one after a change to `build-gnome.sh`, its
   patches or the `Containerfile`, takes hours.
-- It publishes a release with `ubuntu-live-arm64.iso` and `SHA256SUMS`.
+- It builds `qemu-macos-arm64.tar.gz` with `./qemu/build.sh` on a
+  `macos-15` runner, caching the downloads.
+- It publishes a release with `ubuntu-live-arm64.iso`,
+  `qemu-macos-arm64.tar.gz` and `SHA256SUMS`.
   A release asset can be at most 2 GiB, and the build fails if the ISO is
   bigger. [install.sh](install.sh) downloads from there.
 
