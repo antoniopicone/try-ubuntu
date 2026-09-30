@@ -256,8 +256,10 @@ else
   elif [[ $(uname -s) == Darwin ]]; then
     display+=(-display cocoa,left-command-key=on)
   fi
-  display+=(-device qemu-xhci -device usb-kbd -device usb-tablet)
 fi
+# The virt machine has no input devices of its own: add them to every
+# graphical display, GPU-accelerated or not.
+((headless)) || display+=(-device qemu-xhci -device usb-kbd -device usb-tablet)
 
 # Free-page reporting gives the RAM the guest frees back to macOS: with
 # HVF that needs the patch in qemu/build.sh's QEMU (without it, QEMU can't
