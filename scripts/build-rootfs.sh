@@ -99,7 +99,7 @@ in_chroot apt-get -y full-upgrade
 busybox_pkg=busybox
 in_chroot apt-cache show busybox-initramfs >/dev/null 2>&1 && busybox_pkg=busybox-initramfs
 in_chroot apt-get install -y initramfs-tools "$busybox_pkg" btrfs-progs util-linux zstd ca-certificates
-cp -a "$OVERLAY/etc/initramfs-tools/." "$ROOTFS/etc/initramfs-tools/"
+cp -a --no-preserve=ownership "$OVERLAY/etc/initramfs-tools/." "$ROOTFS/etc/initramfs-tools/"
 # This build's live medium label and persistent disk serial (btrfslive).
 cat > "$ROOTFS/etc/initramfs-tools/conf.d/btrfslive" <<EOF
 BTRFSLIVE_LABEL=$ISO_LABEL
@@ -187,8 +187,11 @@ if in_chroot dpkg -s modemmanager >/dev/null 2>&1; then
 fi
 
 # The rest of the overlay goes in after the packages whose conffiles it
-# replaces, so dpkg never sees a conffile conflict.
-cp -a "$OVERLAY/." "$ROOTFS/"
+# replaces, so dpkg never sees a conffile conflict. Its files belong to
+# root, whoever owns the checkout (e.g. uid 1001 on a CI runner): with the
+# checkout's owner on /, /etc and /usr, sudo refuses to run and systemd's
+# sandboxed services (localed) can't write to /etc.
+cp -a --no-preserve=ownership "$OVERLAY/." "$ROOTFS/"
 
 desktop_install
 
@@ -351,6 +354,11 @@ find "$ROOTFS/usr/share/doc" -type l -delete
 rm -rf "$ROOTFS"/usr/share/{man,info,lintian,linda}/* "$ROOTFS/usr/share/qt6/translations"
 find "$ROOTFS/usr/share/locale" -mindepth 1 -maxdepth 1 ! -name locale.alias -exec rm -rf {} +
 find "$ROOTFS/usr" -name __pycache__ -type d -prune -exec rm -rf {} +
+
+# Nothing outside /home may belong to a regular user (see the overlay copy).
+foreign=$(find "$ROOTFS" -xdev -path "$ROOTFS/home" -prune -o \
+  -uid +999 ! -uid 65534 -print -quit)
+[[ -z "$foreign" ]] || { echo "${foreign#$ROOTFS} belongs to uid $(stat -c %u "$foreign")" >&2; exit 1; }
 
 echo "==> Building the initramfs"
 in_chroot update-initramfs -c -k all

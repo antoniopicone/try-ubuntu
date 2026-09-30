@@ -203,6 +203,19 @@ disable-overview-on-startup=true
 icon=8
 EOF
 
+  # Chromium: light or dark as GNOME is ("Device" mode, which reads it from
+  # the settings portal and follows later changes too). Set once, in the
+  # initial preferences Chromium copies into each new profile.
+  python3 - "$ROOTFS/etc/chromium/master_preferences" <<'PY'
+import json, sys
+path = sys.argv[1]
+prefs = json.load(open(path))
+prefs.setdefault("browser", {}).setdefault("theme", {})["color_scheme2"] = 0  # 0 = device
+with open(path, "w") as f:
+    json.dump(prefs, f, indent=2)
+    f.write("\n")
+PY
+
   # Ctrl+Alt+T opens ghostty too (GNOME's own binding runs the
   # xdg-terminal-exec default, see overlay/etc/xdg/xdg-terminals.list).
   [[ -x "$ROOTFS/usr/bin/xdg-terminal-exec" ]] \

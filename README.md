@@ -68,7 +68,7 @@ app takes over: it creates your user and logs out to GDM (see
 | Filesystem | btrfs with the subvolumes `@` → `/`, `@home` → `/home`, `@var` → `/var`, `@snapshots` → `/.snapshots` (flat layout, `compress=zstd:1`). **snapper** manages `/`; snapshot #1 is the image as built |
 | Desktop | a minimal **GNOME 51**: Shell, Settings, the vanilla GNOME session, GDM (see [The desktop](#the-desktop)) |
 | Theme | dark style with GNOME's blue accent, Adwaita Sans, Yaru icons, and **one of Ubuntu's stock wallpapers, picked at random at each build** |
-| Apps | **ghostty**, **Nautilus**, **Chromium** (in the desktop's language, style and accent color, with uBlock Origin Lite), GNOME Software, Disks, Resources, Extensions |
+| Apps | **ghostty**, **Nautilus**, **Chromium** (in the desktop's language and light/dark style, with uBlock Origin Lite), GNOME Software, Disks, Resources, Extensions |
 | Network | NetworkManager (via netplan, as on Ubuntu Desktop) |
 | Services | polkit, UPower, power-profiles-daemon, BlueZ, GeoClue, avahi-daemon (+ nss-mdns), Tailscale, ufw |
 | Tools | podman (rootless: uidmap + passt), git, curl, wget |
@@ -302,28 +302,13 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   - **language**: its UI follows `LANG`, like the rest of the session.
     `chromium-l10n` provides the translations; the build keeps only the
     image's languages.
-  - **light/dark style**: Chromium's "Device" mode, the default, reads it
-    from the settings portal and switches right away.
-  - **accent color**: Chromium on Linux has no "follow device colors";
-    its palette comes from the color picked in its "Customize Chromium"
-    panel, stored in the profile. The launcher (`/usr/bin/chromium`)
-    sources [/etc/chromium.d/gnome-accent](overlay/etc/chromium.d/gnome-accent),
-    which runs [sync-prefs](overlay/usr/local/lib/chromium-gnome/sync-prefs)
-    before Chromium starts. It sets that color to GNOME's accent, with
-    the "Classic" theme (with the GTK theme Chromium ignores the color):
-    - **new profile**: sync-prefs creates it from Chromium's initial
-      preferences (`/etc/chromium/master_preferences`) plus the color,
-      and marks the first run as done. Otherwise Chromium's first run
-      would replace the profile with the initial preferences, which are
-      the same for every user. As a side effect, the Debian bookmarks
-      in those preferences aren't imported.
-    - **existing profile**: sync-prefs updates the color only if GNOME's
-      accent changed since the last sync (`~/.config/chromium/.gnome-accent`),
-      so a color you pick in Chromium stays until you change the accent in
-      GNOME Settings.
-    - the new color applies the next time Chromium starts. While it's
-      running, sync-prefs does nothing, because Chromium overwrites its
-      profile when it exits.
+  - **light/dark style**: Chromium's initial preferences
+    (`/etc/chromium/master_preferences`, copied into each new profile)
+    set its mode to "Device". It reads the style from the settings portal,
+    so it matches the choice made in the welcome app and follows later
+    changes right away. The accent color isn't carried over: on Linux,
+    Chromium's palette comes only from its own "Customize Chromium"
+    panel.
   - **uBlock Origin Lite** is installed as an
     [external extension](overlay/usr/lib/chromium/extensions/ddkjiahejlhfcafbddmgiahcphecmpfh.json):
     Chromium downloads it from the Chrome Web Store on its first start
