@@ -159,8 +159,10 @@ chosen with `boot=btrfslive`) takes these steps:
      (`run-qemu.sh --persist`), or `btrfslive.persist=DEV`. A blank disk is
      claimed on first boot and reopened on later boots. A disk that holds
      anything else is never touched. The disk extends the seed of *that*
-     ISO build, so after a rebuild it's rejected, and changes stay in RAM
-     until you delete it (`rm dist/persist.qcow2`).
+     ISO build, so after a rebuild btrfslive would reject it and run in RAM:
+     `run-qemu.sh` records the ISO's checksum next to the disk
+     (`persist.qcow2.iso`) and, when the ISO changes, moves the old disk
+     aside to `persist-<date>.qcow2` and creates a new one.
 3. It mounts `@` (or a snapshot, see below), `@home`, `@var` and
    `@snapshots` just as an installed system would.
 

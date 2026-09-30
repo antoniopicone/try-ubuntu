@@ -186,6 +186,9 @@ main() {
     printf '%s\n' "$tag" > "$stamp"
     if [ -n "$current" ] && [ "$current" != "$tag" ] && [ -f "$dist/persist.qcow2" ]; then
       mv "$dist/persist.qcow2" "$dist/persist-$current.qcow2"
+      if [ -f "$dist/persist.qcow2.iso" ]; then
+        mv "$dist/persist.qcow2.iso" "$dist/persist-$current.qcow2.iso"
+      fi
       say "The persistent disk of $current only works with its ISO: moved to $dist/persist-$current.qcow2"
     fi
   fi

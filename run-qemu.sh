@@ -158,13 +158,36 @@ fi
 #
 # Persistent disk: btrfslive finds it by its serial (virtio-ubuntu-persist)
 # and uses it instead of RAM for everything written by the live system.
+# It extends the seed of the ISO that created it, so with any other ISO
+# btrfslive leaves it alone and the session silently runs in RAM. The ISO's
+# checksum (its .sha256, else size and mtime) is kept next to the disk
+# (FILE.iso): when the ISO changes, the old disk is set aside, not deleted,
+# and a new one is created.
 persist_args=()
 if [[ -n "$persist" ]]; then
+  iso_id=$(cut -d' ' -f1 "$iso.sha256" 2>/dev/null || true)
+  [[ -n "$iso_id" ]] || iso_id=$(stat -f '%z-%m' "$iso" 2>/dev/null || stat -c '%s-%Y' "$iso")
+  if [[ -f "$persist" ]]; then
+    disk_id=$(cat "$persist.iso" 2>/dev/null || true)
+    # No record (a disk from before this check): btrfs writes to the disk at
+    # every boot it's used, so one older than the ISO was never used with it.
+    if [[ -z "$disk_id" && "$persist" -ot "$iso" ]]; then
+      disk_id=unknown
+    fi
+    if [[ -n "$disk_id" && "$disk_id" != "$iso_id" ]]; then
+      old="${persist%.qcow2}-$(date -r "$persist" +%Y%m%d-%H%M%S).qcow2"
+      mv "$persist" "$old"
+      [[ -f "$persist.iso" ]] && mv "$persist.iso" "$old.iso"
+      echo "The persistent disk was made by another ISO and can't be used with this one:"
+      echo "  moved to $old (it still works with that ISO: --persist=$old)"
+    fi
+  fi
   if [[ ! -f "$persist" ]]; then
     qemu_img=$(command -v qemu-img || echo "$(dirname "$qemu")/qemu-img")
     "$qemu_img" create -q -f qcow2 "$persist" 32G
     echo "Created persistent disk $persist"
   fi
+  echo "$iso_id" > "$persist.iso"
   persist_args=(
     -drive if=none,id=persist,format=qcow2,file="$persist"
     -device virtio-blk-pci,drive=persist,serial=ubuntu-persist
