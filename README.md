@@ -10,6 +10,39 @@ A live ISO of a minimal Ubuntu for arm64, to try the amazing penguin ;)
 - boots from the command line with QEMU; the live session starts in your
   shell's language
 
+## Try it
+
+On macOS or Linux, one command downloads the ISO from the
+[latest release](https://github.com/antoniopicone/try-ubuntu/releases/latest),
+installs QEMU if it's missing and boots the live session:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh
+```
+
+Options after `sh -s --` go to [run-qemu.sh](run-qemu.sh):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh -s -- --lang de_DE --no-persist
+```
+
+- **Which ISO**: the one for the host's CPU, when the release has it. Right
+  now releases only have `ubuntu-live-arm64.iso`: it runs with hardware
+  acceleration on Apple Silicon (hvf) and arm64 Linux (kvm), and emulated
+  (TCG, slow) on x86_64.
+- **QEMU**: installed with Homebrew on macOS (`brew install qemu`), and on
+  Linux with apt (Debian, Ubuntu), dnf (Fedora) or pacman (Arch), together
+  with the aarch64 UEFI firmware. It uses sudo.
+- **Files**: the ISO, the persistent disk and `run-qemu.sh` go in
+  `~/.local/share/try-ubuntu` (set `TRY_UBUNTU_DIR` to change it). The ISO
+  is checked against the release's `SHA256SUMS`, and an interrupted
+  download resumes.
+- **Updates**: running it again boots the same ISO, or downloads the newer
+  one when there's a new release. The old persistent disk only works with
+  its own ISO, so it's moved aside to `persist-<tag>.qcow2`.
+
+## Build it
+
 ```bash
 ./build.sh --xkb it          # → dist/ubuntu-live-arm64.iso (~1.4 GB)
 ./run-qemu.sh                # boot it in a window; the serial console stays in the terminal
@@ -376,6 +409,24 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   needs no patch.
 - **ufw** is on at boot. It denies incoming traffic except SSH (22/tcp)
   and mDNS (5353/udp).
+
+## Releases
+
+Pushing a `v*` tag runs [.github/workflows/release.yml](.github/workflows/release.yml):
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+- It builds the ISO with `./build.sh --xkb us` on a native arm64 runner
+  (`ubuntu-24.04-arm`), with rootful podman, since the ISO step needs loop
+  devices.
+- The GNOME 51 backport (`/cache/gnome-repo`) is kept in the Actions cache.
+  Only the first build, or one after a change to `build-gnome.sh`, its
+  patches or the `Containerfile`, takes hours.
+- It publishes a release with `ubuntu-live-arm64.iso` and `SHA256SUMS`.
+  A release asset can be at most 2 GiB, and the build fails if the ISO is
+  bigger. [install.sh](install.sh) downloads from there.
 
 ## Limitations
 

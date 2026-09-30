@@ -62,7 +62,7 @@ while (($#)); do
 done
 
 [[ -f "$iso" ]] || {
-  echo "ISO not found: $iso (run ./build.sh first)" >&2; exit 1; }
+  echo "ISO not found: $iso (run ./build.sh first, or install.sh to download it)" >&2; exit 1; }
 qemu=$(command -v qemu-system-aarch64 || true)
 [[ -n "$qemu" ]] || {
   echo "qemu-system-aarch64 not found (macOS: brew install qemu)" >&2; exit 1; }
@@ -82,11 +82,13 @@ if [[ "$lang" =~ ^[a-z]{2,3}(_[A-Z]{2})?$ ]]; then
 fi
 
 # UEFI firmware: QEMU's bundled edk2 build (e.g. Homebrew's), or the
-# distro's AAVMF package.
+# distro's package (AAVMF on Debian/Ubuntu, edk2-aarch64 on Arch and Fedora).
 share="$(cd "$(dirname "$qemu")/.." && pwd)/share/qemu"
 code=""
 for f in "$share/edk2-aarch64-code.fd" /opt/homebrew/share/qemu/edk2-aarch64-code.fd \
-         /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd; do
+         /usr/local/share/qemu/edk2-aarch64-code.fd \
+         /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+         /usr/share/edk2/aarch64/QEMU_CODE.fd /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw; do
   [[ -f "$f" ]] && { code=$f; share=$(dirname "$f"); break; }
 done
 [[ -n "$code" ]] || { echo "No aarch64 UEFI firmware (edk2) found" >&2; exit 1; }
@@ -124,7 +126,11 @@ if [[ -n "$persist" ]]; then
 fi
 
 case "$(uname -s)" in
-  Darwin) accel=(-accel hvf -cpu host) ;;
+  Darwin) if [[ $(uname -m) == arm64 ]]; then
+            accel=(-accel hvf -cpu host)
+          else
+            accel=(-accel tcg -cpu max)   # Intel Mac: arm64 is emulated
+          fi ;;
   Linux)  if [[ -w /dev/kvm && $(uname -m) == aarch64 ]]; then
             accel=(-accel kvm -cpu host)
           else

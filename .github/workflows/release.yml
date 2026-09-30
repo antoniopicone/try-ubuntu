@@ -1,0 +1,123 @@
+# On a version tag (v*), builds the live ISO on a native arm64 runner and
+# publishes it, with its SHA256SUMS, as a GitHub release. install.sh
+# downloads from the latest release.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  iso:
+    name: ISO (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # The GNOME 51 backport takes hours when the cache below misses.
+    timeout-minutes: 360
+    env:
+      ISO: ubuntu-live-${{ matrix.arch }}.iso
+      CACHE_VOLUME: try-ubuntu-cache
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache
+          df -h /
+
+      - name: Install podman
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman
+
+      # The backported .debs (build-gnome.sh skips a package whose build is
+      # already in the repository). The key changes with the build script,
+      # the patches and the builder image, so a change there starts over.
+      - name: Restore the GNOME 51 backport
+        id: gnome-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/gnome-repo
+          key: gnome-repo-${{ matrix.arch }}-${{ hashFiles('scripts/build-gnome.sh', 'patches/gnome/**', 'Containerfile') }}-${{ github.run_id }}
+          restore-keys: gnome-repo-${{ matrix.arch }}-${{ hashFiles('scripts/build-gnome.sh', 'patches/gnome/**', 'Containerfile') }}-
+
+      - name: Seed the build cache
+        if: steps.gnome-cache.outputs.cache-matched-key != ''
+        run: |
+          sudo podman volume create "$CACHE_VOLUME" >/dev/null
+          mp=$(sudo podman volume inspect --format '{{.Mountpoint}}' "$CACHE_VOLUME")
+          sudo cp -a "$RUNNER_TEMP/gnome-repo" "$mp/"
+
+      # Rootful podman: the ISO step needs loop devices.
+      - name: Build
+        run: sudo ./build.sh --xkb us
+
+      - name: Collect the GNOME 51 backport
+        id: gnome-collect
+        if: ${{ !cancelled() }}
+        run: |
+          mp=$(sudo podman volume inspect --format '{{.Mountpoint}}' "$CACHE_VOLUME" 2>/dev/null) || exit 0
+          sudo test -d "$mp/gnome-repo" || exit 0
+          rm -rf "$RUNNER_TEMP/gnome-repo"
+          sudo cp -a "$mp/gnome-repo" "$RUNNER_TEMP/"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/gnome-repo"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Save the GNOME 51 backport
+        if: ${{ !cancelled() && steps.gnome-collect.outputs.ok == 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/gnome-repo
+          key: gnome-repo-${{ matrix.arch }}-${{ hashFiles('scripts/build-gnome.sh', 'patches/gnome/**', 'Containerfile') }}-${{ github.run_id }}
+
+      - name: Checksum
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" dist
+          cd dist
+          size=$(stat -c %s "$ISO")
+          echo "$ISO: $((size / 1024 / 1024)) MiB"
+          # GitHub's limit for a release asset.
+          ((size < 2 * 1024 * 1024 * 1024)) || { echo "$ISO is over 2 GiB" >&2; exit 1; }
+          sha256sum "$ISO" > "$ISO.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iso-${{ matrix.arch }}
+          path: |
+            dist/${{ env.ISO }}
+            dist/${{ env.ISO }}.sha256
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  release:
+    needs: iso
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: iso-*
+          merge-multiple: true
+          path: dist
+
+      - name: SHA256SUMS
+        run: |
+          cd dist
+          cat ./*.sha256 > SHA256SUMS
+          rm ./*.sha256
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.iso
+            dist/SHA256SUMS
+          generate_release_notes: true
