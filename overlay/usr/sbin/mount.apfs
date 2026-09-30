@@ -1,0 +1,25 @@
+#!/bin/bash
+# mount(8) helper for APFS: there is no APFS driver in the kernel, so
+# "mount -t apfs" (and udisks2, and Nautilus) runs this instead, as with
+# ntfs-3g. It mounts the volume with apfs-fuse, read-only.
+#   mount.apfs SPEC DIR [-sfnv] [-N namespace] [-o options] [-t type]
+# Only -o matters for a read-only FUSE mount.
+set -euo pipefail
+spec=$1 dir=$2
+shift 2
+opts=""
+while getopts ":sfnvN:o:t:" opt; do
+  [[ $opt == o ]] && opts=$OPTARG
+done
+
+# udisks2 passes every mount option, its own (uhelper=udisks2) and the VFS
+# ones (nosuid, nodev...) included, and libfuse rejects any it doesn't know:
+# keep only what apfs-fuse understands. allow_other always: udisks2 mounts
+# as root, and a FUSE mount by root is otherwise visible to root only.
+filtered=allow_other
+IFS=, read -ra list <<<"$opts"
+for o in "${list[@]}"; do
+  case $o in ro|rw|uid=*|gid=*|nonempty) filtered+=",$o" ;; esac
+done
+
+exec /usr/local/bin/apfs-fuse -o "$filtered" "$spec" "$dir"

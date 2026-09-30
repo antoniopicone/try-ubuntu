@@ -4,9 +4,14 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --lang de_DE --no-persist
+#   curl -fsSL .../install.sh | sh -s -- --rebuild
 #
-# Arguments go to run-qemu.sh unchanged. The ISO, the persistent disk and
-# run-qemu.sh live in $TRY_UBUNTU_DIR (default: ~/.local/share/try-ubuntu).
+# Arguments go to run-qemu.sh unchanged, except --rebuild: it deletes what
+# this script downloaded and the caches (the ISO, the QEMU build,
+# run-qemu.sh, the kernel run-qemu.sh extracts from the ISO) and downloads
+# the latest release's again. The persistent disk and the UEFI variables
+# stay. The ISO, the persistent disk and run-qemu.sh live in
+# $TRY_UBUNTU_DIR (default: ~/.local/share/try-ubuntu).
 # Running it again boots the same ISO, or downloads the new one when there
 # is a newer release (the old persistent disk is set aside: it only works
 # with the ISO that set it up).
@@ -72,6 +77,14 @@ install_qemu_release() {
   printf '%s\n' "$tag" > "$qemu_stamp"
 }
 
+# --rebuild: everything downloaded from the releases, and the caches. Not
+# the persistent disks (persist*.qcow2) nor the UEFI variables (efivars.fd).
+purge_downloads() {
+  say "Deleting the downloaded ISO, QEMU and caches in $dist"
+  rm -rf "$dist"/*.iso "$dist"/*.iso.*.part "$dist"/*.release \
+    "$dist/qemu-macos-arm64" "$dist"/.qemu.* "$dist"/.kernel-* "$DIR/run-qemu.sh"
+}
+
 install_qemu() {
   case "$os" in
     Darwin)
@@ -98,6 +111,18 @@ install_qemu() {
 }
 
 main() {
+  # --rebuild is ours; everything else goes to run-qemu.sh (and after --,
+  # to QEMU, untouched).
+  rebuild=0 passthrough=0
+  for arg do
+    shift
+    case "$passthrough:$arg" in
+      0:--rebuild) rebuild=1 ;;
+      0:--) passthrough=1; set -- "$@" "$arg" ;;
+      *) set -- "$@" "$arg" ;;
+    esac
+  done
+
   os=$(uname -s)
   case "$os" in
     Darwin|Linux) ;;
@@ -132,14 +157,18 @@ main() {
   fi
   expected=$(printf '%s\n' "$sums" | grep " \*\{0,1\}$iso\$" | cut -d' ' -f1)
 
+  # The release of the ISO in place, if any: its persistent disk only works
+  # with it (see below).
+  stamp="$dist/$iso.release"
+  current=$(cat "$stamp" 2>/dev/null || true)
+  [ "$rebuild" = 0 ] || purge_downloads
+
   install_qemu
   if [ "$os" = Linux ] && [ "$arch" = arm64 ] && [ -e /dev/kvm ] && [ ! -w /dev/kvm ]; then
     warn "/dev/kvm isn't writable: add yourself to the kvm group (sudo usermod -aG kvm \$USER, then log in again) for hardware acceleration"
   fi
 
   # The ISO, unless this release's is already there.
-  stamp="$dist/$iso.release"
-  current=$(cat "$stamp" 2>/dev/null || true)
   if [ ! -f "$dist/$iso" ] || [ "$current" != "$tag" ]; then
     part="$dist/$iso.$tag.part"
     for f in "$dist/$iso".*.part; do
@@ -155,7 +184,7 @@ main() {
     fi
     mv -f "$part" "$dist/$iso"
     printf '%s\n' "$tag" > "$stamp"
-    if [ -n "$current" ] && [ -f "$dist/persist.qcow2" ]; then
+    if [ -n "$current" ] && [ "$current" != "$tag" ] && [ -f "$dist/persist.qcow2" ]; then
       mv "$dist/persist.qcow2" "$dist/persist-$current.qcow2"
       say "The persistent disk of $current only works with its ISO: moved to $dist/persist-$current.qcow2"
     fi

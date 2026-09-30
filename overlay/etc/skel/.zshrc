@@ -7,3 +7,6 @@ setopt hist_ignore_dups share_history autocd interactive_comments
 bindkey -e
 autoload -Uz compinit && compinit
 zstyle ':completion:*' menu select
+
+# ls with icons (Hack Nerd Font Mono, the terminal's font)
+alias ls="eza --icons=always"

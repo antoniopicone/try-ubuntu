@@ -2,12 +2,13 @@
 # Builds the live root filesystem in $ROOTFS: a hand-picked minimal Ubuntu
 # (arm64) via debootstrap, the arm64 "virtual" kernel pruned to what a VM
 # needs, Plymouth, Nautilus, Chromium, Tailscale, podman, Python (pip, uv),
-# zsh with the pure prompt, snapper, and the btrfslive initramfs boot script
-# from overlay/. The desktop (GNOME with GDM) comes from
+# zsh with the pure prompt and eza, snapper, Flatpak with Flathub, fonts,
+# apfs-fuse (built by build-apfs-fuse.sh), and the btrfslive initramfs boot
+# script from overlay/. The desktop (GNOME with GDM) comes from
 # scripts/desktop-gnome.sh.
 set -euo pipefail
 
-: "${ROOTFS:?}" "${OVERLAY:?}" "${SUITE:?}" "${MIRROR:?}" "${WORK:?}"
+: "${ROOTFS:?}" "${OVERLAY:?}" "${SUITE:?}" "${MIRROR:?}" "${WORK:?}" "${APFS_FUSE_OUT:?}"
 : "${ISO_LABEL:?}" "${PERSIST_SERIAL:?}"
 : "${LIVE_USER:=ubuntu}" "${LIVE_PASSWORD:=ubuntu}" "${LIVE_HOSTNAME:=ubuntu-live}"
 : "${XKB_LAYOUT:=us}"
@@ -19,6 +20,9 @@ XTRADEB_KEY_FPR=5301FA4FD93244FBC6F6149982BB6851C64F6880
 # suite serves them all.
 TAILSCALE_KEY_FPR=2596A99EAAB33821893C0A79458CA832957F5868
 TAILSCALE_SUITE=resolute
+# Flathub, added as a system Flatpak remote from the vendored
+# scripts/flathub.flatpakrepo (which carries its key).
+FLATHUB_KEY_FPR=6E5C05D979C76DAF93C081354184DD4D907A7CAE
 
 # Tools that are not in the Ubuntu archive, pinned and checked.
 UV_VERSION=0.12.21
@@ -27,6 +31,11 @@ UV_SHA256=030b69227b40af8c1981b7301793dc66e71ed3c796ea8688209dd268bd91ec51
 PURE_VERSION=1.28.3
 PURE_URL="https://github.com/sindresorhus/pure/archive/refs/tags/v$PURE_VERSION.tar.gz"
 PURE_SHA256=738b523c59823083de490b3eb6c1116fc45c342e6b32a7d3cf05fdd0f8aa75a8
+# Hack Nerd Font (Hack with the Nerd Fonts icons, for prompts and eza):
+# in no Ubuntu archive.
+NERD_FONTS_VERSION=3.5.1
+HACK_NERD_URL="https://github.com/ryanoasis/nerd-fonts/releases/download/v$NERD_FONTS_VERSION/Hack.tar.xz"
+HACK_NERD_SHA256=cdd389472e10e2261520140ff1b382b4f8a226af5fd0b2735b975d31151d9c3c
 
 # fetch URL SHA256 DEST: download and verify.
 fetch() {
@@ -174,10 +183,19 @@ packages=(
   ufw tailscale avahi-daemon libnss-mdns
   # containers (rootless needs uidmap, and pasta from passt for networking)
   podman uidmap passt
-  # tools
-  git curl wget
+  # tools (eza: ls with icons, aliased in /etc/skel/.zshrc)
+  git curl wget eza
   # development: Python (pip, venv; uv is installed below), zsh
   python3-pip python3-venv zsh
+  # Flatpak (Flathub is added below; GNOME Software's plugin comes with the
+  # desktop)
+  flatpak
+  # FUSE, for apfs-fuse (installed below; Mac disks, read-only)
+  fuse3
+  # fonts: metric-compatible with Arial/Times/Courier (Liberation) and with
+  # Calibri/Cambria (Carlito/Caladea), so Office documents keep their
+  # layout; JetBrains Mono. Hack Nerd Font is installed below.
+  fonts-liberation fonts-crosextra-carlito fonts-crosextra-caladea fonts-jetbrains-mono
   # btrfs snapshots of / (the @ subvolume)
   snapper
 )
@@ -270,6 +288,43 @@ prompt pure
 EOF
 in_chroot runuser -u "$LIVE_USER" -- zsh -i -c 'prompt -c' | grep -q pure \
   || { echo "pure prompt is not active in zsh" >&2; exit 1; }
+
+echo "==> Hack Nerd Font $NERD_FONTS_VERSION"
+# Only the Mono variant (the terminal's font, see /etc/skel/.config/ghostty):
+# the proportional ones would add ~20 MB.
+fetch "$HACK_NERD_URL" "$HACK_NERD_SHA256" "$dl/hack-nerd.tar.xz"
+fontdir="$ROOTFS/usr/share/fonts/truetype/hack-nerd-font"
+rm -rf "$fontdir" && mkdir -p "$fontdir"
+tar xJf "$dl/hack-nerd.tar.xz" -C "$fontdir" --no-same-owner --wildcards 'HackNerdFontMono-*.ttf'
+chmod 644 "$fontdir"/*.ttf
+tar xJf "$dl/hack-nerd.tar.xz" -O LICENSE.md | install -Dm644 /dev/stdin "$ROOTFS/usr/share/doc/fonts-hack-nerd/copyright"
+in_chroot fc-cache -f
+in_chroot fc-list : family | grep -qx 'Hack Nerd Font Mono' \
+  || { echo "Hack Nerd Font Mono is not installed" >&2; exit 1; }
+# Ghostty's settings for every user (Hack Nerd Font Mono, Catppuccin Mocha).
+in_chroot runuser -u "$LIVE_USER" -- env HOME="/home/$LIVE_USER" ghostty +validate-config \
+  || { echo "/etc/skel/.config/ghostty/config is not valid" >&2; exit 1; }
+
+echo "==> apfs-fuse"
+# Read-only by design (upstream's choice). /usr/sbin/mount.apfs (overlay)
+# lets mount(8), and so udisks2 and Nautilus, mount APFS partitions with it.
+install -m 755 "$APFS_FUSE_OUT/apfs-fuse" "$APFS_FUSE_OUT/apfsutil" "$ROOTFS/usr/local/bin/"
+install -Dm644 "$APFS_FUSE_OUT/LICENSE" "$ROOTFS/usr/local/share/doc/apfs-fuse/copyright"
+install -Dm644 "$APFS_FUSE_OUT/LICENSE.lzfse" "$ROOTFS/usr/local/share/doc/apfs-fuse/copyright.lzfse"
+missing=$(in_chroot ldd /usr/local/bin/apfs-fuse | grep 'not found' || true)
+[[ -z "$missing" ]] || { echo "apfs-fuse lacks libraries: $missing" >&2; exit 1; }
+[[ -x "$ROOTFS/usr/sbin/mount.apfs" ]] || { echo "mount.apfs is missing" >&2; exit 1; }
+
+echo "==> Flathub"
+# A system remote, so GNOME Software lists Flathub's apps too.
+flathub_key="$WORK/flathub.gpg"
+sed -n 's/^GPGKey=//p' "$(dirname "$0")/flathub.flatpakrepo" | base64 -d > "$flathub_key"
+check_key "$flathub_key" "$FLATHUB_KEY_FPR"
+install -m 644 "$(dirname "$0")/flathub.flatpakrepo" "$ROOTFS/tmp/flathub.flatpakrepo"
+in_chroot flatpak remote-add --if-not-exists flathub /tmp/flathub.flatpakrepo
+rm -f "$ROOTFS/tmp/flathub.flatpakrepo"
+in_chroot flatpak remotes --system --columns=name | grep -qx flathub \
+  || { echo "Flathub is not a Flatpak remote" >&2; exit 1; }
 
 echo "==> snapper"
 # Config for / (@). Its snapshots live in /.snapshots, i.e. the @snapshots

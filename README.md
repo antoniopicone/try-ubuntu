@@ -20,10 +20,12 @@ gets QEMU and boots the live session:
 curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh
 ```
 
-Options after `sh -s --` go to [run-qemu.sh](run-qemu.sh):
+Options after `sh -s --` go to [run-qemu.sh](run-qemu.sh), except
+`--rebuild`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh -s -- --lang de_DE --no-persist
+curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh -s -- --rebuild
 ```
 
 - **Which ISO**: the one for the host's CPU, when the release has it. Right
@@ -43,6 +45,13 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
 - **Updates**: running it again boots the same ISO, or downloads the newer
   one when there's a new release. The old persistent disk only works with
   its own ISO, so it's moved aside to `persist-<tag>.qcow2`.
+- **Starting over**: `--rebuild` deletes what the script downloaded and the
+  caches (the ISO, partial downloads, QEMU for Apple Silicon, `run-qemu.sh`,
+  and the kernel `run-qemu.sh` extracts from the ISO for nested
+  virtualization), then downloads them again from the latest release. The
+  persistent disks and the UEFI variables (`efivars.fd`) stay. A persistent
+  disk is still moved aside when the latest release isn't the one it was
+  made with. Homebrew's or the distribution's QEMU isn't touched.
 
 ## Build it
 
@@ -72,10 +81,11 @@ app takes over: it creates your user and logs out to GDM (see
 | Filesystem | btrfs with the subvolumes `@` → `/`, `@home` → `/home`, `@var` → `/var`, `@snapshots` → `/.snapshots` (flat layout, `compress=zstd:1`). **snapper** manages `/`; snapshot #1 is the image as built |
 | Desktop | a minimal **GNOME 51**: Shell, Settings, the vanilla GNOME session, GDM (see [The desktop](#the-desktop)) |
 | Theme | dark style with GNOME's blue accent, Adwaita Sans, Yaru icons, and **one of Ubuntu's stock wallpapers, picked at random at each build** |
-| Apps | **ghostty**, **Nautilus**, **Chromium** (in the desktop's language and light/dark style, with uBlock Origin Lite), GNOME Software, Disks, Resources, Extensions |
+| Apps | **ghostty** (Hack Nerd Font Mono, Catppuccin Mocha), **Nautilus** (with *Open in Ghostty*), **Chromium** (in the desktop's language and light/dark style, with uBlock Origin Lite), GNOME Software (with **Flatpak** and Flathub), Disks, Resources, Extensions |
+| Fonts | Adwaita Sans; Liberation, **Carlito** and **Caladea** (metric-compatible with Arial/Times New Roman/Courier New and Calibri/Cambria, so Office documents keep their layout); JetBrains Mono; **Hack Nerd Font Mono** |
 | Network | NetworkManager (via netplan, as on Ubuntu Desktop) |
 | Services | polkit, UPower, power-profiles-daemon, BlueZ, GeoClue, avahi-daemon (+ nss-mdns), Tailscale, ufw |
-| Tools | podman (rootless: uidmap + passt), git, curl, wget |
+| Tools | podman (rootless: uidmap + passt), git, curl, wget, **eza** (`ls` is `eza --icons=always`), **apfs-fuse** (Mac disks, read-only, also from Nautilus) |
 | Development | Python 3.14 with `pip` and `venv`, **uv** / uvx (0.12, from Astral's releases), **zsh** (the default shell) with the **pure** prompt |
 | Languages | English, plus Italian, Spanish, French, German and Portuguese (Brazil): locales and Ubuntu's `language-pack-*-base` / `language-pack-gnome-*-base` |
 | Excluded | ModemManager, pinned to priority -1 so no dependency can pull it in |
@@ -89,6 +99,7 @@ each keyring's fingerprints and fails if they don't match exactly.
 | Repository | What it provides | Key |
 |---|---|---|
 | Ubuntu `resolute` (main, restricted, universe) | base system | `ubuntu-keyring` |
+| Flathub (a Flatpak remote, [scripts/flathub.flatpakrepo](scripts/flathub.flatpakrepo)) | Flatpak apps, in GNOME Software | `6E5C05D9…4184DD4D907A7CAE` |
 | Ubuntu `stonking` (26.10) sources | GNOME 51, rebuilt for 26.04 (see [The desktop](#the-desktop)) | `ubuntu-keyring` |
 | `ppa:xtradeb/apps` | Chromium as a .deb (Ubuntu only ships it as a snap). Pinned so it provides **only** `chromium*` | `5301FA4F…82BB6851C64F6880` |
 | `pkgs.tailscale.com` | tailscale | `2596A99E…458CA832957F5868` |
@@ -100,6 +111,12 @@ repository:
 - [Limine](https://codeberg.org/Limine/Limine) (`LIMINE_*` in
   build-iso.sh)
 - the GNOME Shell extensions (`EXTENSIONS` in desktop-gnome.sh)
+- [Hack Nerd Font](https://github.com/ryanoasis/nerd-fonts), the Mono
+  variant only (`HACK_NERD_*` in build-rootfs.sh)
+- [apfs-fuse](https://github.com/sgan81/apfs-fuse) and its lzfse
+  submodule, built from source by
+  [scripts/build-apfs-fuse.sh](scripts/build-apfs-fuse.sh) (it has no
+  releases: a pinned commit)
 
 ### Footprint
 
@@ -191,18 +208,20 @@ This means the live session runs on real btrfs, so snapshots,
 1. [scripts/build-gnome.sh](scripts/build-gnome.sh) backports GNOME 51
    (see [The desktop](#the-desktop)). It's cached in the podman volume
    `try-ubuntu-cache`: ~1–2 hours the first time, then skipped.
-2. [scripts/build-rootfs.sh](scripts/build-rootfs.sh) builds the rootfs,
+2. [scripts/build-apfs-fuse.sh](scripts/build-apfs-fuse.sh) builds
+   apfs-fuse, cached the same way (~1 minute).
+3. [scripts/build-rootfs.sh](scripts/build-rootfs.sh) builds the rootfs,
    and sources [scripts/desktop-gnome.sh](scripts/desktop-gnome.sh) for
    GNOME's packages and configuration. It:
    - runs debootstrap
    - adds the extra repositories and installs the packages and the
      [overlay/](overlay/)
-   - sets up Plymouth, ufw, rootless podman, snapper, uv, zsh + pure and
-     the default apps
+   - sets up Plymouth, ufw, rootless podman, snapper, uv, zsh + pure,
+     Hack Nerd Font, apfs-fuse, Flathub and the default apps
    - picks the wallpaper
    - configures GNOME, GDM and the welcome app
    - slims the image down and builds the initramfs
-3. [scripts/build-iso.sh](scripts/build-iso.sh) builds the ISO:
+4. [scripts/build-iso.sh](scripts/build-iso.sh) builds the ISO:
    - lays out the subvolumes and runs `mkfs.btrfs --rootdir --subvol`
    - loop-mounts the image to add snapper snapshot #1 (this is why
      `build.sh` passes the host's `/dev` to the container)
@@ -316,7 +335,7 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
 | Shell | `gnome-shell`, `gnome-session` (the vanilla GNOME session, not Ubuntu's), `gdm3`, `xdg-desktop-portal-gnome`, NetworkManager |
 | Apps | Settings, Nautilus, Chromium, **ghostty** (the default terminal: Ctrl+Alt+T and Nautilus' "Open in Terminal", through `xdg-terminal-exec`), **GNOME Software** (apt, through PackageKit), **Disks** (`gnome-disk-utility`, with udisks2), **Resources**, **Extensions** (`gnome-extensions-app`) |
 | Icons | **Yaru**, and the variant follows the accent color and the style, as on Ubuntu (see below) |
-| Extensions | **Dash to Dock**, set up as Ubuntu's dash: a full-height panel on the left with Files, Chromium, Ghostty and Software, "Show Apps" at the bottom, trash and mounted drives. **Kiwi Menu**, with the Ubuntu logo |
+| Extensions | **Dash to Dock**, set up as Ubuntu's dash: a full-height panel on the left with Files, Chromium, Ghostty and Software, "Show Apps" at the bottom, trash and mounted drives. **Kiwi Menu**, with the Ubuntu logo. **Caffeine** (on from login: no screen blanking or automatic suspend), **Vitals** (average temperature, memory, network speed), **Rounded Corners** (6 px screen corners) |
 | Wallpaper | one of Ubuntu's stock wallpapers (`ubuntu-wallpapers`, which Ubuntu's gnome-shell depends on), picked at random at each build by [pick-wallpaper.py](scripts/pick-wallpaper.py), with its dark variant if it has one. The build log names the pick; the others stay available in Settings › Appearance |
 
 - **First boot and the welcome app**: GDM logs the live user
@@ -387,12 +406,20 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   | slate | `sage` |
 
   The `-dark` suffix is added in dark style.
-- **Extensions from extensions.gnome.org**: both are pinned to their GNOME 51
-  release (`version_tag`), checked with sha256 and installed system-wide.
-  The build fails if one doesn't declare GNOME 51. Their schemas move to
-  the system schema directory, so the gschema override can configure them.
-  Their own `schemas/` folder is removed: GNOME Shell would look for a
-  `gschemas.compiled` there, which the zips no longer ship.
+- **Extensions**: pinned (`EXTENSIONS` in desktop-gnome.sh), checked with
+  sha256 and installed system-wide. The build fails if one doesn't declare
+  GNOME 51. Their schemas move to the system schema directory, so the
+  gschema override can configure them. Their own `schemas/` folder is
+  removed: GNOME Shell would look for a `gschemas.compiled` there, which
+  the zips no longer ship.
+  - Dash to Dock, Kiwi Menu and Vitals: their GNOME 51 release on
+    extensions.gnome.org (`version_tag`)
+  - Caffeine: a commit of its `master`, which supports GNOME 51 while its
+    last release stops at 50. Its translations come as `.po` files and are
+    compiled at build time
+  - Rounded Corners: its last release declares up to GNOME 50. It works
+    unchanged on GNOME 51.0 (tested), so the build adds 51 to its
+    `metadata.json` (`force`)
 - **Autostart**: GNOME 51's gnome-session skips autostart entries that set
   `X-GNOME-Autostart-Phase` (it treats them as session services), so these
   entries don't set it.
@@ -434,7 +461,7 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   - the Yaru icons
   - the enabled extensions
   - the dash favorites (Nautilus, Chromium, Ghostty, Software)
-  - Dash to Dock's and Kiwi Menu's settings
+  - the extensions' settings
   - no welcome tour
 
   AccountsService preselects the `gnome` session.
@@ -487,8 +514,11 @@ git tag v1.0.0 && git push origin v1.0.0
   on other hypervisors or hardware the live session starts in English.
 - No sound drivers, and no firmware for real hardware (Wi-Fi, non-virtio
   GPUs): the image is aimed at VMs.
-- Adwaita Mono isn't packaged for Ubuntu 26.04. ghostty uses its bundled
-  font.
+- apfs-fuse only reads APFS: Mac disks can't be written to.
+- The Microsoft core fonts (Arial, Times New Roman…) aren't included: their
+  license allows redistributing only the original installers. Liberation,
+  Carlito and Caladea take their place with the same metrics; `sudo apt
+  install ttf-mscorefonts-installer` (multiverse) fetches the real ones.
 - The `ubuntu` / `ubuntu` credentials and passwordless sudo are meant for a
   live system. The welcome app locks them once your user exists. Change
   them in `build-rootfs.sh` (`LIVE_USER`, `LIVE_PASSWORD`) before

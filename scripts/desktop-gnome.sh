@@ -1,9 +1,10 @@
 # Desktop part of build-rootfs.sh (sourced): a minimal GNOME 51 with GDM, on
 # NetworkManager, set up like Ubuntu's desktop:
-#   - ghostty as the terminal, GNOME Software, Disks, Resources, Extensions
+#   - ghostty as the terminal ("Open in Ghostty" in Nautilus), GNOME
+#     Software (with Flatpak), Disks, Resources, Extensions
 #   - Yaru icons, their variant following the accent color (yaru-accent-sync)
-#   - Dash to Dock as Ubuntu's dash (a panel on the left) and Kiwi Menu with
-#     the Ubuntu logo, both from extensions.gnome.org
+#   - Dash to Dock as Ubuntu's dash (a panel on the left), Kiwi Menu with
+#     the Ubuntu logo, Caffeine, Vitals and Rounded Corners
 #   - the live user logs in automatically and gets the welcome app
 #     (live-welcome), which creates the real user and logs out to GDM
 #   - English plus a few languages the welcome app offers; the live session
@@ -14,12 +15,19 @@
 : "${GNOME_REPO:?}"
 GNOME_VERSION=51
 
-# GNOME Shell extensions from extensions.gnome.org, pinned to the release
-# for GNOME 51 (version_tag) and checked.
+# GNOME Shell extensions, pinned and checked: a release on
+# extensions.gnome.org (its version_tag), or a source tarball and the
+# extension's directory in it, when GNOME $GNOME_VERSION support isn't
+# released yet. "force" declares GNOME $GNOME_VERSION for an extension that
+# doesn't yet but works with it (tested on GNOME 51.0).
 EXTENSIONS=(
-  # uuid|version_tag|sha256
-  "dash-to-dock@micxgx.gmail.com|75334|eb7647c03cad6dd1ac608da75ffdd2a2b9f8356b65bb468dc523d7ed3d26e5fc"
-  "kiwimenu@kemma|74796|9d1ee3f9fc0280301e6e044b19d90cf89b3c92c037c3d72670264a3596972e8e"
+  # uuid|version_tag or tarball URL|sha256|directory in the tarball|force
+  "dash-to-dock@micxgx.gmail.com|75334|eb7647c03cad6dd1ac608da75ffdd2a2b9f8356b65bb468dc523d7ed3d26e5fc||"
+  "kiwimenu@kemma|74796|9d1ee3f9fc0280301e6e044b19d90cf89b3c92c037c3d72670264a3596972e8e||"
+  "Vitals@CoreCoding.com|74743|899e5ffe27d1793cf13db069d835c11136cec816717e4e450a56f08bcf976b2f||"
+  # master: its last release on extensions.gnome.org stops at GNOME 50
+  "caffeine@patapon.info|https://codeload.github.com/eonpatapon/gnome-shell-extension-caffeine/tar.gz/be18b3558a250d672a7108f01a8dcf55c0935bc6|da4f86642847abda6a156ea81d88659c8f628dec82a01c5d84a1128301b83430|caffeine@patapon.info|"
+  "Rounded_Corners@lennart-k|70231|f10cf2ee9f621e13f720e987c295a6edd78db8297f560e43cc46d64883a55856||force"
 )
 
 # Languages the welcome app offers: English plus these (translations come
@@ -36,6 +44,10 @@ DESKTOP_PACKAGES=(
   # software center (PackageKit/apt), disks, system monitor, extensions
   ghostty xdg-terminal-exec gnome-software gnome-disk-utility udisks2
   resources gnome-extensions-app
+  # Nautilus's Python extensions: ghostty ships one ("Open in Ghostty")
+  python3-nautilus
+  # Flatpak apps (Flathub) in GNOME Software
+  gnome-software-plugin-flatpak
   # Ubuntu's Yaru icons (every accent variant)
   yaru-theme-icon
   # GNOME's network menu and Settings talk to NetworkManager (through
@@ -61,7 +73,7 @@ desktop_repos() {
 }
 
 desktop_install() {
-  local v entry uuid tag sha dir pak keep lang
+  local v entry uuid src sha subdir force dir pak keep lang tmp po domain
   for p in gnome-shell mutter-common gdm3 gnome-session-bin gnome-settings-daemon \
            gnome-control-center nautilus xdg-desktop-portal-gnome gnome-extensions-app; do
     v=$(in_chroot dpkg-query -W -f '${Version}' "$p")
@@ -73,6 +85,7 @@ desktop_install() {
   rm -f "$ROOTFS/etc/apt/sources.list.d/gnome-backports.list"
   for f in /usr/share/wayland-sessions/gnome.desktop \
            /usr/share/applications/com.mitchellh.ghostty.desktop \
+           /usr/share/nautilus-python/extensions/ghostty.py \
            /usr/share/applications/org.gnome.Software.desktop \
            /usr/share/icons/Yaru-blue-dark/index.theme; do
     [[ -e "$ROOTFS$f" ]] || { echo "$f is missing" >&2; exit 1; }
@@ -94,13 +107,43 @@ desktop_install() {
   echo "==> GNOME Shell extensions"
   mkdir -p "$WORK/downloads"
   for entry in "${EXTENSIONS[@]}"; do
-    IFS='|' read -r uuid tag sha <<<"$entry"
-    fetch "https://extensions.gnome.org/download-extension/$uuid.shell-extension.zip?version_tag=$tag" \
-      "$sha" "$WORK/downloads/$uuid.zip"
+    IFS='|' read -r uuid src sha subdir force <<<"$entry"
     dir="$ROOTFS/usr/share/gnome-shell/extensions/$uuid"
     rm -rf "$dir" && mkdir -p "$dir"
-    python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
-      "$WORK/downloads/$uuid.zip" "$dir"
+    if [[ "$src" =~ ^[0-9]+$ ]]; then
+      fetch "https://extensions.gnome.org/download-extension/$uuid.shell-extension.zip?version_tag=$src" \
+        "$sha" "$WORK/downloads/$uuid.zip"
+      python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
+        "$WORK/downloads/$uuid.zip" "$dir"
+    else
+      fetch "$src" "$sha" "$WORK/downloads/$uuid.tar.gz"
+      tmp=$(mktemp -d)
+      tar xzf "$WORK/downloads/$uuid.tar.gz" -C "$tmp" --strip-components=1 --no-same-owner
+      cp -r "$tmp/$subdir/." "$dir/"
+      rm -rf "$tmp"
+    fi
+    # Source trees carry their translations as .po (extensions.gnome.org's
+    # zips have them compiled): locale/<lang>.po -> locale/<lang>/LC_MESSAGES.
+    for po in "$dir"/locale/*.po; do
+      [[ -e "$po" ]] || break
+      command -v msgfmt >/dev/null || apt-get install -y -qq --no-install-recommends gettext >/dev/null
+      domain=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["gettext-domain"])' \
+        "$dir/metadata.json")
+      lang=$(basename "$po" .po)
+      mkdir -p "$dir/locale/$lang/LC_MESSAGES"
+      msgfmt -o "$dir/locale/$lang/LC_MESSAGES/$domain.mo" "$po"
+      rm -f "$po"
+    done
+    if [[ "$force" == force ]]; then
+      python3 -c '
+import json, sys
+path, version = sys.argv[1:]
+meta = json.load(open(path))
+if version not in meta["shell-version"]:
+    meta["shell-version"].append(version)
+json.dump(meta, open(path, "w"), indent=2)
+' "$dir/metadata.json" "$GNOME_VERSION"
+    fi
     grep -q "\"$GNOME_VERSION\"" "$dir/metadata.json" \
       || { echo "$uuid does not support GNOME $GNOME_VERSION" >&2; exit 1; }
     # The schema goes into the system directory, compiled with the others,
@@ -176,7 +219,7 @@ picture-uri='file://$WALLPAPER'
 icon-theme='Yaru-blue-dark'
 
 [org.gnome.shell]
-enabled-extensions=['dash-to-dock@micxgx.gmail.com', 'kiwimenu@kemma']
+enabled-extensions=['dash-to-dock@micxgx.gmail.com', 'kiwimenu@kemma', 'caffeine@patapon.info', 'Vitals@CoreCoding.com', 'Rounded_Corners@lennart-k']
 favorite-apps=['org.gnome.Nautilus.desktop', '$browser_desktop', 'com.mitchellh.ghostty.desktop', 'org.gnome.Software.desktop']
 welcome-dialog-last-shown-version='999'
 
@@ -201,6 +244,32 @@ disable-overview-on-startup=true
 # Kiwi Menu with the Ubuntu logo (icon 8 in its src/icons.json).
 [org.gnome.shell.extensions.kiwimenu]
 icon=8
+
+# Caffeine: on from login (no screen blanking or automatic suspend).
+[org.gnome.shell.extensions.caffeine]
+cli-toggle=false
+indicator-position-max=2
+user-enabled=true
+
+[org.gnome.shell.extensions.lennart-k.rounded_corners]
+corner-radius=6
+
+# Vitals: the average temperature in the top bar, memory, network speed in
+# bits.
+[org.gnome.shell.extensions.vitals]
+alphabetize=false
+battery-colors=@as []
+fan-colors=['2500 0.8784313797950745 0.10588235408067703 0.1411764770746231 sensor:_fan_asus_cpu_fan_']
+fixed-widths=false
+gpu-colors=@as []
+hot-sensors=['__temperature_avg__']
+icon-style=1
+memory-colors=@as []
+network-public-ip-show-flag=false
+network-speed-unit=2
+processor-colors=@as []
+show-memory=true
+use-higher-precision=true
 EOF
 
   # Chromium: light or dark as GNOME is ("Device" mode, which reads it from
