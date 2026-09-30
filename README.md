@@ -461,8 +461,11 @@ git tag v1.0.0 && git push origin v1.0.0
   (`ubuntu-24.04-arm`), with rootful podman, since the ISO step needs loop
   devices.
 - The GNOME 51 backport (`/cache/gnome-repo`) is kept in the Actions cache.
-  Only the first build, or one after a change to `build-gnome.sh`, its
-  patches or the `Containerfile`, takes hours.
+  Only the first build takes hours: later ones rebuild just the packages
+  that changed (a new 26.10 version, different local patches, one added to
+  `build-gnome.sh`). To rebuild everything, e.g. after changing the
+  `Containerfile` or the build flags, delete the `gnome-repo-*` caches
+  (Actions → Caches).
 - It builds `qemu-macos-arm64.tar.gz` with `./qemu/build.sh` on a
   `macos-15` runner, caching the downloads.
 - It publishes a release with `ubuntu-live-arm64.iso`,

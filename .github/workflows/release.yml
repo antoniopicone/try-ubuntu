@@ -40,15 +40,21 @@ jobs:
           sudo apt-get install -y -qq podman
 
       # The backported .debs (build-gnome.sh skips a package whose build is
-      # already in the repository). The key changes with the build script,
-      # the patches and the builder image, so a change there starts over.
+      # already in the repository: same source version, same local patches).
+      # The latest cache with the same patches and builder image comes first,
+      # else the latest one at all: the stamps already rebuild a package whose
+      # 26.10 version or local patches changed, and build-gnome.sh builds the
+      # packages it adds. To start over (a new builder image, other build
+      # flags), delete the gnome-repo-* caches in Actions.
       - name: Restore the GNOME 51 backport
         id: gnome-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/gnome-repo
-          key: gnome-repo-${{ matrix.arch }}-${{ hashFiles('scripts/build-gnome.sh', 'patches/gnome/**', 'Containerfile') }}-${{ github.run_id }}
-          restore-keys: gnome-repo-${{ matrix.arch }}-${{ hashFiles('scripts/build-gnome.sh', 'patches/gnome/**', 'Containerfile') }}-
+          key: gnome-repo-${{ matrix.arch }}-${{ hashFiles('patches/gnome/**', 'Containerfile') }}-${{ github.run_id }}
+          restore-keys: |
+            gnome-repo-${{ matrix.arch }}-${{ hashFiles('patches/gnome/**', 'Containerfile') }}-
+            gnome-repo-${{ matrix.arch }}-
 
       - name: Seed the build cache
         if: steps.gnome-cache.outputs.cache-matched-key != ''
@@ -77,7 +83,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/gnome-repo
-          key: gnome-repo-${{ matrix.arch }}-${{ hashFiles('scripts/build-gnome.sh', 'patches/gnome/**', 'Containerfile') }}-${{ github.run_id }}
+          key: gnome-repo-${{ matrix.arch }}-${{ hashFiles('patches/gnome/**', 'Containerfile') }}-${{ github.run_id }}
 
       - name: Checksum
         run: |

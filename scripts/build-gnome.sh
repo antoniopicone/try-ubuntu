@@ -59,8 +59,11 @@ EOF
 mkdir -p "$GNOME_REPO"
 repo_list=/etc/apt/sources.list.d/gnome-backports.list
 echo "deb [trusted=yes] file:$GNOME_REPO ./" > "$repo_list"
+# A Release file lists the indexes that exist: without one, apt probes
+# Packages.{gz,xz,...} and warns about each one that's missing.
 refresh_repo() {
-  (cd "$GNOME_REPO" && apt-ftparchive packages . > Packages)
+  (cd "$GNOME_REPO" && apt-ftparchive packages . > Packages &&
+     gzip -9nkf Packages && apt-ftparchive release . > Release)
   apt-get update -qq -o Dir::Etc::SourceList="$repo_list" -o Dir::Etc::SourceParts=- \
     -o APT::Get::List-Cleanup=0
 }
@@ -85,6 +88,9 @@ for src in "${BACKPORTS[@]}"; do
   echo "==> Backporting $src $ver"
   work="$CACHE_DIR/gnome-build/$src"
   rm -rf "$work" && mkdir -p "$work"
+  # apt downloads as _apt: it must be able to write there, or it falls back
+  # to root with a warning.
+  chown _apt "$work"
   (cd "$work" && apt-get source -qq --only-source "$src=$ver")
   dir=$(find "$work" -mindepth 1 -maxdepth 1 -type d)
   {
