@@ -1,0 +1,610 @@
+#!/usr/bin/python3
+"""live-welcome: the first-run welcome app of the GNOME live system (draft).
+
+Starts in the live user's session (autologin) and walks through language,
+keyboard layout, the account (full name, username, password, email) and the
+appearance (light/dark, accent color). The summary's "Start using Ubuntu"
+button hands the choices to /usr/local/lib/live-welcome/setup-user (through
+pkexec), which creates the user; then the live session logs out to GDM,
+where the new user logs in with everything already applied.
+
+Keyboard layout and appearance are previewed live in the running session.
+The UI speaks English and Italian (switching as soon as a language is
+picked); other languages fall back to English for now.
+"""
+import json
+import os
+import re
+import sys
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+
+APP_ID = "org.ubuntu.LiveWelcome"
+SETUP_HELPER = "/usr/local/lib/live-welcome/setup-user"
+DONE = "/var/lib/live-welcome/done"
+STORAGE = "/run/btrfslive/storage"
+
+# code, native name, locale, default keyboard layout
+LANGUAGES = [
+    ("en", "English", "en_US.UTF-8", "us"),
+    ("it", "Italiano", "it_IT.UTF-8", "it"),
+    ("es", "Español", "es_ES.UTF-8", "es"),
+    ("fr", "Français", "fr_FR.UTF-8", "fr"),
+    ("de", "Deutsch", "de_DE.UTF-8", "de"),
+    ("pt", "Português (Brasil)", "pt_BR.UTF-8", "br"),
+]
+# xkb layout[:variant], name
+LAYOUTS = [
+    ("us", "English (US)"),
+    ("us:intl", "English (US, international)"),
+    ("gb", "English (UK)"),
+    ("it", "Italiano"),
+    ("es", "Español"),
+    ("fr", "Français"),
+    ("de", "Deutsch"),
+    ("ch", "Deutsch (Schweiz)"),
+    ("pt", "Português"),
+    ("br", "Português (Brasil)"),
+]
+# GNOME's accent colors (org.gnome.desktop.interface accent-color)
+ACCENTS = [
+    ("blue", "#3584e4"), ("teal", "#2190a4"), ("green", "#3a944a"),
+    ("yellow", "#c88800"), ("orange", "#ed5b00"), ("red", "#e62d42"),
+    ("pink", "#d56199"), ("purple", "#9141ac"), ("slate", "#6f8396"),
+]
+
+STRINGS = {
+    "en": {
+        "title": "Welcome to Ubuntu",
+        "welcome_title": "Welcome to Ubuntu",
+        "welcome_body": "Let's set up your computer: it only takes a minute.",
+        "start": "Get Started",
+        "continue": "Continue",
+        "no_persist": "Nothing will be saved: this live system is running in RAM only.",
+        "language_title": "Language",
+        "language_body": "Choose the language of your system.",
+        "keyboard_title": "Keyboard Layout",
+        "keyboard_body": "Choose the layout of your keyboard.",
+        "keyboard_test": "Type here to test your keyboard",
+        "account_title": "About You",
+        "account_body": "This is the account you will use on this computer.",
+        "fullname": "Full name",
+        "username": "Username",
+        "password": "Password",
+        "password2": "Confirm password",
+        "email": "Email (used by git and other services)",
+        "err_fullname": "Enter your full name.",
+        "err_username": "Username: lowercase letters, digits, '-' and '_', starting with a letter.",
+        "err_username_taken": "This username is already taken.",
+        "err_password": "The password must be at least 6 characters long.",
+        "err_password2": "The passwords do not match.",
+        "err_email": "Enter a valid email address.",
+        "appearance_title": "Appearance",
+        "appearance_body": "Choose the style and the accent color.",
+        "style": "Style",
+        "light": "Light",
+        "dark": "Dark",
+        "accent": "Accent color",
+        "summary_title": "Ready to Go",
+        "summary_body": "Check your choices. You can change them later in Settings.",
+        "row_name": "Name",
+        "row_username": "Username",
+        "row_email": "Email",
+        "row_language": "Language",
+        "row_keyboard": "Keyboard",
+        "row_theme": "Theme",
+        "finish": "Start Using Ubuntu",
+        "working_title": "Setting Up Your Account",
+        "working_body": "Just a moment…",
+        "done_title": "All Set",
+        "done_body": "Logging out: log in as {user} with your new password.",
+        "error_title": "Something Went Wrong",
+        "retry": "Try Again",
+        "blue": "Blue", "teal": "Teal", "green": "Green", "yellow": "Yellow",
+        "orange": "Orange", "red": "Red", "pink": "Pink", "purple": "Purple",
+        "slate": "Slate",
+    },
+    "it": {
+        "title": "Benvenuto in Ubuntu",
+        "welcome_title": "Benvenuto in Ubuntu",
+        "welcome_body": "Configuriamo il tuo computer: ci vuole solo un minuto.",
+        "start": "Iniziamo",
+        "continue": "Continua",
+        "no_persist": "Non verrà salvato nulla: questo sistema live sta funzionando solo in RAM.",
+        "language_title": "Lingua",
+        "language_body": "Scegli la lingua del sistema.",
+        "keyboard_title": "Layout della tastiera",
+        "keyboard_body": "Scegli il layout della tua tastiera.",
+        "keyboard_test": "Scrivi qui per provare la tastiera",
+        "account_title": "Chi sei",
+        "account_body": "Questo è l'account che userai su questo computer.",
+        "fullname": "Nome e cognome",
+        "username": "Nome utente",
+        "password": "Password",
+        "password2": "Conferma la password",
+        "email": "Email (per git e altri servizi)",
+        "err_fullname": "Inserisci nome e cognome.",
+        "err_username": "Nome utente: lettere minuscole, cifre, '-' e '_', a partire da una lettera.",
+        "err_username_taken": "Questo nome utente è già in uso.",
+        "err_password": "La password deve essere lunga almeno 6 caratteri.",
+        "err_password2": "Le password non coincidono.",
+        "err_email": "Inserisci un indirizzo email valido.",
+        "appearance_title": "Aspetto",
+        "appearance_body": "Scegli lo stile e il colore di accento.",
+        "style": "Stile",
+        "light": "Chiaro",
+        "dark": "Scuro",
+        "accent": "Colore di accento",
+        "summary_title": "Tutto pronto",
+        "summary_body": "Controlla le tue scelte: potrai cambiarle in seguito dalle Impostazioni.",
+        "row_name": "Nome",
+        "row_username": "Nome utente",
+        "row_email": "Email",
+        "row_language": "Lingua",
+        "row_keyboard": "Tastiera",
+        "row_theme": "Tema",
+        "finish": "Inizia ad usare Ubuntu",
+        "working_title": "Creazione dell'account",
+        "working_body": "Solo un momento…",
+        "done_title": "Fatto",
+        "done_body": "Uscita in corso: accedi come {user} con la nuova password.",
+        "error_title": "Qualcosa è andato storto",
+        "retry": "Riprova",
+        "blue": "Blu", "teal": "Verde acqua", "green": "Verde", "yellow": "Giallo",
+        "orange": "Arancione", "red": "Rosso", "pink": "Rosa", "purple": "Viola",
+        "slate": "Ardesia",
+    },
+}
+
+CSS = """
+.accent-button { min-width: 34px; min-height: 34px; padding: 0; border-radius: 9999px; }
+.accent-button:checked { outline: 3px solid alpha(@window_fg_color, 0.8); outline-offset: 3px; }
+.style-button { padding: 18px 28px; }
+""" + "".join(f".accent-{name} {{ background: {color}; }}\n" for name, color in ACCENTS)
+
+
+def username_from(fullname):
+    """First word of the name, lowercased and reduced to valid characters."""
+    first = fullname.strip().split(" ")[0] if fullname.strip() else ""
+    name = re.sub(r"[^a-z0-9_-]", "", first.lower()
+                  .translate(str.maketrans("àáâäèéêëìíîïòóôöùúûüçñ", "aaaaeeeeiiiioooouuuucn")))
+    return name if re.match(r"[a-z]", name or "") else ""
+
+
+def user_exists(name):
+    try:
+        import pwd
+        pwd.getpwnam(name)
+        return True
+    except KeyError:
+        return False
+
+
+class WelcomeWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, default_width=760, default_height=640)
+        self.interface = Gio.Settings.new("org.gnome.desktop.interface")
+        self.inputs = Gio.Settings.new("org.gnome.desktop.input-sources")
+        self.lang = self._initial_language()
+        self.layout = dict((l[0], l[3]) for l in LANGUAGES)[self.lang]
+        self.color_scheme = self.interface.get_string("color-scheme")
+        if self.color_scheme not in ("default", "prefer-dark"):
+            self.color_scheme = "default"
+        self.accent = self.interface.get_string("accent-color")
+        self._translatable = []  # (setter, key)
+        self._username_edited = False
+
+        provider = Gtk.CssProvider()
+        provider.load_from_string(CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
+                               vexpand=True)
+        self.pages = [
+            ("welcome", self._page_welcome()),
+            ("language", self._page_language()),
+            ("keyboard", self._page_keyboard()),
+            ("account", self._page_account()),
+            ("appearance", self._page_appearance()),
+            ("summary", self._page_summary()),
+            ("finish", self._page_finish()),
+        ]
+        for name, widget in self.pages:
+            self.stack.add_named(widget, name)
+
+        self.back = Gtk.Button(icon_name="go-previous-symbolic")
+        self.back.connect("clicked", lambda *_: self._go(-1))
+        header = Adw.HeaderBar()
+        header.pack_start(self.back)
+        self.window_title = Adw.WindowTitle()
+        header.set_title_widget(self.window_title)
+
+        self.next = Gtk.Button(halign=Gtk.Align.CENTER, margin_top=12, margin_bottom=18)
+        self.next.add_css_class("suggested-action")
+        self.next.add_css_class("pill")
+        self.next.connect("clicked", self._on_next)
+        # Enter anywhere (text fields included) means "Continue".
+        self.set_default_widget(self.next)
+
+        banner = Adw.Banner(revealed=self._storage() == "ram")
+        self._tr(banner.set_title, "no_persist")
+
+        view = Adw.ToolbarView()
+        view.add_top_bar(header)
+        view.add_top_bar(banner)
+        view.set_content(self.stack)
+        view.add_bottom_bar(self.next)
+        self.set_content(view)
+
+        self.set_icon_name("start-here")
+        self._apply_layout()
+        self._retranslate()
+        self._update()
+        GLib.idle_add(self.next.grab_focus)
+
+    # --- helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _initial_language():
+        # The session's language: the host's, when run-qemu.sh passed one
+        # the image has (live-locale). In English, the live image's keyboard
+        # layout (build.sh --xkb) hints the language instead.
+        lang = os.environ.get("LANG", "")[:2]
+        if lang != "en" and any(l[0] == lang for l in LANGUAGES):
+            return lang
+        try:
+            layout = re.search(r'XKBLAYOUT="?([a-z]+)', open("/etc/default/keyboard").read())[1]
+        except (OSError, TypeError):
+            layout = "us"
+        return next((l[0] for l in LANGUAGES if l[3] == layout), "en")
+
+    @staticmethod
+    def _storage():
+        try:
+            return open(STORAGE).read().strip()
+        except OSError:
+            return "unknown"
+
+    def t(self, key):
+        return STRINGS.get(self.lang, STRINGS["en"]).get(key) or STRINGS["en"][key]
+
+    def _tr(self, setter, key):
+        self._translatable.append((setter, key))
+
+    def _retranslate(self):
+        for setter, key in self._translatable:
+            setter(self.t(key))
+        self.set_title(self.t("title"))
+        self._update()
+
+    @staticmethod
+    def _page(child):
+        clamp = Adw.Clamp(maximum_size=560, child=child, margin_top=24, margin_bottom=24,
+                          margin_start=12, margin_end=12)
+        return Gtk.ScrolledWindow(child=clamp, hscrollbar_policy=Gtk.PolicyType.NEVER)
+
+    def _group(self, title_key, body_key):
+        group = Adw.PreferencesGroup()
+        self._tr(group.set_title, title_key)
+        self._tr(group.set_description, body_key)
+        return group
+
+    def _radio_rows(self, group, items, current, on_select):
+        """Rows of mutually exclusive check buttons; returns {value: check}."""
+        checks, first = {}, None
+        for value, label in items:
+            check = Gtk.CheckButton(active=value == current)
+            if first:
+                check.set_group(first)
+            first = first or check
+            row = Adw.ActionRow(title=label, activatable_widget=check)
+            row.add_prefix(check)
+            check.connect("toggled", lambda c, v=value: c.get_active() and on_select(v))
+            group.add(row)
+            checks[value] = check
+        return checks
+
+    # --- pages ---------------------------------------------------------------
+
+    def _page_welcome(self):
+        # Yaru's start-here is the Ubuntu logo.
+        status = Adw.StatusPage(vexpand=True, icon_name="start-here")
+        self._tr(status.set_title, "welcome_title")
+        self._tr(status.set_description, "welcome_body")
+        return status
+
+    def _page_language(self):
+        group = self._group("language_title", "language_body")
+        self.language_checks = self._radio_rows(
+            group, [(l[0], l[1]) for l in LANGUAGES], self.lang, self._on_language)
+        return self._page(group)
+
+    def _page_keyboard(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        group = self._group("keyboard_title", "keyboard_body")
+        self.layout_checks = self._radio_rows(group, LAYOUTS, self.layout, self._on_layout)
+        test = Adw.PreferencesGroup()
+        entry = Adw.EntryRow()
+        self._tr(entry.set_title, "keyboard_test")
+        test.add(entry)
+        box.append(test)
+        box.append(group)
+        return self._page(box)
+
+    def _page_account(self):
+        group = self._group("account_title", "account_body")
+        self.fullname = Adw.EntryRow()
+        self.username = Adw.EntryRow()
+        self.password = Adw.PasswordEntryRow()
+        self.password2 = Adw.PasswordEntryRow()
+        self.email = Adw.EntryRow(input_purpose=Gtk.InputPurpose.EMAIL)
+        for row, key in ((self.fullname, "fullname"), (self.username, "username"),
+                         (self.password, "password"), (self.password2, "password2"),
+                         (self.email, "email")):
+            self._tr(row.set_title, key)
+            row.set_activates_default(True)
+            group.add(row)
+            row.connect("changed", self._on_account_changed)
+        self.username.connect("changed", self._on_username_edited)
+        self.account_error = Gtk.Label(wrap=True, xalign=0, margin_top=12)
+        self.account_error.add_css_class("error")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(group)
+        box.append(self.account_error)
+        return self._page(box)
+
+    def _page_appearance(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        style = self._group("style", "appearance_body")
+        buttons = Gtk.Box(spacing=12, halign=Gtk.Align.CENTER, margin_top=6)
+        self.style_buttons = {}
+        first = None
+        for scheme, icon, key in (("default", "weather-clear-symbolic", "light"),
+                                  ("prefer-dark", "weather-clear-night-symbolic", "dark")):
+            content = Adw.ButtonContent(icon_name=icon)
+            self._tr(content.set_label, key)
+            button = Gtk.ToggleButton(child=content, active=scheme == self.color_scheme)
+            button.add_css_class("style-button")
+            if first:
+                button.set_group(first)
+            first = first or button
+            button.connect("toggled", lambda b, s=scheme: b.get_active() and self._on_scheme(s))
+            buttons.append(button)
+            self.style_buttons[scheme] = button
+        style.add(buttons)
+
+        accent = Adw.PreferencesGroup()
+        self._tr(accent.set_title, "accent")
+        colors = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=9,
+                             min_children_per_line=5, column_spacing=12, row_spacing=12,
+                             halign=Gtk.Align.CENTER, margin_top=6)
+        first = None
+        for name, _ in ACCENTS:
+            button = Gtk.ToggleButton(active=name == self.accent)
+            button.add_css_class("accent-button")
+            button.add_css_class(f"accent-{name}")
+            self._tr(button.set_tooltip_text, name)
+            if first:
+                button.set_group(first)
+            first = first or button
+            button.connect("toggled", lambda b, n=name: b.get_active() and self._on_accent(n))
+            colors.append(button)
+        accent.add(colors)
+        box.append(style)
+        box.append(accent)
+        return self._page(box)
+
+    def _page_summary(self):
+        group = self._group("summary_title", "summary_body")
+        self.summary_rows = {}
+        for key in ("row_name", "row_username", "row_email", "row_language",
+                    "row_keyboard", "row_theme"):
+            row = Adw.ActionRow(subtitle_selectable=True)
+            row.add_css_class("property")
+            self._tr(row.set_title, key)
+            group.add(row)
+            self.summary_rows[key] = row
+        return self._page(group)
+
+    def _page_finish(self):
+        self.finish_status = Adw.StatusPage(vexpand=True)
+        self.spinner = Adw.Spinner(width_request=48, height_request=48)
+        self.retry = Gtk.Button(halign=Gtk.Align.CENTER, visible=False)
+        self.retry.add_css_class("pill")
+        self._tr(self.retry.set_label, "retry")
+        self.retry.connect("clicked", lambda *_: self._show("summary"))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        box.append(self.spinner)
+        box.append(self.retry)
+        self.finish_status.set_child(box)
+        return self.finish_status
+
+    # --- navigation ----------------------------------------------------------
+
+    def _index(self):
+        name = self.stack.get_visible_child_name()
+        return [n for n, _ in self.pages].index(name)
+
+    def _show(self, name):
+        self.stack.set_visible_child_name(name)
+        self._update()
+        # Keyboard users: type straight into the form, or press Enter to go on.
+        (self.fullname if name == "account" else self.next).grab_focus()
+
+    def _go(self, step):
+        index = min(max(self._index() + step, 0), len(self.pages) - 2)
+        self._show(self.pages[index][0])
+
+    def _update(self):
+        name = self.stack.get_visible_child_name() or "welcome"
+        titles = {"welcome": "title", "language": "language_title",
+                  "keyboard": "keyboard_title", "account": "account_title",
+                  "appearance": "appearance_title", "summary": "summary_title",
+                  "finish": "working_title"}
+        self.window_title.set_title(self.t(titles[name]))
+        self.back.set_visible(name not in ("welcome", "finish"))
+        self.next.set_visible(name != "finish")
+        self.next.set_label(self.t({"welcome": "start", "summary": "finish"}.get(name, "continue")))
+        self.next.set_sensitive(name != "account" or self._account_error() is None)
+        if name == "account":
+            error = self._account_error(show_all=False)
+            self.account_error.set_label(self.t(error) if error else "")
+        if name == "summary":
+            self._fill_summary()
+
+    def _on_next(self, *_):
+        if self.stack.get_visible_child_name() == "summary":
+            self._finish()
+        else:
+            self._go(1)
+
+    # --- choices -------------------------------------------------------------
+
+    def _on_language(self, code):
+        self.lang = code
+        layout = dict((l[0], l[3]) for l in LANGUAGES)[code]
+        if layout in self.layout_checks:
+            self.layout_checks[layout].set_active(True)
+        self._retranslate()
+
+    def _on_layout(self, layout):
+        self.layout = layout
+        self._apply_layout()
+
+    def _apply_layout(self):
+        # Live preview: the live session switches to the chosen layout.
+        name, _, variant = self.layout.partition(":")
+        source = f"{name}+{variant}" if variant else name
+        self.inputs.set_value("sources", GLib.Variant("a(ss)", [("xkb", source)]))
+
+    def _on_scheme(self, scheme):
+        self.color_scheme = scheme
+        self.interface.set_string("color-scheme", scheme)
+
+    def _on_accent(self, accent):
+        self.accent = accent
+        self.interface.set_string("accent-color", accent)
+
+    def _on_username_edited(self, row):
+        if row.get_text() != username_from(self.fullname.get_text()):
+            self._username_edited = True
+
+    def _on_account_changed(self, row):
+        if row is self.fullname and not self._username_edited:
+            self.username.handler_block_by_func(self._on_username_edited)
+            self.username.set_text(username_from(row.get_text()))
+            self.username.handler_unblock_by_func(self._on_username_edited)
+        self._update()
+
+    def _account_error(self, show_all=True):
+        """The first problem with the account fields (a string key), or None.
+        With show_all=False, fields still empty are not reported yet."""
+        fullname = self.fullname.get_text().strip()
+        username = self.username.get_text()
+        password, password2 = self.password.get_text(), self.password2.get_text()
+        email = self.email.get_text().strip()
+        checks = [
+            (fullname, not fullname or re.search(r"[:,]", fullname), "err_fullname"),
+            (username, not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", username), "err_username"),
+            (username, user_exists(username), "err_username_taken"),
+            (password, len(password) < 6, "err_password"),
+            (password2, password != password2, "err_password2"),
+            (email, not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email), "err_email"),
+        ]
+        for value, bad, key in checks:
+            if bad and (show_all or value):
+                return key
+        return None
+
+    def _choices(self):
+        return {
+            "fullname": self.fullname.get_text().strip(),
+            "username": self.username.get_text(),
+            "password": self.password.get_text(),
+            "email": self.email.get_text().strip(),
+            "locale": dict((l[0], l[2]) for l in LANGUAGES)[self.lang],
+            "layout": self.layout,
+            "color_scheme": self.color_scheme,
+            "accent": self.accent,
+        }
+
+    def _fill_summary(self):
+        c = self._choices()
+        values = {
+            "row_name": c["fullname"],
+            "row_username": c["username"],
+            "row_email": c["email"],
+            "row_language": dict((l[0], l[1]) for l in LANGUAGES)[self.lang],
+            "row_keyboard": dict(LAYOUTS)[self.layout],
+            "row_theme": f"{self.t('dark' if self.color_scheme == 'prefer-dark' else 'light')}, "
+                         f"{self.t(self.accent)}",
+        }
+        for key, row in self.summary_rows.items():
+            row.set_subtitle(GLib.markup_escape_text(values[key]))
+
+    # --- finish --------------------------------------------------------------
+
+    def _finish(self):
+        self._show("finish")
+        self.finish_status.set_title(self.t("working_title"))
+        self.finish_status.set_description(self.t("working_body"))
+        self.spinner.set_visible(True)
+        self.retry.set_visible(False)
+        try:
+            proc = Gio.Subprocess.new(
+                ["pkexec", SETUP_HELPER],
+                Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
+                | Gio.SubprocessFlags.STDERR_MERGE)
+        except GLib.Error as e:
+            self._setup_failed(e.message)
+            return
+        proc.communicate_utf8_async(json.dumps(self._choices()), None, self._on_setup_done)
+
+    def _setup_failed(self, message):
+        self.spinner.set_visible(False)
+        self.finish_status.set_title(self.t("error_title"))
+        self.finish_status.set_description(GLib.markup_escape_text(message or "setup-user failed"))
+        self.retry.set_visible(True)
+        self.retry.grab_focus()
+
+    def _on_setup_done(self, proc, result):
+        try:
+            _, out, _ = proc.communicate_utf8_finish(result)
+            reply = json.loads((out or "").strip().splitlines()[-1])
+        except (GLib.Error, ValueError, IndexError) as e:
+            reply = {"ok": False, "error": getattr(e, "message", None) or str(e)}
+        if not reply.get("ok"):
+            self._setup_failed(reply.get("error", ""))
+            return
+        self.spinner.set_visible(False)
+        self.finish_status.set_icon_name("emblem-ok-symbolic")
+        self.finish_status.set_title(self.t("done_title"))
+        self.finish_status.set_description(
+            GLib.markup_escape_text(self.t("done_body").format(user=reply["user"])))
+        GLib.timeout_add_seconds(3, self._logout)
+
+    def _logout(self):
+        Gio.Subprocess.new(["gnome-session-quit", "--logout", "--no-prompt"],
+                           Gio.SubprocessFlags.NONE)
+        return GLib.SOURCE_REMOVE
+
+
+class WelcomeApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID)
+
+    def do_activate(self):
+        window = self.get_active_window() or WelcomeWindow(self)
+        window.present()
+
+
+if __name__ == "__main__":
+    # Once the real user exists there is nothing left to do.
+    if os.path.exists(DONE):
+        sys.exit(0)
+    sys.exit(WelcomeApp().run(sys.argv))

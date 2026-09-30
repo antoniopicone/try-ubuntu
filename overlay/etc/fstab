@@ -1,0 +1,8 @@
+# Live system: the btrfs subvolumes @ (/), @home, @var and @snapshots are
+# mounted by the initramfs (scripts/btrfslive), because the filesystem UUID
+# changes at every boot. On an installed system they would be listed here:
+#   UUID=<fs>  /           btrfs  noatime,compress=zstd:1,subvol=@          0 0
+#   UUID=<fs>  /home       btrfs  noatime,compress=zstd:1,subvol=@home      0 0
+#   UUID=<fs>  /var        btrfs  noatime,compress=zstd:1,subvol=@var       0 0
+#   UUID=<fs>  /.snapshots btrfs  noatime,compress=zstd:1,subvol=@snapshots 0 0
+tmpfs  /tmp  tmpfs  defaults,nosuid,nodev  0 0

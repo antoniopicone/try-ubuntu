@@ -1,0 +1,15 @@
+[Unit]
+Description=Live session in the host's language
+Documentation=file:/usr/local/sbin/live-locale
+# Only while the live user is still the one that logs in: the welcome app
+# sets the real user's language for good.
+ConditionPathExists=!/var/lib/live-welcome/done
+After=local-fs.target systemd-modules-load.service
+Before=accounts-daemon.service display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/live-locale
+
+[Install]
+WantedBy=graphical.target

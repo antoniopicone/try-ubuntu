@@ -1,0 +1,19 @@
+From: Live ISO builder <live@localhost>
+Subject: Fix a double free in get_fallback_session_name
+
+ubuntu/prefer_ubuntu_session_fallback.patch frees "name" when the ubuntu
+session is missing and then passes it to g_set_str(), which frees it again:
+gdm aborts ("free(): double free detected") as soon as a user starts to log
+in on a system that only has the vanilla GNOME session.
+---
+--- a/daemon/gdm-session.c
++++ b/daemon/gdm-session.c
+@@ -639,7 +639,7 @@ get_fallback_session_name (GdmSession *self)
+                 self->fallback_session_name = name;
+                 goto out;
+         }
+-        g_free (name);
++        g_clear_pointer (&name, g_free);
+ 
+         g_set_str (&name, "gnome");
+         if (get_session_command_for_name (self, name, NULL, NULL)) {

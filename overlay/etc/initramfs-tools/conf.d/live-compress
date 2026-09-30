@@ -1,0 +1,3 @@
+# The initramfs sits uncompressed-by-btrfs on the ISO: squeeze it.
+COMPRESS=zstd
+COMPRESSLEVEL=19

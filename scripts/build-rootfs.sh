@@ -1,0 +1,372 @@
+#!/usr/bin/env bash
+# Builds the live root filesystem in $ROOTFS: a hand-picked minimal Ubuntu
+# (arm64) via debootstrap, the arm64 "virtual" kernel pruned to what a VM
+# needs, Plymouth, Nautilus, Chromium, Tailscale, podman, Python (pip, uv),
+# zsh with the pure prompt, snapper, and the btrfslive initramfs boot script
+# from overlay/. The desktop (GNOME with GDM) comes from
+# scripts/desktop-gnome.sh.
+set -euo pipefail
+
+: "${ROOTFS:?}" "${OVERLAY:?}" "${SUITE:?}" "${MIRROR:?}" "${WORK:?}"
+: "${ISO_LABEL:?}" "${PERSIST_SERIAL:?}"
+: "${LIVE_USER:=ubuntu}" "${LIVE_PASSWORD:=ubuntu}" "${LIVE_HOSTNAME:=ubuntu-live}"
+: "${XKB_LAYOUT:=us}"
+
+# ppa:xtradeb/apps (Chromium as a .deb: Ubuntu only ships it as a snap).
+XTRADEB_KEY_FPR=5301FA4FD93244FBC6F6149982BB6851C64F6880
+# Tailscale's package repository. Its packages are static builds, the same
+# for every Ubuntu release, and new releases get their suite late: the LTS
+# suite serves them all.
+TAILSCALE_KEY_FPR=2596A99EAAB33821893C0A79458CA832957F5868
+TAILSCALE_SUITE=resolute
+
+# Tools that are not in the Ubuntu archive, pinned and checked.
+UV_VERSION=0.12.21
+UV_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-aarch64-unknown-linux-gnu.tar.gz"
+UV_SHA256=030b69227b40af8c1981b7301793dc66e71ed3c796ea8688209dd268bd91ec51
+PURE_VERSION=1.28.3
+PURE_URL="https://github.com/sindresorhus/pure/archive/refs/tags/v$PURE_VERSION.tar.gz"
+PURE_SHA256=738b523c59823083de490b3eb6c1116fc45c342e6b32a7d3cf05fdd0f8aa75a8
+
+# fetch URL SHA256 DEST: download and verify.
+fetch() {
+  curl -fsSL "$1" -o "$3"
+  echo "$2  $3" | sha256sum -c --quiet
+}
+
+chroot_mounts=()
+cleanup() {
+  for ((i=${#chroot_mounts[@]}-1; i>=0; i--)); do
+    umount -l "${chroot_mounts[i]}" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT
+
+bind() { mount --bind "$1" "$2"; chroot_mounts+=("$2"); }
+in_chroot() { chroot "$ROOTFS" /usr/bin/env -i \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C.UTF-8 \
+  DEBIAN_FRONTEND=noninteractive "$@"; }
+
+# The desktop part: desktop_repos, DESKTOP_PACKAGES, desktop_install and
+# desktop_configure.
+source "$(dirname "$0")/desktop-gnome.sh"
+
+rm -rf "$ROOTFS"
+mkdir -p "$ROOTFS"
+
+echo "==> debootstrap $SUITE (minbase)"
+# A development release may be newer than the builder's debootstrap: every
+# Ubuntu suite uses the same script (gutsy).
+debootstrap_script=/usr/share/debootstrap/scripts/$SUITE
+[[ -e "$debootstrap_script" ]] || debootstrap_script=/usr/share/debootstrap/scripts/gutsy
+debootstrap --variant=minbase --arch=arm64 --components=main,universe \
+  "$SUITE" "$ROOTFS" "$MIRROR" "$debootstrap_script"
+
+cat > "$ROOTFS/etc/apt/sources.list.d/ubuntu.sources" <<EOF
+Types: deb
+URIs: $MIRROR
+Suites: $SUITE $SUITE-updates $SUITE-security
+Components: main restricted universe
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+: > "$ROOTFS/etc/apt/sources.list"
+echo 'APT::Install-Recommends "false";' > "$ROOTFS/etc/apt/apt.conf.d/90-no-recommends"
+# Documentation, man pages and translations are never unpacked (see the
+# file); what debootstrap already unpacked is removed in the cleanup step.
+install -Dm644 "$OVERLAY/etc/dpkg/dpkg.cfg.d/01-live-excludes" \
+  "$ROOTFS/etc/dpkg/dpkg.cfg.d/01-live-excludes"
+
+bind /proc "$ROOTFS/proc"
+bind /sys  "$ROOTFS/sys"
+bind /dev  "$ROOTFS/dev"
+bind /dev/pts "$ROOTFS/dev/pts"
+mount -t tmpfs tmpfs "$ROOTFS/run"; chroot_mounts+=("$ROOTFS/run")
+cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf.build"
+ln -sf /etc/resolv.conf.build "$ROOTFS/etc/resolv.conf"
+
+# No services may start inside the build chroot.
+printf '#!/bin/sh\nexit 101\n' > "$ROOTFS/usr/sbin/policy-rc.d"
+chmod +x "$ROOTFS/usr/sbin/policy-rc.d"
+
+echo "==> Installing packages"
+in_chroot apt-get update
+in_chroot apt-get -y full-upgrade
+# The kernel's postinst would build an initramfs for the default boot (local
+# disk); installing initramfs-tools + btrfs-progs first and the overlay hooks
+# before the kernel means the only initramfs built already knows btrfslive.
+# btrfslive needs busybox (awk, sed, seq...) in the initramfs: from 26.10 on it
+# is the "busybox" package and only a Recommends of initramfs-tools.
+busybox_pkg=busybox
+in_chroot apt-cache show busybox-initramfs >/dev/null 2>&1 && busybox_pkg=busybox-initramfs
+in_chroot apt-get install -y initramfs-tools "$busybox_pkg" btrfs-progs util-linux zstd ca-certificates
+cp -a "$OVERLAY/etc/initramfs-tools/." "$ROOTFS/etc/initramfs-tools/"
+# This build's live medium label and persistent disk serial (btrfslive).
+cat > "$ROOTFS/etc/initramfs-tools/conf.d/btrfslive" <<EOF
+BTRFSLIVE_LABEL=$ISO_LABEL
+BTRFSLIVE_PERSIST_SERIAL=$PERSIST_SERIAL
+EOF
+
+# Extra repositories (HTTPS, so only now that ca-certificates is installed).
+# check_key FILE EXPECTED_FINGERPRINTS: the keyring holds exactly those keys.
+check_key() {
+  local fprs
+  fprs=$(gpg --show-keys --with-colons "$1" | awk -F: '/^pub:/ { getline; print $10 }' | sort | xargs)
+  [[ "$fprs" == "$(tr ' ' '\n' <<<"$2" | sort | xargs)" ]] || {
+    echo "${1##*/} has keys '$fprs', expected '$2'" >&2
+    exit 1
+  }
+}
+key="$OVERLAY/etc/apt/keyrings/xtradeb.asc"
+check_key "$key" "$XTRADEB_KEY_FPR"
+install -Dm644 "$key" "$ROOTFS/etc/apt/keyrings/xtradeb.asc"
+cat > "$ROOTFS/etc/apt/sources.list.d/xtradeb-apps.sources" <<EOF
+Types: deb
+URIs: https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu
+Suites: $SUITE
+Components: main
+Signed-By: /etc/apt/keyrings/xtradeb.asc
+EOF
+# Only Chromium comes from xtradeb: nothing else in the PPA may replace or
+# add to Ubuntu's packages.
+cat > "$ROOTFS/etc/apt/preferences.d/xtradeb-chromium-only" <<EOF
+Package: *
+Pin: release o=LP-PPA-xtradeb-apps
+Pin-Priority: 1
+
+Package: chromium chromium-common chromium-sandbox chromium-driver chromium-l10n
+Pin: release o=LP-PPA-xtradeb-apps
+Pin-Priority: 500
+EOF
+
+# Tailscale, laid out as its own install instructions do.
+key="$OVERLAY/etc/apt/keyrings/tailscale-archive-keyring.gpg"
+check_key "$key" "$TAILSCALE_KEY_FPR"
+install -Dm644 "$key" "$ROOTFS/usr/share/keyrings/tailscale-archive-keyring.gpg"
+cat > "$ROOTFS/etc/apt/sources.list.d/tailscale.list" <<EOF
+deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu $TAILSCALE_SUITE main
+EOF
+
+# ModemManager is never wanted (geoclue only links its client library).
+cat > "$ROOTFS/etc/apt/preferences.d/no-modemmanager" <<EOF
+Package: modemmanager
+Pin: release *
+Pin-Priority: -1
+EOF
+desktop_repos
+in_chroot apt-get update
+
+# Hand-picked instead of ubuntu-minimal, which drags in netplan, locales,
+# console-setup, ubuntu-pro-client and friends.
+packages=(
+  # minimal server base
+  systemd-sysv systemd-resolved systemd-timesyncd udev kmod dbus procps
+  iproute2 iputils-ping netbase openssh-server sudo less nano
+  linux-image-virtual
+  # boot splash (spinner: the theme GNOME/Fedora use)
+  plymouth plymouth-theme-spinner
+  # system services the desktops integrate with
+  polkitd upower power-profiles-daemon bluez geoclue-2.0
+  dbus-user-session libpam-systemd
+  # file manager and browser (the terminal comes with the desktop), with
+  # the browser's translations (pruned to the image's languages below)
+  nautilus chromium chromium-l10n
+  # networking and security
+  ufw tailscale avahi-daemon libnss-mdns
+  # containers (rootless needs uidmap, and pasta from passt for networking)
+  podman uidmap passt
+  # tools
+  git curl wget
+  # development: Python (pip, venv; uv is installed below), zsh
+  python3-pip python3-venv zsh
+  # btrfs snapshots of / (the @ subvolume)
+  snapper
+)
+in_chroot apt-get install -y "${packages[@]}" "${DESKTOP_PACKAGES[@]}"
+if in_chroot dpkg -s modemmanager >/dev/null 2>&1; then
+  echo "modemmanager got installed" >&2; exit 1
+fi
+
+# The rest of the overlay goes in after the packages whose conffiles it
+# replaces, so dpkg never sees a conffile conflict.
+cp -a "$OVERLAY/." "$ROOTFS/"
+
+desktop_install
+
+echo "==> Configuring the system"
+echo "$LIVE_HOSTNAME" > "$ROOTFS/etc/hostname"
+printf '127.0.0.1 localhost\n127.0.1.1 %s\n::1 localhost ip6-localhost ip6-loopback\n' \
+  "$LIVE_HOSTNAME" > "$ROOTFS/etc/hosts"
+echo 'LANG=C.UTF-8' > "$ROOTFS/etc/default/locale"
+# No tzdata: without /etc/localtime the system runs on UTC.
+rm -f "$ROOTFS/etc/localtime"
+
+install -m 644 "$OVERLAY/etc/skel/.zshrc" "$ROOTFS/etc/skel/.zshrc"
+in_chroot useradd -m -s /usr/bin/zsh -G sudo,video,render,input "$LIVE_USER"
+echo "$LIVE_USER:$LIVE_PASSWORD" | in_chroot chpasswd
+
+in_chroot systemctl enable systemd-resolved.service bluetooth.service \
+  power-profiles-daemon.service avahi-daemon.service tailscaled.service ufw.service
+in_chroot systemctl set-default graphical.target
+
+# Boot splash: "spinner", with Adwaita Sans instead of the (not installed)
+# Cantarell for messages and the disk-unlock prompt.
+spinner=/usr/share/plymouth/themes/spinner/spinner.plymouth
+sed -i 's/^Font=Cantarell 12/Font=Adwaita Sans 12/; s/^TitleFont=Cantarell Light 30/TitleFont=Adwaita Sans Light 30/' \
+  "$ROOTFS$spinner"
+in_chroot update-alternatives --install /usr/share/plymouth/themes/default.plymouth \
+  default.plymouth "$spinner" 150
+in_chroot update-alternatives --set default.plymouth "$spinner"
+
+# Firewall on at boot: incoming traffic denied except SSH and mDNS (avahi);
+# Tailscale manages its own interface. ufw only writes its rule files here.
+in_chroot ufw --force default deny incoming >/dev/null
+in_chroot ufw --force default allow outgoing >/dev/null
+in_chroot ufw allow 22/tcp comment ssh >/dev/null
+in_chroot ufw allow 5353/udp comment mdns >/dev/null
+sed -i 's/^ENABLED=.*/ENABLED=yes/' "$ROOTFS/etc/ufw/ufw.conf"
+
+# Rootless podman: subordinate ids for the live user.
+grep -q "^$LIVE_USER:" "$ROOTFS/etc/subuid" 2>/dev/null \
+  || echo "$LIVE_USER:100000:65536" >> "$ROOTFS/etc/subuid"
+grep -q "^$LIVE_USER:" "$ROOTFS/etc/subgid" 2>/dev/null \
+  || echo "$LIVE_USER:100000:65536" >> "$ROOTFS/etc/subgid"
+
+# Default apps: Chromium for the web, Nautilus for folders.
+browser_desktop=$(ls "$ROOTFS/usr/share/applications" | grep -iE "^chromium.*\.desktop$" | head -1 || true)
+[[ -n "$browser_desktop" ]] || { echo "chromium .desktop file not found" >&2; exit 1; }
+mkdir -p "$ROOTFS/etc/xdg"
+cat > "$ROOTFS/etc/xdg/mimeapps.list" <<EOF
+[Default Applications]
+x-scheme-handler/http=$browser_desktop
+x-scheme-handler/https=$browser_desktop
+text/html=$browser_desktop
+inode/directory=org.gnome.Nautilus.desktop
+EOF
+
+echo "==> uv $UV_VERSION, pure $PURE_VERSION"
+dl="$WORK/downloads"
+mkdir -p "$dl"
+fetch "$UV_URL" "$UV_SHA256" "$dl/uv.tar.gz"
+tar xzf "$dl/uv.tar.gz" -C "$ROOTFS/usr/local/bin" --strip-components=1 --no-same-owner
+chmod 755 "$ROOTFS/usr/local/bin/uv" "$ROOTFS/usr/local/bin/uvx"
+in_chroot uv --version
+# pure: its two functions go on zsh's fpath, the prompt is enabled for every
+# user in /etc/zsh/zshrc.
+fetch "$PURE_URL" "$PURE_SHA256" "$dl/pure.tar.gz"
+rm -rf "$dl/pure" && mkdir -p "$dl/pure"
+tar xzf "$dl/pure.tar.gz" -C "$dl/pure" --strip-components=1
+install -Dm644 "$dl/pure/pure.zsh" "$ROOTFS/usr/local/share/zsh/pure/prompt_pure_setup"
+install -Dm644 "$dl/pure/async.zsh" "$ROOTFS/usr/local/share/zsh/pure/async"
+install -Dm644 "$dl/pure/license" "$ROOTFS/usr/local/share/doc/pure/copyright"
+cat >> "$ROOTFS/etc/zsh/zshrc" <<'EOF'
+
+# Live image: the pure prompt (https://github.com/sindresorhus/pure).
+fpath+=(/usr/local/share/zsh/pure)
+autoload -U promptinit && promptinit
+prompt pure
+EOF
+in_chroot runuser -u "$LIVE_USER" -- zsh -i -c 'prompt -c' | grep -q pure \
+  || { echo "pure prompt is not active in zsh" >&2; exit 1; }
+
+echo "==> snapper"
+# Config for / (@). Its snapshots live in /.snapshots, i.e. the @snapshots
+# subvolume, so they are bootable from the Limine menu (btrfslive.snapshot).
+# No timeline in a live system; a snapshot before every apt/dpkg run instead.
+cat > "$ROOTFS/etc/snapper/configs/root" <<EOF
+SUBVOLUME="/"
+FSTYPE="btrfs"
+QGROUP=""
+SPACE_LIMIT="0.5"
+FREE_LIMIT="0.2"
+ALLOW_USERS="$LIVE_USER"
+ALLOW_GROUPS=""
+SYNC_ACL="no"
+BACKGROUND_COMPARISON="yes"
+NUMBER_CLEANUP="yes"
+NUMBER_MIN_AGE="1800"
+NUMBER_LIMIT="10"
+NUMBER_LIMIT_IMPORTANT="5"
+TIMELINE_CREATE="no"
+TIMELINE_CLEANUP="yes"
+EMPTY_PRE_POST_CLEANUP="yes"
+EMPTY_PRE_POST_MIN_AGE="1800"
+EOF
+chmod 640 "$ROOTFS/etc/snapper/configs/root"
+if grep -q '^SNAPPER_CONFIGS=' "$ROOTFS/etc/default/snapper"; then
+  sed -i 's/^SNAPPER_CONFIGS=.*/SNAPPER_CONFIGS="root"/' "$ROOTFS/etc/default/snapper"
+else
+  echo 'SNAPPER_CONFIGS="root"' >> "$ROOTFS/etc/default/snapper"
+fi
+cat > "$ROOTFS/etc/apt/apt.conf.d/80-snapper" <<'EOF'
+// Snapshot / before apt/dpkg changes packages (bootable from the Limine menu).
+DPkg::Pre-Invoke { "if [ -x /usr/bin/snapper ] && [ -e /etc/snapper/configs/root ] && [ -d /.snapshots ]; then snapper --no-dbus -c root create -c number -d 'before apt' || true; fi"; };
+EOF
+
+echo "==> Wallpaper"
+# One of Ubuntu's stock wallpapers (ubuntu-wallpapers, which gnome-shell
+# depends on), picked at random at every build. Its dark variant (or the
+# picture itself) is also Limine's background ($WORK/limine-wallpaper.*).
+rm -f "$WORK"/limine-wallpaper.*
+read -r WALLPAPER WALLPAPER_DARK < <(python3 "$(dirname "$0")/pick-wallpaper.py" "$ROOTFS")
+[[ -f "$ROOTFS$WALLPAPER" && -f "$ROOTFS$WALLPAPER_DARK" ]] \
+  || { echo "no wallpaper picked" >&2; exit 1; }
+cp "$ROOTFS$WALLPAPER_DARK" "$WORK/limine-wallpaper.${WALLPAPER_DARK##*.}"
+
+# GTK 4 / libadwaita apps and GNOME: dark style and GNOME's blue accent.
+cat > "$ROOTFS/usr/share/glib-2.0/schemas/90_live-adwaita-dark.gschema.override" <<EOF
+[org.gnome.desktop.interface]
+color-scheme='prefer-dark'
+accent-color='blue'
+font-name='Adwaita Sans 11'
+EOF
+
+desktop_configure
+in_chroot glib-compile-schemas /usr/share/glib-2.0/schemas
+
+echo "==> Slimming down"
+kver=$(ls "$ROOTFS/usr/lib/modules")
+# Kernel modules: keep filesystems, networking, crypto and the drivers a VM
+# (QEMU virt, virtio) or a plain USB/NVMe/SCSI setup needs. GPU drivers
+# other than virtio-gpu, wireless/ethernet NICs, sound, media, etc. go.
+keep_modules='^(fs|crypto|lib|arch|block|kernel|mm|virt|security|net/(?!wireless/|mac80211/)[^ ]*|drivers/(virtio|block|cdrom|char|input|hid|tty|rtc|nvme|bluetooth|firmware|acpi|pci|dma|iommu|platform|base|clk|video|md)/|drivers/net/[^/]+\.ko|drivers/gpu/drm/([^/]+\.ko|virtio/|display/|tiny/|ttm/|clients/)|drivers/scsi/[^/]+\.ko|drivers/usb/(core|host|storage|common|class)/)'
+(cd "$ROOTFS/usr/lib/modules/$kver/kernel" && find . -name '*.ko*' -printf '%P\n' \
+  | grep -vP "$keep_modules" | xargs -r rm -f)
+find "$ROOTFS/usr/lib/modules/$kver/kernel" -type d -empty -delete
+# Firmware for real hardware: nothing to load in a VM.
+rm -rf "$ROOTFS/usr/lib/firmware/$kver"
+in_chroot depmod -a "$kver"
+for m in btrfs isofs loop virtio_gpu virtio_net virtio_scsi virtio_blk sr_mod \
+         usbhid hid_generic xhci_pci btusb tun veth bridge overlay nf_tables; do
+  in_chroot modinfo -k "$kver" "$m" >/dev/null 2>&1 \
+    || { echo "module $m was pruned" >&2; exit 1; }
+done
+# Extra glibc charset converters (CJK and legacy encodings); UTF-8 and the
+# common ones are built into glibc.
+in_chroot dpkg -L libc-gconv-modules-extra | while read -r f; do
+  if [[ -f "$ROOTFS$f" ]]; then rm -f "$ROOTFS$f"; fi
+done
+# What debootstrap unpacked before the dpkg excludes were in place.
+find "$ROOTFS/usr/share/doc" -type f ! -name copyright -delete
+find "$ROOTFS/usr/share/doc" -type l -delete
+rm -rf "$ROOTFS"/usr/share/{man,info,lintian,linda}/* "$ROOTFS/usr/share/qt6/translations"
+find "$ROOTFS/usr/share/locale" -mindepth 1 -maxdepth 1 ! -name locale.alias -exec rm -rf {} +
+find "$ROOTFS/usr" -name __pycache__ -type d -prune -exec rm -rf {} +
+
+echo "==> Building the initramfs"
+in_chroot update-initramfs -c -k all
+initrd="$(ls "$ROOTFS"/boot/initrd.img-* | head -1 | sed "s|^$ROOTFS||")"
+initrd_files=$(in_chroot lsinitramfs "$initrd")
+for f in scripts/btrfslive "(usr/)?bin/busybox" usr/share/plymouth/themes/spinner/spinner.plymouth; do
+  grep -qxE "$f" <<<"$initrd_files" || { echo "$f missing from the initramfs" >&2; exit 1; }
+done
+
+echo "==> Cleaning up"
+in_chroot apt-get clean
+rm -f "$ROOTFS/usr/sbin/policy-rc.d" "$ROOTFS/etc/resolv.conf.build"
+ln -sf ../run/systemd/resolve/stub-resolv.conf "$ROOTFS/etc/resolv.conf"
+rm -f "$ROOTFS"/etc/ssh/ssh_host_*
+: > "$ROOTFS/etc/machine-id"
+rm -f "$ROOTFS/var/lib/dbus/machine-id"
+rm -rf "$ROOTFS"/var/lib/apt/lists/* "$ROOTFS"/var/cache/apt/*.bin \
+  "$ROOTFS"/var/cache/debconf/*-old "$ROOTFS"/var/lib/dpkg/*-old \
+  "$ROOTFS"/var/log/*.log "$ROOTFS"/tmp/*

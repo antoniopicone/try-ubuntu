@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Yaru accent sync
+Comment=Keeps the Yaru icon theme variant in step with the accent color
+Exec=/usr/local/bin/yaru-accent-sync
+OnlyShowIn=GNOME;
+NoDisplay=true

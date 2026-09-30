@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD polkit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+<!-- The live session's welcome app creates the first real user without
+     asking for a password. setup-user refuses to run once that user exists
+     (/var/lib/live-welcome/done), so this cannot be used to add more. -->
+<policyconfig>
+  <action id="org.ubuntu.live-welcome.setup-user">
+    <description>Create the first user of this system</description>
+    <message>Authentication is required to create the first user</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/lib/live-welcome/setup-user</annotate>
+  </action>
+</policyconfig>

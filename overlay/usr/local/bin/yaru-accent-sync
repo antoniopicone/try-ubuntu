@@ -1,0 +1,42 @@
+#!/usr/bin/python3
+"""yaru-accent-sync: keeps the Yaru icon theme in step with GNOME's accent
+color and light/dark style, as Ubuntu's own GNOME Shell does.
+
+Runs in every GNOME session (/etc/xdg/autostart/yaru-accent-sync.desktop) and
+follows the changes made in Settings > Appearance. The accent -> variant map
+is Ubuntu's (gnome-shell's getYaruVariantFromAccent()).
+"""
+from gi.repository import Gio, GLib
+
+VARIANTS = {
+    "blue": "blue",
+    "teal": "prussiangreen",
+    "green": "olive",
+    "yellow": "yellow",
+    "orange": "",  # plain Yaru is orange
+    "red": "red",
+    "pink": "magenta",
+    "purple": "purple",
+    "slate": "sage",
+}
+
+settings = Gio.Settings.new("org.gnome.desktop.interface")
+
+
+def icon_theme():
+    variant = VARIANTS.get(settings.get_string("accent-color"), "blue")
+    dark = settings.get_string("color-scheme") == "prefer-dark"
+    return "Yaru" + (f"-{variant}" if variant else "") + ("-dark" if dark else "")
+
+
+def sync(*_):
+    theme = icon_theme()
+    if settings.get_string("icon-theme") != theme:
+        settings.set_string("icon-theme", theme)
+
+
+if __name__ == "__main__":
+    settings.connect("changed::accent-color", sync)
+    settings.connect("changed::color-scheme", sync)
+    sync()
+    GLib.MainLoop().run()

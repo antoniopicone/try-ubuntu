@@ -1,0 +1,195 @@
+#!/usr/bin/python3
+"""setup-user: creates the first real user from the welcome app's choices.
+
+Run as root through pkexec (org.ubuntu.live-welcome.setup-user), with the
+choices as JSON on stdin:
+
+  {"fullname": "...", "username": "...", "password": "...", "email": "...",
+   "locale": "it_IT.UTF-8", "layout": "it" | "us:intl",
+   "color_scheme": "default" | "prefer-dark", "accent": "blue" | ...}
+
+It works once: afterwards (/var/lib/live-welcome/done) it refuses to run, so
+the polkit rule that lets the live session call it without a password can't
+be used to create more users. Besides the user it sets:
+  - the system language and keyboard layout (GDM's too)
+  - the user's GNOME settings (style, accent, Yaru variant, input source,
+    region) in their dconf database, so the first login is already themed
+  - git's user.name / user.email
+and it hides and locks the live user and turns GDM's autologin off.
+"""
+import json
+import os
+import pwd
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+DONE = "/var/lib/live-welcome/done"
+GDM_CONF = "/etc/gdm3/custom.conf"
+ACCOUNTS = "/var/lib/AccountsService/users"
+LOCALES = {"en_US.UTF-8", "it_IT.UTF-8", "es_ES.UTF-8", "fr_FR.UTF-8",
+           "de_DE.UTF-8", "pt_BR.UTF-8"}
+ACCENTS = {"blue", "teal", "green", "yellow", "orange", "red", "pink",
+           "purple", "slate"}
+# Ubuntu's accent -> Yaru variant map (see /usr/local/bin/yaru-accent-sync).
+YARU = {"blue": "blue", "teal": "prussiangreen", "green": "olive",
+        "yellow": "yellow", "orange": "", "red": "red", "pink": "magenta",
+        "purple": "purple", "slate": "sage"}
+GROUPS = ["sudo", "video", "render", "input"]
+
+
+def fail(message):
+    print(json.dumps({"ok": False, "error": message}))
+    sys.exit(1)
+
+
+def run(*cmd, stdin=None):
+    result = subprocess.run(cmd, input=stdin, text=True, capture_output=True)
+    if result.returncode != 0:
+        fail(f"{' '.join(cmd[:2])}: {result.stderr.strip() or result.returncode}")
+    return result.stdout
+
+
+def validate(c):
+    for key in ("fullname", "username", "password", "email", "locale", "layout",
+                "color_scheme", "accent"):
+        if not isinstance(c.get(key), str):
+            fail(f"missing {key}")
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", c["username"]):
+        fail("invalid username")
+    try:
+        pwd.getpwnam(c["username"])
+        fail("the username is already taken")
+    except KeyError:
+        pass
+    if not c["fullname"].strip() or re.search(r"[:,\n]", c["fullname"]):
+        fail("invalid full name")
+    if not c["password"] or "\n" in c["password"]:
+        fail("invalid password")
+    if c["email"] and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", c["email"]):
+        fail("invalid email")
+    if c["locale"] not in LOCALES:
+        fail("unsupported language")
+    if not re.fullmatch(r"[a-z]{2,3}(:[a-z0-9_]+)?", c["layout"]):
+        fail("invalid keyboard layout")
+    if c["color_scheme"] not in ("default", "prefer-dark") or c["accent"] not in ACCENTS:
+        fail("invalid theme")
+
+
+def next_subid(path):
+    start = 100000
+    try:
+        for line in open(path):
+            parts = line.strip().split(":")
+            if len(parts) == 3:
+                start = max(start, int(parts[1]) + int(parts[2]))
+    except FileNotFoundError:
+        pass
+    return start
+
+
+def set_ini(path, section, values, mode=0o600):
+    """Sets keys in an INI-style file (AccountsService, GDM), keeping the rest."""
+    lines = open(path).read().splitlines() if os.path.exists(path) else []
+    if f"[{section}]" not in lines:
+        lines += ["", f"[{section}]"] if lines else [f"[{section}]"]
+    start = lines.index(f"[{section}]") + 1
+    end = next((i for i in range(start, len(lines)) if lines[i].startswith("[")), len(lines))
+    body = [l for l in lines[start:end]
+            if not any(re.match(rf"#?\s*{re.escape(k)}\s*=", l) for k in values)]
+    body = [f"{k}={v}" for k, v in values.items()] + body
+    lines[start:end] = body
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(path, mode)
+
+
+def main():
+    if os.geteuid() != 0:
+        fail("must run as root (pkexec)")
+    if os.path.exists(DONE):
+        fail("the first user has already been created")
+    c = json.load(sys.stdin)
+    validate(c)
+    user = c["username"]
+    live_uid = int(os.environ.get("PKEXEC_UID", "-1"))
+    live_user = pwd.getpwuid(live_uid).pw_name if live_uid >= 0 else None
+
+    # The user
+    run("useradd", "-m", "-s", "/usr/bin/zsh", "-c", c["fullname"].strip(),
+        "-G", ",".join(GROUPS), user)
+    run("chpasswd", stdin=f"{user}:{c['password']}\n")
+    for path in ("/etc/subuid", "/etc/subgid"):  # rootless podman
+        if not any(l.startswith(f"{user}:") for l in open(path)):
+            with open(path, "a") as f:
+                f.write(f"{user}:{next_subid(path)}:65536\n")
+    pw = pwd.getpwnam(user)
+
+    # Language and keyboard, system-wide (GDM, consoles) and for the user
+    layout, _, variant = c["layout"].partition(":")
+    run("localectl", "set-locale", f"LANG={c['locale']}")
+    # The keyboard goes straight into /etc/default/keyboard (what localed,
+    # GDM and the consoles read on Ubuntu): localed refuses set-x11-keymap
+    # in this image.
+    with open("/etc/default/keyboard", "w") as f:
+        f.write(f'XKBMODEL="pc105"\nXKBLAYOUT="{layout}"\nXKBVARIANT="{variant}"\n'
+                'XKBOPTIONS=""\nBACKSPACE="guess"\n')
+    subprocess.run(["systemctl", "try-restart", "systemd-localed.service"])
+    os.makedirs(ACCOUNTS, exist_ok=True)
+    set_ini(f"{ACCOUNTS}/{user}", "User", {
+        "Language": c["locale"], "Session": "gnome", "Email": c["email"],
+        "SystemAccount": "false"})
+
+    # GNOME settings, compiled into the user's dconf database
+    yaru = YARU[c["accent"]]
+    icon_theme = "Yaru" + (f"-{yaru}" if yaru else "") + \
+        ("-dark" if c["color_scheme"] == "prefer-dark" else "")
+    source = f"('xkb', '{layout}+{variant}')" if variant else f"('xkb', '{layout}')"
+    keyfile = f"""[org/gnome/desktop/interface]
+color-scheme='{c['color_scheme']}'
+accent-color='{c['accent']}'
+icon-theme='{icon_theme}'
+
+[org/gnome/desktop/input-sources]
+sources=[{source}]
+
+[org/gnome/system/locale]
+region='{c['locale']}'
+"""
+    dconf_dir = os.path.join(pw.pw_dir, ".config", "dconf")
+    os.makedirs(dconf_dir, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "00-live-welcome"), "w") as f:
+            f.write(keyfile)
+        run("dconf", "compile", os.path.join(dconf_dir, "user"), tmp)
+
+    # git
+    if c["email"]:
+        with open(os.path.join(pw.pw_dir, ".gitconfig"), "w") as f:
+            f.write(f"[user]\n\tname = {c['fullname'].strip()}\n\temail = {c['email']}\n"
+                    "[init]\n\tdefaultBranch = main\n")
+    run("chown", "-R", f"{pw.pw_uid}:{pw.pw_gid}", os.path.join(pw.pw_dir, ".config"))
+    if c["email"]:
+        os.chown(os.path.join(pw.pw_dir, ".gitconfig"), pw.pw_uid, pw.pw_gid)
+
+    # Retire the live user: no autologin, hidden from GDM, locked, no sudo.
+    set_ini(GDM_CONF, "daemon", {"AutomaticLoginEnable": "false"}, mode=0o644)
+    if live_user and live_user != "root":
+        set_ini(f"{ACCOUNTS}/{live_user}", "User", {"SystemAccount": "true"})
+        run("passwd", "-l", live_user)
+        sudoers = "/etc/sudoers.d/live-user"
+        if os.path.exists(sudoers):
+            os.remove(sudoers)
+    # accounts-daemon reads its files at start: GDM must see the change.
+    subprocess.run(["systemctl", "try-restart", "accounts-daemon.service"])
+
+    os.makedirs(os.path.dirname(DONE), exist_ok=True)
+    with open(DONE, "w") as f:
+        json.dump({"user": user, "date": datetime.now(timezone.utc).isoformat()}, f)
+    print(json.dumps({"ok": True, "user": user}))
+
+
+if __name__ == "__main__":
+    main()

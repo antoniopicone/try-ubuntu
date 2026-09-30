@@ -1,0 +1,5 @@
+# As on Ubuntu Desktop: NetworkManager manages every device (GNOME's network
+# menu and Settings talk to it).
+network:
+  version: 2
+  renderer: NetworkManager

@@ -1,0 +1,21 @@
+#!/bin/sh
+# Adds what scripts/btrfslive needs to the initramfs. util-linux tools are
+# copied under distinct names so they never clash with busybox applets.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+  prereqs) prereqs; exit 0 ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+copy_exec /usr/bin/mount    /bin/ul-mount
+copy_exec /usr/sbin/losetup /bin/ul-losetup
+copy_exec /usr/sbin/blkid   /bin/ul-blkid
+copy_exec /usr/bin/btrfs    /bin/btrfs
+copy_exec /usr/bin/truncate /bin/truncate
+
+for m in loop isofs btrfs virtio_scsi virtio_blk virtio_pci sr_mod cdrom \
+         usb_storage uas xhci_pci xhci_hcd; do
+  manual_add_modules "$m"
+done

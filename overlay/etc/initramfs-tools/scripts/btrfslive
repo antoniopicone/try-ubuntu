@@ -1,0 +1,223 @@
+# initramfs-tools boot script, selected with `boot=btrfslive` on the kernel
+# command line.
+#
+# The ISO carries /live/rootfs.btrfs: a read-only btrfs image flagged as a
+# *seed device*, with the subvolumes @ (/), @home, @var and @snapshots. At
+# boot it is loop-mounted and a writable "sprout" device is added to it:
+# btrfs then turns the seed into a writable copy-on-write filesystem, so the
+# live system runs on real btrfs with real subvolumes. The sprout is either
+#   - a sparse file in RAM (default: changes are lost at shutdown), or
+#   - a persistent disk (btrfslive.persist, or the QEMU disk with serial
+#     "ubuntu-persist"): changes, snapper snapshots
+#     included, survive reboots.
+#     A blank disk is claimed on first boot; later boots reopen it. It only
+#     works with the ISO that created it (it extends that ISO's seed).
+#
+# Kernel parameters:
+#   btrfslive.label=LABEL    volume label of the live medium (default: the ISO's)
+#   btrfslive.ram=N          size of the RAM sprout in MiB (default: 75% of RAM)
+#   btrfslive.persist=DEV    persistent sprout device ("no" to force RAM)
+#   btrfslive.snapshot=N     boot a writable copy of snapper snapshot N
+#   btrfslive.snapshot=ask   list the snapshots and ask which one to boot
+
+# The ISO build's defaults (BTRFSLIVE_LABEL, BTRFSLIVE_PERSIST_SERIAL)
+# come from conf.d/btrfslive, written by build-rootfs.sh.
+
+LIVE_DIR=/run/btrfslive
+
+btrfslive_param() {
+  # prints the value of kernel parameter $1, or $2 if absent
+  local arg
+  for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+      "$1="*) echo "${arg#*=}"; return ;;
+    esac
+  done
+  echo "$2"
+}
+
+btrfslive_fail() {
+  panic "btrfslive: $*"
+}
+
+btrfslive_msg() {
+  # visible on the console (and on the splash when Plymouth is up)
+  echo "btrfslive: $*" >/dev/console
+  if [ -x /bin/plymouth ] && plymouth --ping 2>/dev/null; then
+    plymouth display-message --text="$*" 2>/dev/null || true
+  fi
+}
+
+# RAM sprout: a sparse file on tmpfs; only what is written consumes RAM.
+btrfslive_ram_sprout() {
+  local ram_mb
+  ram_mb=$(btrfslive_param btrfslive.ram "")
+  if [ -z "$ram_mb" ]; then
+    ram_mb=$(awk '/^MemTotal:/ { printf "%d", $2 * 3 / 4 / 1024 }' /proc/meminfo)
+  fi
+  ul-mount -t tmpfs -o "size=${ram_mb}m,mode=0700" tmpfs "$LIVE_DIR/ram"
+  truncate -s "${ram_mb}M" "$LIVE_DIR/ram/sprout.img" 2>/dev/null \
+    || dd if=/dev/zero of="$LIVE_DIR/ram/sprout.img" bs=1M count=0 seek="$ram_mb" 2>/dev/null
+  ul-losetup -f --show "$LIVE_DIR/ram/sprout.img" \
+    || btrfslive_fail "losetup on the RAM sprout failed"
+}
+
+# Adds $1 as the sprout of the seed mounted read-only on $LIVE_DIR/top.
+btrfslive_sprout() {
+  ul-mount -t btrfs -o ro,subvolid=5 "$seed_dev" "$LIVE_DIR/top" \
+    || btrfslive_fail "cannot mount the btrfs seed"
+  btrfs device add -f "$1" "$LIVE_DIR/top" >/dev/null \
+    || btrfslive_fail "cannot add $1 to the seed"
+  # compress is filesystem-wide: it only takes effect on this first rw mount.
+  ul-mount -o remount,rw,noatime,compress=zstd:1 "$LIVE_DIR/top" \
+    || btrfslive_fail "cannot remount the sprouted filesystem read-write"
+}
+
+# Lists the snapper snapshots under $LIVE_DIR/top/@snapshots as
+# "num|date|description" lines.
+btrfslive_list_snapshots() {
+  local info num date desc
+  for info in "$LIVE_DIR"/top/@snapshots/*/info.xml; do
+    [ -f "$info" ] || continue
+    [ -d "${info%/info.xml}/snapshot" ] || continue
+    num=$(sed -n 's:.*<num>\(.*\)</num>.*:\1:p' "$info")
+    date=$(sed -n 's:.*<date>\(.*\)</date>.*:\1:p' "$info")
+    desc=$(sed -n 's:.*<description>\(.*\)</description>.*:\1:p' "$info")
+    echo "$num|$date UTC|${desc:-(no description)}"
+  done | sort -n
+}
+
+btrfslive_ask_snapshot() {
+  local list choice
+  list=$(btrfslive_list_snapshots)
+  if [ -z "$list" ]; then
+    echo "btrfslive: no snapshots found, booting the current system" >/dev/console
+    return
+  fi
+  {
+    echo
+    echo "  Snapper snapshots"
+    echo "  ================="
+    echo "$list" | awk -F'|' '{ printf "  %4s  %s  %s\n", $1, $2, $3 }'
+    echo
+    printf "  Snapshot number to boot (Enter or 60 s: current system): "
+  } >/dev/console
+  choice=""
+  read -t 60 choice </dev/console || true
+  echo >/dev/console
+  echo "$choice"
+}
+
+mount_top() { :; }
+mount_premount() { :; }
+mount_bottom() { :; }
+
+mountroot() {
+  local label medium seed_dev sprout_dev persist persist_default opts snap rootsub i
+
+  label=$(btrfslive_param btrfslive.label "${BTRFSLIVE_LABEL:-UBUNTU_LIVE}")
+
+  for m in loop isofs btrfs virtio_scsi virtio_blk sr_mod usb_storage uas nvme; do
+    modprobe -q "$m" || true
+  done
+  wait_for_udev 10
+
+  log_begin_msg "btrfslive: waiting for the live medium (label $label)"
+  medium=""
+  for i in $(seq 1 60); do
+    medium=$(ul-blkid -l -o device -t "LABEL=$label" 2>/dev/null) || true
+    [ -n "$medium" ] && break
+    sleep 0.5
+  done
+  log_end_msg
+  [ -n "$medium" ] || btrfslive_fail "no device with label $label found"
+
+  mkdir -p "$LIVE_DIR/medium" "$LIVE_DIR/ram" "$LIVE_DIR/top"
+  ul-mount -t iso9660 -o ro "$medium" "$LIVE_DIR/medium" \
+    || btrfslive_fail "cannot mount $medium"
+  [ -f "$LIVE_DIR/medium/live/rootfs.btrfs" ] \
+    || btrfslive_fail "live/rootfs.btrfs missing on $medium"
+
+  # Seed: the read-only btrfs image on the ISO.
+  seed_dev=$(ul-losetup -f --show -r "$LIVE_DIR/medium/live/rootfs.btrfs") \
+    || btrfslive_fail "losetup on the seed image failed"
+  btrfs device scan "$seed_dev" >/dev/null 2>&1 || true
+
+  persist=$(btrfslive_param btrfslive.persist "")
+  persist_default=/dev/disk/by-id/virtio-${BTRFSLIVE_PERSIST_SERIAL:-ubuntu-persist}
+  if [ -z "$persist" ] && [ -e "$persist_default" ]; then
+    persist=$persist_default
+  fi
+  [ "$persist" = no ] && persist=""
+
+  sprout_dev=""
+  if [ -n "$persist" ]; then
+    if [ ! -b "$persist" ]; then
+      btrfslive_msg "persistent device $persist not found, changes stay in RAM"
+    elif ul-blkid -p "$persist" >/dev/null 2>&1; then
+      # Has a signature: it must be a sprout of this very seed.
+      btrfs device scan "$persist" >/dev/null 2>&1 || true
+      if ul-blkid -p -s TYPE -o value "$persist" | grep -qx btrfs \
+         && ul-mount -t btrfs -o subvolid=5,noatime,compress=zstd:1 "$persist" "$LIVE_DIR/top"; then
+        sprout_dev=$persist
+        btrfslive_msg "persistent storage on $persist"
+      else
+        btrfslive_msg "$persist holds other data or was made by another ISO: not touching it, changes stay in RAM"
+      fi
+    else
+      # Blank disk: claim it.
+      btrfslive_msg "setting up persistent storage on $persist"
+      btrfslive_sprout "$persist"
+      sprout_dev=$persist
+    fi
+  fi
+  if [ -z "$sprout_dev" ]; then
+    sprout_dev=$(btrfslive_ram_sprout)
+    btrfslive_sprout "$sprout_dev"
+    echo ram > "$LIVE_DIR/storage"
+  else
+    # Read by the running system (e.g. the welcome app warns when
+    # nothing it sets up would survive a reboot).
+    echo persistent > "$LIVE_DIR/storage"
+  fi
+  btrfs device scan >/dev/null 2>&1 || true
+
+  # Root subvolume: @, or a writable copy of a snapper snapshot. The copy is
+  # recreated at every snapshot boot and dropped at the next normal boot, so
+  # @ itself is never touched (make it permanent from the running system).
+  rootsub=@
+  snap=$(btrfslive_param btrfslive.snapshot "")
+  [ "$snap" = ask ] && snap=$(btrfslive_ask_snapshot)
+  if [ -d "$LIVE_DIR/top/@boot-snapshot" ]; then
+    btrfs subvolume delete "$LIVE_DIR/top/@boot-snapshot" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$snap" ]; then
+    if [ -d "$LIVE_DIR/top/@snapshots/$snap/snapshot" ]; then
+      btrfs subvolume snapshot "$LIVE_DIR/top/@snapshots/$snap/snapshot" \
+        "$LIVE_DIR/top/@boot-snapshot" >/dev/null \
+        || btrfslive_fail "cannot clone snapshot $snap"
+      rootsub=@boot-snapshot
+      echo "$snap" > "$LIVE_DIR/booted-snapshot"
+      btrfslive_msg "booting snapshot $snap"
+    else
+      btrfslive_msg "snapshot $snap does not exist, booting the current system"
+    fi
+  fi
+
+  # Same layout an installed system would have in /etc/fstab. The UUID
+  # changes with every new sprout, which is why the subvolumes are mounted
+  # here and not from fstab.
+  opts="rw,noatime,compress=zstd:1"
+  ul-mount -t btrfs -o "$opts,subvol=$rootsub" "$sprout_dev" "$rootmnt" \
+    || btrfslive_fail "cannot mount subvolume $rootsub"
+  ul-mount -t btrfs -o "$opts,subvol=@home" "$sprout_dev" "$rootmnt/home" \
+    || btrfslive_fail "cannot mount subvolume @home"
+  ul-mount -t btrfs -o "$opts,subvol=@var" "$sprout_dev" "$rootmnt/var" \
+    || btrfslive_fail "cannot mount subvolume @var"
+  ul-mount -t btrfs -o "$opts,subvol=@snapshots" "$sprout_dev" "$rootmnt/.snapshots" \
+    || btrfslive_fail "cannot mount subvolume @snapshots"
+
+  # The top-level mount is not needed by the running system; the live medium
+  # stays mounted (it backs the seed) and moves along with /run.
+  umount "$LIVE_DIR/top"
+}

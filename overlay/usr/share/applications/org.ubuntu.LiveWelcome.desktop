@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Welcome to Ubuntu
+Name[it]=Benvenuto in Ubuntu
+Comment=Set up your user account
+Comment[it]=Configura il tuo account
+Exec=/usr/local/bin/live-welcome
+Icon=start-here
+Terminal=false
+Categories=GNOME;GTK;System;
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

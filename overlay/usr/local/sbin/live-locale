@@ -1,0 +1,35 @@
+#!/bin/sh
+# Starts the live session in the host's language. run-qemu.sh passes the
+# host's locale (e.g. it_IT) through QEMU's fw_cfg as
+# opt/org.ubuntu.live/locale; this sets it as the system language (the
+# session reads /etc/default/locale through pam_env) and as the live user's
+# language in AccountsService (which GDM uses), before GDM starts.
+# Only locales generated in the image count: the exact one, or else another
+# of the same language (en_GB -> en_US). Anything else keeps English.
+# Runs until the welcome app has created the real user (live-locale.service).
+set -eu
+
+fw_cfg=/sys/firmware/qemu_fw_cfg/by_name/opt/org.ubuntu.live/locale/raw
+live_user=$(sed -n 's/^AutomaticLogin=//p' /etc/gdm3/custom.conf)
+
+modprobe -q qemu_fw_cfg 2>/dev/null || true
+[ -r "$fw_cfg" ] || exit 0
+want=$(head -c 64 "$fw_cfg" | sed 's/[.@].*//' | tr -cd 'A-Za-z_')
+lang=${want%%_*}
+[ -n "$lang" ] || exit 0
+
+available=$(locale -a | sed -n 's/\.utf8$//p')
+locale=$(printf '%s\n' "$available" | grep -x -m1 "$want" \
+  || printf '%s\n' "$available" | grep -m1 "^${lang}_" || true)
+if [ -z "$locale" ]; then
+  echo "live-locale: no $want locale in the image, keeping $(cat /etc/default/locale)"
+  exit 0
+fi
+
+echo "LANG=$locale.UTF-8" > /etc/default/locale
+accounts=/var/lib/AccountsService/users/$live_user
+if [ -n "$live_user" ] && [ -f "$accounts" ]; then
+  sed -i '/^Language=/d' "$accounts"
+  sed -i "/^\[User\]/a Language=$locale.UTF-8" "$accounts"
+fi
+echo "live-locale: $locale.UTF-8 (host: $want)"

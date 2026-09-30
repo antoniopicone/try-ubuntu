@@ -1,0 +1,2 @@
+# Live session: the default user administers without a password prompt.
+ubuntu ALL=(ALL) NOPASSWD:ALL

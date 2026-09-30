@@ -1,0 +1,29 @@
+#!/bin/sh
+# live-rollback: make the snapshot this system was booted from (Limine menu,
+# "Snapper snapshots") the permanent root. Only meaningful with a persistent
+# disk (run-qemu.sh --persist): in RAM mode everything is lost at shutdown.
+#
+# The current @ is kept as @old-<date> (delete it with
+# "btrfs subvolume delete" from the top level once happy); the next normal
+# boot starts from the rolled-back @.
+set -eu
+
+snap=$(cat /run/btrfslive/booted-snapshot 2>/dev/null || true)
+if [ -z "$snap" ]; then
+  echo "live-rollback: not booted from a snapshot (choose one in the Limine menu first)" >&2
+  exit 1
+fi
+[ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
+
+dev=$(findmnt -no SOURCE / | sed 's/\[.*//')
+top=$(mktemp -d)
+trap 'umount "$top" 2>/dev/null; rmdir "$top"' EXIT
+mount -o subvolid=5 "$dev" "$top"
+
+old="@old-$(date +%Y%m%d-%H%M%S)"
+btrfs subvolume snapshot "$top/@boot-snapshot" "$top/@rollback-new" >/dev/null
+mv "$top/@" "$top/$old"
+mv "$top/@rollback-new" "$top/@"
+sync
+echo "Snapshot $snap is now the root (@); the previous root was kept as $old."
+echo "Reboot normally to use it."

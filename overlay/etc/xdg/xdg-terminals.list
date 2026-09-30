@@ -1,0 +1,3 @@
+# Default terminal for xdg-terminal-exec: GNOME (Ctrl+Alt+T, Nautilus' "Open
+# in Terminal") and every app that asks for "a terminal".
+com.mitchellh.ghostty.desktop
