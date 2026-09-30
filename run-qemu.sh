@@ -5,8 +5,10 @@
 # the host's language, taken from the shell's locale (LC_ALL, LC_MESSAGES,
 # LANG; on macOS the system's when those are unset) and passed to the guest
 # through QEMU's fw_cfg (live-locale.service picks it up).
-# The serial console is attached to this terminal (Ctrl-A X quits QEMU,
-# Ctrl-A C toggles the QEMU monitor).
+# The guest's serial console goes to this terminal only with --headless or
+# --serial (Ctrl-A X quits QEMU, Ctrl-A C toggles the QEMU monitor); with a
+# window the terminal stays quiet. By default the guest gets half of the
+# host's CPUs and a third of its RAM (at least 4 GiB).
 set -euo pipefail
 
 usage() {
@@ -17,9 +19,12 @@ Usage: ./run-qemu.sh [options]
   --lang LOCALE  language of the live session (e.g. it_IT, de; default: the
                  host's). The ISO speaks English, Italian, Spanish, French,
                  German and Portuguese (Brazil); anything else is English
-  --mem MiB      guest RAM (default: 4096; the live root lives in RAM)
-  --cpus N       guest vCPUs (default: 4)
+  --mem MiB      guest RAM (default: a third of the host's, at least 4096;
+                 the live root lives in RAM)
+  --cpus N       guest vCPUs (default: half of the host's CPUs)
   --headless     no window: serial console only (login on ttyAMA0)
+  --serial       also attach the serial console to this terminal when
+                 there is a window (it's always there with --headless)
   --vnc DISPLAY  graphics over VNC instead of a window (e.g. :1 -> port 5901)
   --persist[=FILE]  keep changes (and snapper snapshots) across reboots on a
                  qcow2 disk. On by default (dist/persist.qcow2, 32G, created
@@ -35,9 +40,10 @@ EOF
 project_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 iso="$project_dir/dist/ubuntu-live-arm64.iso"
 lang=""
-mem=4096
-cpus=4
+mem=""
+cpus=""
 headless=0
+serial=0
 vnc=""
 persist="$project_dir/dist/persist.qcow2"
 ssh_port=2222
@@ -51,6 +57,7 @@ while (($#)); do
     --ssh)  ssh_port=$2; shift 2 ;;
     --efivars) vars=$2; shift 2 ;;
     --headless) headless=1; shift ;;
+    --serial) serial=1; shift ;;
     --vnc)  vnc=$2; shift 2 ;;
     --persist) persist="$project_dir/dist/persist.qcow2"; shift ;;
     --persist=*) persist=${1#*=}; shift ;;
@@ -66,6 +73,22 @@ done
 qemu=$(command -v qemu-system-aarch64 || true)
 [[ -n "$qemu" ]] || {
   echo "qemu-system-aarch64 not found (macOS: brew install qemu)" >&2; exit 1; }
+
+# Defaults from the host: half of its CPUs, a third of its RAM (min 4 GiB).
+if [[ -z "$cpus" ]]; then
+  host_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+  cpus=$((host_cpus / 2))
+  ((cpus >= 1)) || cpus=1
+fi
+if [[ -z "$mem" ]]; then
+  if [[ $(uname -s) == Darwin ]]; then
+    host_mib=$(( $(sysctl -n hw.memsize) / 1048576 ))
+  else
+    host_mib=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) / 1024 ))
+  fi
+  mem=$((host_mib / 3))
+  ((mem >= 4096)) || mem=4096
+fi
 
 # The host's language as a locale name without encoding (it_IT.UTF-8 ->
 # it_IT). macOS terminals may leave LANG unset: the system's language then.
@@ -139,6 +162,14 @@ case "$(uname -s)" in
   *)      accel=(-accel tcg -cpu max) ;;
 esac
 
+# Serial console on the terminal only when asked (always with --headless):
+# otherwise the guest's boot and console output would flood it.
+if ((headless || serial)); then
+  serial_args=(-serial mon:stdio)
+else
+  serial_args=(-serial null)
+fi
+
 if ((headless)); then
   display=(-display none)
 else
@@ -165,5 +196,5 @@ exec "$qemu" \
   ${lang_args[@]+"${lang_args[@]}"} \
   -boot menu=on,splash-time=0 \
   "${display[@]}" \
-  -serial mon:stdio \
+  "${serial_args[@]}" \
   "$@"

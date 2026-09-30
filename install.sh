@@ -137,8 +137,9 @@ main() {
     die "can't download run-qemu.sh"
   chmod +x "$DIR/run-qemu.sh"
 
-  say "Booting Ubuntu Live $tag (Ctrl-A X in this terminal quits QEMU)"
-  # Under curl | sh stdin is the script: QEMU's serial console needs the terminal.
+  say "Booting Ubuntu Live $tag (close the window to quit)"
+  # Under curl | sh stdin is the script: QEMU's serial console (--headless,
+  # --serial) needs the terminal.
   if { : </dev/tty; } 2>/dev/null; then
     exec bash "$DIR/run-qemu.sh" --iso "$dist/$iso" "$@" </dev/tty
   fi

@@ -45,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
 
 ```bash
 ./build.sh --xkb it          # → dist/ubuntu-live-arm64.iso (~1.4 GB)
-./run-qemu.sh                # boot it in a window; the serial console stays in the terminal
+./run-qemu.sh                # boot it in a window (--serial: serial console in the terminal too)
 ./run-qemu.sh --lang de_DE   # boot in German instead of the host's language
 ./run-qemu.sh --no-persist   # RAM only (by default changes and snapshots go to a persistent disk)
 ```
@@ -221,14 +221,16 @@ with SSH on `localhost:2222` (`ssh -p 2222 ubuntu@localhost`).
 | `--lang LOCALE` | language of the live session, e.g. `it_IT` or `de` (default: the host's, see below) |
 | `--vnc :1` | graphics over VNC at `127.0.0.1:5901` instead of a window |
 | `--headless` | no graphics at all: login on the serial console |
+| `--serial` | with a window, also attach the serial console to the terminal |
 | `--persist[=FILE]` | the persistent qcow2 disk, **on by default** (`dist/persist.qcow2`, 32G, created on first use) |
 | `--no-persist` | RAM only: everything is lost at shutdown |
 | `--efivars FILE` | UEFI variable store (default `dist/efivars.fd`); give each VM running at the same time its own |
-| `--mem`, `--cpus`, `--ssh`, `--iso` | RAM (default 4096 MiB), vCPUs, SSH port, ISO path |
+| `--mem`, `--cpus`, `--ssh`, `--iso` | RAM in MiB (default: a third of the host's, at least 4096), vCPUs (default: half of the host's), SSH port, ISO path |
 | `-- ARGS…` | extra arguments passed straight to QEMU (e.g. `-- -monitor tcp:127.0.0.1:4444,server,nowait`) |
 
-The serial console is multiplexed on the terminal: `Ctrl-A X` quits QEMU
-and `Ctrl-A C` opens the monitor.
+With a window the terminal stays quiet: the guest's serial console is
+attached to it only with `--headless` or `--serial`, multiplexed with the
+monitor (`Ctrl-A X` quits QEMU, `Ctrl-A C` opens the monitor).
 
 QEMU runs with `-boot menu=on,splash-time=0`. edk2 takes its boot timeout
 from QEMU, so instead of waiting ~5 s on the TianoCore logo it starts Limine
