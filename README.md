@@ -44,7 +44,8 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
   download resumes.
 - **Updates**: running it again boots the same ISO, or downloads the newer
   one when there's a new release. The old persistent disk only works with
-  its own ISO, so it's moved aside to `persist-<tag>.qcow2`.
+  its own ISO, so it's moved aside to `persist-<tag>.qcow2` (see
+  [How the live btrfs works](#how-the-live-btrfs-works)).
 - **Starting over**: `--rebuild` deletes what the script downloaded and the
   caches (the ISO, partial downloads, QEMU for Apple Silicon, `run-qemu.sh`,
   and the kernel `run-qemu.sh` extracts from the ISO for nested
@@ -65,7 +66,13 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
 
 `run-qemu.sh` attaches a persistent disk by default (see
 [How the live btrfs works](#how-the-live-btrfs-works)), so what you set up
-survives reboots.
+survives reboots. After `./build.sh` makes a new ISO, the next
+`./run-qemu.sh` moves the old disk aside and starts a new one.
+
+From a checkout, `run-qemu.sh` looks for QEMU in `dist/qemu-macos-arm64`,
+which only `./qemu/build.sh` creates there (install.sh downloads it to
+`~/.local/share/try-ubuntu/dist`, not to the checkout). Without it, it uses the
+QEMU on `PATH` (e.g. Homebrew's), and GNOME renders in software.
 
 On first boot the live user (`ubuntu`) logs in by itself and the welcome
 app takes over: it creates your user and logs out to GDM (see
@@ -237,10 +244,23 @@ takes ~6 minutes once GNOME is cached.
 ## Running
 
 `run-qemu.sh` uses `qemu-system-aarch64` with hvf (macOS) or kvm (Linux),
-edk2 UEFI firmware, a virtio-scsi CD-ROM, virtio-gpu, and user networking
-with SSH on `localhost:2222` (`ssh -p 2222 ubuntu@localhost`). On Apple
-Silicon it takes the QEMU in `dist/qemu-macos-arm64` when it's there (see
-below), otherwise the one on `PATH`.
+edk2 UEFI firmware, a virtio-scsi CD-ROM, virtio-gpu (`virtio-gpu-gl-pci`
+with the GPU-enabled QEMU), a USB keyboard and tablet on an xHCI controller
+(the `virt` machine has no input devices of its own), the persistent disk
+on virtio-blk, virtio-rng, and user networking with SSH on
+`localhost:2222` (`ssh -p 2222 ubuntu@localhost`). On Apple Silicon it
+takes the QEMU in `dist/qemu-macos-arm64` when it's there (see below),
+otherwise the one on `PATH`.
+
+It keeps its state in `dist/` (`~/.local/share/try-ubuntu/dist` when
+started by install.sh):
+
+| File | |
+|---|---|
+| `persist.qcow2` | the persistent disk (sparse, 32G at most) |
+| `persist.qcow2.iso` | checksum of the ISO the disk belongs to; when the ISO changes, the disk is moved aside to `persist-<date>.qcow2` |
+| `efivars.fd` | UEFI variables (boot entries) |
+| `.kernel-<iso>/` | kernel, initramfs and `limine.conf` extracted from the ISO for nested virtualization, refreshed when the ISO changes |
 
 | Option | |
 |---|---|
@@ -252,7 +272,7 @@ below), otherwise the one on `PATH`.
 | `--qemu PATH` | the `qemu-system-aarch64` to use |
 | `--headless` | no graphics at all: login on the serial console |
 | `--serial` | with a window, also attach the serial console to the terminal |
-| `--persist[=FILE]` | the persistent qcow2 disk, **on by default** (`dist/persist.qcow2`, 32G, created on first use) |
+| `--persist[=FILE]` | the persistent qcow2 disk, **on by default** (`dist/persist.qcow2`, 32G, created on first use; replaced by a new one, the old one kept, when the ISO changes) |
 | `--no-persist` | RAM only: everything is lost at shutdown |
 | `--efivars FILE` | UEFI variable store (default `dist/efivars.fd`); give each VM running at the same time its own |
 | `--mem`, `--cpus`, `--ssh`, `--iso` | RAM in MiB (default: a third of the host's, at least 4096), vCPUs (default: half of the host's), SSH port, ISO path |
@@ -291,7 +311,8 @@ so the guest only gets a framebuffer and GNOME renders in software.
   default entry's command line from the ISO and has QEMU load them, with no
   Limine menu. Use `--no-nested` to get the menu (e.g. to boot a snapshot)
 - **memory**: free-page reporting (`virtio-balloon`) hands the RAM the guest
-  frees back to macOS
+  frees back to macOS (it needs the HVF patch, so run-qemu.sh enables it
+  only with this QEMU, and always with kvm)
 - the patches in [qemu/patches](qemu/patches/README.md): Cocoa GL, the GPU
   fixes, HVF fixes (among them a crash on writes to the UEFI flash)
 
