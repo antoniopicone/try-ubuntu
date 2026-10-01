@@ -6,7 +6,8 @@ choices as JSON on stdin:
 
   {"fullname": "...", "username": "...", "password": "...", "email": "...",
    "locale": "it_IT.UTF-8", "layout": "it" | "us:intl",
-   "color_scheme": "default" | "prefer-dark", "accent": "blue" | ...}
+   "color_scheme": "default" | "prefer-dark", "accent": "blue" | ...,
+   "avatar": "<base64 PNG>" | ""}
 
 It works once: afterwards (/var/lib/live-welcome/done) it refuses to run, so
 the polkit rule that lets the live session call it without a password can't
@@ -15,8 +16,13 @@ be used to create more users. Besides the user it sets:
   - the user's GNOME settings (style, accent, Yaru variant, input source,
     region) in their dconf database, so the first login is already themed
   - git's user.name / user.email
+  - the Backup app at the first login (live-backup --first-run, which
+    removes itself from autostart once the backups are set up or put off)
+  - the user's picture (the avatar, when there is one), for GDM and GNOME
 and it hides and locks the live user and turns GDM's autologin off.
 """
+import base64
+import binascii
 import json
 import os
 import pwd
@@ -29,6 +35,8 @@ from datetime import datetime, timezone
 DONE = "/var/lib/live-welcome/done"
 GDM_CONF = "/etc/gdm3/custom.conf"
 ACCOUNTS = "/var/lib/AccountsService/users"
+ICONS = "/var/lib/AccountsService/icons"
+AVATAR_MAX = 2 * 1024 * 1024
 LOCALES = {"en_US.UTF-8", "it_IT.UTF-8", "es_ES.UTF-8", "fr_FR.UTF-8",
            "de_DE.UTF-8", "pt_BR.UTF-8"}
 ACCENTS = {"blue", "teal", "green", "yellow", "orange", "red", "pink",
@@ -76,6 +84,21 @@ def validate(c):
         fail("invalid keyboard layout")
     if c["color_scheme"] not in ("default", "prefer-dark") or c["accent"] not in ACCENTS:
         fail("invalid theme")
+    if not isinstance(c.get("avatar", ""), str):
+        fail("invalid picture")
+
+
+def avatar(c):
+    """The picture as PNG bytes, or None."""
+    if not c.get("avatar"):
+        return None
+    try:
+        png = base64.b64decode(c["avatar"], validate=True)
+    except (binascii.Error, ValueError):
+        fail("invalid picture")
+    if not png.startswith(b"\x89PNG\r\n\x1a\n") or len(png) > AVATAR_MAX:
+        fail("invalid picture")
+    return png
 
 
 def next_subid(path):
@@ -113,6 +136,7 @@ def main():
         fail("the first user has already been created")
     c = json.load(sys.stdin)
     validate(c)
+    picture = avatar(c)
     user = c["username"]
     live_uid = int(os.environ.get("PKEXEC_UID", "-1"))
     live_user = pwd.getpwuid(live_uid).pw_name if live_uid >= 0 else None
@@ -138,9 +162,16 @@ def main():
                 'XKBOPTIONS=""\nBACKSPACE="guess"\n')
     subprocess.run(["systemctl", "try-restart", "systemd-localed.service"])
     os.makedirs(ACCOUNTS, exist_ok=True)
-    set_ini(f"{ACCOUNTS}/{user}", "User", {
-        "Language": c["locale"], "Session": "gnome", "Email": c["email"],
-        "SystemAccount": "false"})
+    account = {"Language": c["locale"], "Session": "gnome", "Email": c["email"],
+               "SystemAccount": "false"}
+    # The picture where GNOME Settings puts it (AccountsService's icons)
+    if picture:
+        os.makedirs(ICONS, exist_ok=True)
+        with open(f"{ICONS}/{user}", "wb") as f:
+            f.write(picture)
+        os.chmod(f"{ICONS}/{user}", 0o644)
+        account["Icon"] = f"{ICONS}/{user}"
+    set_ini(f"{ACCOUNTS}/{user}", "User", account)
 
     # GNOME settings, compiled into the user's dconf database
     yaru = YARU[c["accent"]]
@@ -164,6 +195,14 @@ region='{c['locale']}'
         with open(os.path.join(tmp, "00-live-welcome"), "w") as f:
             f.write(keyfile)
         run("dconf", "compile", os.path.join(dconf_dir, "user"), tmp)
+
+    # The Backup app at the first login: where the encrypted backups go
+    autostart = os.path.join(pw.pw_dir, ".config", "autostart")
+    os.makedirs(autostart, exist_ok=True)
+    with open(os.path.join(autostart, "org.ubuntu.LiveBackup.desktop"), "w") as f:
+        f.write("[Desktop Entry]\nType=Application\nName=Backup\n"
+                "Exec=live-backup --first-run\nIcon=folder-remote\n"
+                "X-GNOME-Autostart-Delay=3\nNoDisplay=true\n")
 
     # git
     if c["email"]:

@@ -30,6 +30,18 @@ EXTENSIONS=(
   "Rounded_Corners@lennart-k|70231|f10cf2ee9f621e13f720e987c295a6edd78db8297f560e43cc46d64883a55856||force"
 )
 
+# The welcome app's avatars: DiceBear's styles whose drawings are CC0 and
+# made of parts one can pick (not the abstract ones), turned into JSON by
+# dicebear.py. style|sha256 of @dicebear/<style>-$DICEBEAR_VERSION.tgz
+DICEBEAR_VERSION=9.4.2
+DICEBEAR_STYLES=(
+  "open-peeps|562b2c82245be2b84f46a21665b04ba6604c0549198783ac5b9349f7d5521546"
+  "lorelei|de797c458bbcf584991ff3f53665581c9026346787715ba396aa2067ae150535"
+  "notionists|e812410b4cbe3da3051b2ad48c9c84253b29eecf284930b81f2eed70760e6581"
+  "pixel-art|779d4b46ecb7f2638f00afece0878bc01fbd5294a5bd0db9a0642ec8a807cbb6"
+  "thumbs|227e1e202aec9a79c6adc7803dc32996d7a8c2268033fc482b8c540b9c5af994"
+)
+
 # Languages the welcome app offers: English plus these (translations come
 # from Ubuntu's language packs, in /usr/share/locale-langpack).
 LANGPACKS=(it es fr de pt)
@@ -46,6 +58,11 @@ DESKTOP_PACKAGES=(
   resources gnome-extensions-app
   # Nautilus's Python extensions: ghostty ships one ("Open in Ghostty")
   python3-nautilus
+  # Backup (live-backup): restic through rclone to a folder of a GNOME
+  # Online Accounts account (Google Drive, Nextcloud; gvfs for their files
+  # in Nautilus too), the password in the keyring (libsecret), notifications
+  restic rclone gnome-online-accounts gir1.2-goa-1.0 gir1.2-secret-1 gvfs-backends
+  libnotify-bin
   # Flatpak apps (Flathub) in GNOME Software
   gnome-software-plugin-flatpak
   # Ubuntu's Yaru icons (every accent variant)
@@ -56,8 +73,8 @@ DESKTOP_PACKAGES=(
   fonts-adwaita-sans
   locales
   # the welcome app: Python + GTK 4/libadwaita, dconf for the new user's
-  # settings
-  python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 dconf-cli pkexec
+  # settings, librsvg + cairo for the avatars (SVG -> PNG)
+  python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 dconf-cli pkexec gir1.2-rsvg-2.0 python3-gi-cairo
 )
 for lang in "${LANGPACKS[@]}"; do
   DESKTOP_PACKAGES+=("language-pack-$lang-base" "language-pack-gnome-$lang-base")
@@ -90,6 +107,16 @@ desktop_install() {
            /usr/share/icons/Yaru-blue-dark/index.theme; do
     [[ -e "$ROOTFS$f" ]] || { echo "$f is missing" >&2; exit 1; }
   done
+
+  # Ghostty through overlay/usr/local/bin/ghostty (OpenGL in software on
+  # virtio-gpu, where virgl lacks the OpenGL 4.3 it needs). The .desktop
+  # file, the D-Bus service and the systemd unit all start /usr/bin/ghostty:
+  # the package's binary moves to ghostty.real (a dpkg diversion, so
+  # upgrades keep it there) and that path becomes the wrapper.
+  in_chroot dpkg-divert --local --rename --divert /usr/bin/ghostty.real --add /usr/bin/ghostty
+  ln -sf /usr/local/bin/ghostty "$ROOTFS/usr/bin/ghostty"
+  [[ -x "$ROOTFS/usr/bin/ghostty.real" && -x "$ROOTFS/usr/local/bin/ghostty" ]] \
+    || { echo "the ghostty wrapper isn't in place" >&2; exit 1; }
 
   # Chromium's UI follows LANG: keep its translations for the languages
   # above only (chromium-l10n has ~120 MB of them), and no .pak.info files
@@ -214,9 +241,11 @@ picture-uri-dark='file://$WALLPAPER_DARK'
 picture-uri='file://$WALLPAPER'
 
 # Yaru icons; yaru-accent-sync keeps the variant in step with the accent
-# color and the style (blue + dark are the defaults).
+# color and the style (blue + dark are the defaults). The monospace font
+# (GNOME Tweaks' "Monospace Text") is Ghostty's, from build-rootfs.sh.
 [org.gnome.desktop.interface]
 icon-theme='Yaru-blue-dark'
+monospace-font-name='JetBrainsMono Nerd Font Mono 11'
 
 [org.gnome.shell]
 enabled-extensions=['dash-to-dock@micxgx.gmail.com', 'kiwimenu@kemma', 'caffeine@patapon.info', 'Vitals@CoreCoding.com', 'Rounded_Corners@lennart-k']
@@ -293,4 +322,23 @@ PY
   # live-welcome's state: "done" once the real user exists (the setup
   # helper then refuses to run again).
   install -d -m 755 "$ROOTFS/var/lib/live-welcome"
+
+  # The avatar styles live-welcome composes (offline: no network needed).
+  local style packages=()
+  tmp=$(mktemp -d)
+  for entry in "${DICEBEAR_STYLES[@]}"; do
+    IFS='|' read -r style sha <<<"$entry"
+    fetch "https://registry.npmjs.org/@dicebear/$style/-/$style-$DICEBEAR_VERSION.tgz" "$sha" \
+      "$WORK/downloads/dicebear-$style.tgz"
+    mkdir "$tmp/$style"
+    tar xzf "$WORK/downloads/dicebear-$style.tgz" -C "$tmp/$style" --no-same-owner
+    install -Dm644 "$tmp/$style/package/LICENSE" \
+      "$ROOTFS/usr/local/share/doc/dicebear-$style/copyright"
+    packages+=("$tmp/$style/package")
+  done
+  install -d -m 755 "$ROOTFS/usr/local/share/live-welcome"
+  python3 "$(dirname "$0")/dicebear.py" "$ROOTFS/usr/local/share/live-welcome/dicebear.json" \
+    "${packages[@]}"
+  chmod 644 "$ROOTFS/usr/local/share/live-welcome/dicebear.json"
+  rm -rf "$tmp"
 }

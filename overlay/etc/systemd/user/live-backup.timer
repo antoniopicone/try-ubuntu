@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly backup of the home folder (see the Backup app)
+
+[Timer]
+# Every hour while the user is logged in (the online account and the
+# keyring are the session's); a missed one runs at the next login.
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

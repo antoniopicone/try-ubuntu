@@ -1,0 +1,711 @@
+#!/usr/bin/python3
+"""live-backup: the Backup app. Sets up, and then shows, the encrypted
+backups of the home folder (restic, see /usr/local/lib/live-backup).
+
+At the first login of the user live-welcome created it starts by itself
+(--first-run, ~/.config/autostart) and asks where to keep the backups: a
+folder on Google Drive or on Nextcloud, through a GNOME Online Accounts
+account (an existing one, or one added in Settings' own dialog, so it's in
+Settings too). Then the folder, picked in a tree of the account's folders,
+and the user's password, which encrypts the backups on this computer before
+they leave it (restic). iCloud, Samba and SFTP are listed, not there yet.
+"Later" skips it all: the app stays in the app grid.
+
+Once set up it shows the last backup and can start one, change the folder
+or stop the backups.
+"""
+import json
+import os
+import pwd
+import subprocess
+import sys
+import threading
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+
+sys.path.insert(0, "/usr/local/lib/live-backup")
+import cloud  # noqa: E402
+
+APP_ID = "org.ubuntu.LiveBackup"
+AUTOSTART = os.path.expanduser(f"~/.config/autostart/{APP_ID}.desktop")
+CHKPWD = "/usr/sbin/unix_chkpwd"
+
+# id, icon, title key, body key, available
+DESTINATIONS = [
+    ("google", "goa-account-google", "dest_google", "dest_google_body", True),
+    ("owncloud", "goa-account-owncloud", "dest_nextcloud", "dest_nextcloud_body", True),
+    ("icloud", "weather-overcast-symbolic", "dest_icloud", "soon", False),
+    ("samba", "folder-remote-symbolic", "dest_samba", "soon", False),
+    ("sftp", "utilities-terminal-symbolic", "dest_sftp", "soon", False),
+]
+
+STRINGS = {
+    "en": {
+        "title": "Backup",
+        "choose_title": "Keep Your Data Safe",
+        "choose_body": "Now let's choose a place where to keep your data, documents and "
+                       "preferences safe:",
+        "dest_google": "Google Drive", "dest_google_body": "A folder on your Google Drive",
+        "dest_nextcloud": "Nextcloud", "dest_nextcloud_body": "A folder on your Nextcloud",
+        "dest_icloud": "iCloud Drive",
+        "dest_samba": "Network folder (Samba)",
+        "dest_sftp": "Remote server (SFTP, with a password or a key file)",
+        "soon": "Coming soon",
+        "e2e_title": "End-to-end encrypted",
+        "e2e_body": "Your password encrypts the backups on this computer before they're "
+                    "sent: nobody else, not even the cloud provider, can read them.",
+        "later": "Set Up Later",
+        "accounts_title": "Which Account?",
+        "accounts_body": "The online accounts of this computer that can hold your backups.",
+        "add_account": "Add another account",
+        "wait_title": "Sign In",
+        "wait_body": "Sign in to {provider} in the window that has just opened. The "
+                     "account will also be in Settings › Online Accounts.",
+        "wait_files": "Keep “Files” turned on for the account: that's where the backups go.",
+        "cancel": "Cancel",
+        "folder_title": "Choose a Folder",
+        "folder_body": "The backups will go in a folder called “{repo}” inside the folder "
+                       "you choose.",
+        "new_folder": "New Folder",
+        "folder_name": "Folder name",
+        "create": "Create",
+        "destination": "The backups will go in “{path}”",
+        "continue": "Continue",
+        "loading": "Connecting to {provider}…",
+        "password_title": "Encryption",
+        "password_body": "Your backups are encrypted end to end: your password encrypts them "
+                         "on this computer before they're sent to {provider}. Without it they "
+                         "can't be restored: don't lose it. If you change your password later, "
+                         "the backups keep using this one.",
+        "password": "Your password (the one you log in with)",
+        "err_password": "This isn't your password.",
+        "working_title": "Preparing Your Backups",
+        "working_body": "Setting up the encrypted backup folder…",
+        "err_repo_password": "This folder already has backups, encrypted with another "
+                             "password. Choose another folder.",
+        "error_title": "Something Went Wrong",
+        "back": "Back",
+        "done_title": "Your Data Is Safe",
+        "done_body": "The first backup has started; then there will be one every hour. "
+                     "Everything is in the Backup app.",
+        "close": "Close",
+        "status_title": "Backups",
+        "where": "Where",
+        "folder": "Folder",
+        "last": "Last backup",
+        "never": "Not yet",
+        "running": "In progress…",
+        "ok": "Done",
+        "backup_now": "Back Up Now",
+        "change": "Change Folder",
+        "stop": "Stop Backups",
+        "stop_confirm": "Stop the backups?",
+        "stop_body": "The backups already made stay where they are.",
+        "no_account": "The online account of the backups is gone: choose a folder again.",
+    },
+    "it": {
+        "title": "Backup",
+        "choose_title": "Metti al sicuro i tuoi dati",
+        "choose_body": "Ora scegliamo un posto dove mettere al sicuro i tuoi dati, documenti "
+                       "e preferenze:",
+        "dest_google": "Google Drive", "dest_google_body": "Una cartella sul tuo Google Drive",
+        "dest_nextcloud": "Nextcloud", "dest_nextcloud_body": "Una cartella sul tuo Nextcloud",
+        "dest_icloud": "iCloud Drive",
+        "dest_samba": "Cartella di rete (Samba)",
+        "dest_sftp": "Server remoto (SFTP, con password o file di chiave)",
+        "soon": "Presto disponibile",
+        "e2e_title": "Crittografia end-to-end",
+        "e2e_body": "La tua password cripta i backup su questo computer prima che vengano "
+                    "inviati: nessun altro, nemmeno il fornitore del cloud, può leggerli.",
+        "later": "Configura più tardi",
+        "accounts_title": "Quale account?",
+        "accounts_body": "Gli account online di questo computer che possono ospitare i backup.",
+        "add_account": "Aggiungi un altro account",
+        "wait_title": "Accedi",
+        "wait_body": "Accedi a {provider} nella finestra che si è appena aperta. L'account "
+                     "sarà anche in Impostazioni › Account online.",
+        "wait_files": "Lascia attiva la voce «File» dell'account: è lì che vanno i backup.",
+        "cancel": "Annulla",
+        "folder_title": "Scegli una cartella",
+        "folder_body": "I backup andranno in una cartella chiamata «{repo}» dentro la "
+                       "cartella che scegli.",
+        "new_folder": "Nuova cartella",
+        "folder_name": "Nome della cartella",
+        "create": "Crea",
+        "destination": "I backup andranno in «{path}»",
+        "continue": "Continua",
+        "loading": "Connessione a {provider}…",
+        "password_title": "Cifratura",
+        "password_body": "I tuoi backup sono cifrati end-to-end: la tua password li cripta su "
+                         "questo computer prima dell'invio a {provider}. Senza di essa non si "
+                         "possono ripristinare: non perderla. Se in seguito cambi password, i "
+                         "backup continuano a usare questa.",
+        "password": "La tua password (quella con cui accedi)",
+        "err_password": "Questa non è la tua password.",
+        "working_title": "Preparazione dei backup",
+        "working_body": "Creazione della cartella cifrata dei backup…",
+        "err_repo_password": "In questa cartella ci sono già dei backup, cifrati con un'altra "
+                             "password. Scegli un'altra cartella.",
+        "error_title": "Qualcosa è andato storto",
+        "back": "Indietro",
+        "done_title": "I tuoi dati sono al sicuro",
+        "done_body": "Il primo backup è partito, poi ne verrà fatto uno ogni ora. Trovi "
+                     "tutto nell'app Backup.",
+        "close": "Chiudi",
+        "status_title": "Backup",
+        "where": "Dove",
+        "folder": "Cartella",
+        "last": "Ultimo backup",
+        "never": "Non ancora",
+        "running": "In corso…",
+        "ok": "Completato",
+        "backup_now": "Esegui il backup ora",
+        "change": "Cambia cartella",
+        "stop": "Disattiva i backup",
+        "stop_confirm": "Disattivare i backup?",
+        "stop_body": "I backup già fatti restano dove sono.",
+        "no_account": "L'account online dei backup non c'è più: scegli di nuovo una cartella.",
+    },
+}
+
+
+def t(key, **kw):
+    lang = os.environ.get("LANG", "")[:2]
+    return STRINGS.get(lang, STRINGS["en"]).get(key, STRINGS["en"][key]).format(**kw)
+
+
+def in_thread(work, done):
+    """work() in a thread, then done(result, error) in the main loop."""
+    def run():
+        try:
+            result, error = work(), None
+        except Exception as e:  # shown to the user
+            result, error = None, getattr(e, "message", None) or str(e)
+        GLib.idle_add(lambda: done(result, error) and False)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def systemctl(*args):
+    return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
+
+
+def check_password(password):
+    """The login password? Asked to unix_chkpwd, PAM's helper, which checks
+    the calling user's own password."""
+    if not os.path.exists(CHKPWD):
+        return True
+    user = pwd.getpwuid(os.getuid()).pw_name
+    result = subprocess.run([CHKPWD, user, "nullok"], input=password.encode() + b"\0",
+                            capture_output=True)
+    return result.returncode == 0
+
+
+def restic(env, *args):
+    return subprocess.run(["restic", *args], env=env, capture_output=True, text=True)
+
+
+class Folder(GObject.Object):
+    def __init__(self, name, path):
+        super().__init__()
+        self.name, self.path = name, path
+
+
+class BackupWindow(Adw.ApplicationWindow):
+    def __init__(self, app, first_run):
+        super().__init__(application=app, default_width=760, default_height=680,
+                         title=t("title"))
+        self.first_run = first_run
+        self.client = cloud.goa_client()
+        self.client.connect("account-added", self._on_account)
+        self.client.connect("account-changed", self._on_account)
+        self.provider = self.obj = self.env = None
+        self.waiting = False
+        self.stores = {}
+
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
+                               vexpand=True)
+        for name, page in (("choose", self._page_choose()), ("accounts", self._page_accounts()),
+                           ("wait", self._page_wait()), ("folder", self._page_folder()),
+                           ("password", self._page_password()),
+                           ("working", self._page_working()), ("error", self._page_error()),
+                           ("done", self._page_done()), ("status", self._page_status())):
+            self.stack.add_named(page, name)
+        self.back = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text=t("back"))
+        self.back.connect("clicked", lambda *_: self._back())
+        header = Adw.HeaderBar()
+        header.pack_start(self.back)
+        self.toasts = Adw.ToastOverlay(child=self.stack)
+        view = Adw.ToolbarView(content=self.toasts)
+        view.add_top_bar(header)
+        self.set_content(view)
+        self.history = []
+
+        config = cloud.load_config()
+        self._show("status" if config and not first_run else "choose", remember=False)
+        if config and not first_run:
+            self._refresh_status()
+
+    # --- helpers -----------------------------------------------------------------
+
+    @staticmethod
+    def _page(*children):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        for child in children:
+            box.append(child)
+        clamp = Adw.Clamp(maximum_size=560, child=box, margin_top=24, margin_bottom=24,
+                          margin_start=12, margin_end=12)
+        return Gtk.ScrolledWindow(child=clamp, hscrollbar_policy=Gtk.PolicyType.NEVER)
+
+    @staticmethod
+    def _button(label, suggested=False, destructive=False):
+        button = Gtk.Button(label=label, halign=Gtk.Align.CENTER)
+        button.add_css_class("pill")
+        if suggested:
+            button.add_css_class("suggested-action")
+        if destructive:
+            button.add_css_class("destructive-action")
+        return button
+
+    def _show(self, name, remember=True):
+        current = self.stack.get_visible_child_name()
+        if remember and current and current not in ("wait", "working", "error"):
+            self.history.append(current)
+        self.stack.set_visible_child_name(name)
+        self.back.set_visible(bool(self.history) and name not in ("working", "done"))
+
+    def _back(self):
+        self.waiting = False
+        if self.history:
+            self.stack.set_visible_child_name(self.history.pop())
+        self.back.set_visible(bool(self.history))
+
+    def _toast(self, message):
+        self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(message), timeout=6))
+
+    def _provider_name(self):
+        return cloud.PROVIDERS.get(self.provider, "")
+
+    # --- choose: where the backups go ------------------------------------------
+
+    def _page_choose(self):
+        group = Adw.PreferencesGroup(title=t("choose_title"), description=t("choose_body"))
+        for dest, icon, title, body, available in DESTINATIONS:
+            row = Adw.ActionRow(title=t(title), subtitle=t(body), activatable=available,
+                                sensitive=available)
+            row.add_prefix(Gtk.Image(icon_name=icon, pixel_size=32))
+            if available:
+                row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+                row.connect("activated", lambda _, d=dest: self._pick_provider(d))
+            group.add(row)
+        e2e = Adw.PreferencesGroup()
+        row = Adw.ActionRow(title=t("e2e_title"), subtitle=t("e2e_body"))
+        row.add_prefix(Gtk.Image(icon_name="channel-secure-symbolic"))
+        e2e.add(row)
+        later = self._button(t("later"))
+        later.connect("clicked", lambda *_: self._later())
+        later.set_visible(cloud.load_config() is None)
+        return self._page(group, e2e, later)
+
+    def _later(self):
+        if os.path.exists(AUTOSTART):
+            os.remove(AUTOSTART)
+        self.close()
+
+    def _pick_provider(self, provider):
+        self.provider = provider
+        found = cloud.accounts(self.client, provider)
+        if not found:
+            self._add_account()
+            return
+        for row in self.account_rows:
+            self.accounts_group.remove(row)
+        self.account_rows.clear()
+        icon = next(d[1] for d in DESTINATIONS if d[0] == provider)
+        for obj in found:
+            name, identity = cloud.describe(obj)
+            row = Adw.ActionRow(title=identity, subtitle=name, activatable=True)
+            row.add_prefix(Gtk.Image(icon_name=icon, pixel_size=32))
+            row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+            row.connect("activated", lambda _, o=obj: self._use_account(o))
+            self.accounts_group.add(row)
+            self.account_rows.append(row)
+        add = Adw.ActionRow(title=t("add_account"), activatable=True)
+        add.add_prefix(Gtk.Image(icon_name="list-add-symbolic"))
+        add.connect("activated", lambda *_: self._add_account())
+        self.accounts_group.add(add)
+        self.account_rows.append(add)
+        self._show("accounts")
+
+    def _page_accounts(self):
+        self.accounts_group = Adw.PreferencesGroup(title=t("accounts_title"),
+                                                   description=t("accounts_body"))
+        self.account_rows = []
+        return self._page(self.accounts_group)
+
+    # --- a new GNOME Online Accounts account, in Settings' dialog ----------------
+
+    def _page_wait(self):
+        self.wait_status = Adw.StatusPage(icon_name="system-users-symbolic", vexpand=True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        box.append(Adw.Spinner(width_request=32, height_request=32))
+        hint = Gtk.Label(label=t("wait_files"), wrap=True, justify=Gtk.Justification.CENTER)
+        hint.add_css_class("dim-label")
+        box.append(hint)
+        cancel = self._button(t("cancel"))
+        cancel.connect("clicked", lambda *_: self._back())
+        box.append(cancel)
+        self.wait_status.set_child(box)
+        return self.wait_status
+
+    def _add_account(self):
+        self.wait_status.set_title(t("wait_title"))
+        self.wait_status.set_description(t("wait_body", provider=self._provider_name()))
+        self.waiting = True
+        self._show("wait")
+        Gio.Subprocess.new(["gnome-control-center", "online-accounts", "add", self.provider],
+                           Gio.SubprocessFlags.NONE)
+
+    def _on_account(self, _client, obj):
+        if self.waiting and cloud.usable(obj, self.provider):
+            self.waiting = False
+            self.present()
+            self._use_account(obj)
+
+    # --- the folder -----------------------------------------------------------------
+
+    def _page_folder(self):
+        self.folder_group = Adw.PreferencesGroup(title=t("folder_title"),
+                                                 description=t("folder_body",
+                                                               repo=cloud.REPO_DIR))
+        new = Gtk.Button(icon_name="folder-new-symbolic", tooltip_text=t("new_folder"),
+                         valign=Gtk.Align.CENTER)
+        new.add_css_class("flat")
+        new.connect("clicked", lambda *_: self._new_folder())
+        self.folder_group.set_header_suffix(new)
+
+        self.root = Gio.ListStore.new(Folder)
+        tree = Gtk.TreeListModel.new(self.root, False, False, self._children)
+        self.selection = Gtk.SingleSelection(model=tree)
+        self.selection.connect("notify::selected-item", lambda *_: self._on_folder())
+        factory = Gtk.SignalListItemFactory()
+        factory.connect("setup", self._setup_row)
+        factory.connect("bind", self._bind_row)
+        view = Gtk.ListView(model=self.selection, factory=factory)
+        view.add_css_class("navigation-sidebar")
+        scrolled = Gtk.ScrolledWindow(child=view, min_content_height=280,
+                                      hscrollbar_policy=Gtk.PolicyType.NEVER)
+        frame = Gtk.Frame(child=scrolled)
+        frame.add_css_class("card")
+        self.folder_group.add(frame)
+
+        self.destination = Gtk.Label(wrap=True, xalign=0, margin_top=12)
+        self.destination.add_css_class("dim-label")
+        self.folder_group.add(self.destination)
+        self.folder_next = self._button(t("continue"), suggested=True)
+        self.folder_next.connect("clicked", lambda *_: self._show("password"))
+        return self._page(self.folder_group, self.folder_next)
+
+    @staticmethod
+    def _setup_row(_factory, item):
+        box = Gtk.Box(spacing=8)
+        box.append(Gtk.Image(icon_name="folder-symbolic"))
+        box.append(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END))
+        item.set_child(Gtk.TreeExpander(child=box))
+
+    @staticmethod
+    def _bind_row(_factory, item):
+        row = item.get_item()
+        expander = item.get_child()
+        expander.set_list_row(row)
+        expander.get_child().get_last_child().set_label(row.get_item().name)
+
+    def _children(self, folder):
+        store = Gio.ListStore.new(Folder)
+        self.stores[folder.path] = store
+        self._list(folder.path, store)
+        return store
+
+    def _list(self, path, store):
+        env = self.env
+
+        def work():
+            out = subprocess.run(cloud.rclone_args("lsjson", "--dirs-only",
+                                                   cloud.remote_path(path)),
+                                 env=env, capture_output=True, text=True)
+            if out.returncode != 0:
+                raise RuntimeError(out.stderr.strip().splitlines()[-1] if out.stderr.strip()
+                                   else "rclone lsjson")
+            return sorted((e["Name"] for e in json.loads(out.stdout or "[]")), key=str.lower)
+
+        def done(names, error):
+            if error:
+                self._toast(error)
+                return
+            store.remove_all()
+            for name in names:
+                store.append(Folder(name, f"{path}/{name}".strip("/")))
+        in_thread(work, done)
+
+    def _selected(self):
+        row = self.selection.get_selected_item()
+        return row.get_item() if row else None
+
+    def _repo_for(self, folder):
+        if folder.path.rsplit("/", 1)[-1] == cloud.REPO_DIR:
+            return folder.path
+        return f"{folder.path}/{cloud.REPO_DIR}".strip("/")
+
+    def _on_folder(self):
+        folder = self._selected()
+        self.folder_next.set_sensitive(folder is not None)
+        if folder:
+            shown = f"{self._provider_name()}/{self._repo_for(folder)}"
+            self.destination.set_label(t("destination", path=shown))
+
+    def _new_folder(self):
+        parent = self._selected() or self.root.get_item(0)
+        entry = Gtk.Entry(placeholder_text=t("folder_name"), activates_default=True)
+        dialog = Adw.AlertDialog(heading=t("new_folder"), extra_child=entry,
+                                 default_response="create", close_response="cancel")
+        dialog.add_response("cancel", t("cancel"))
+        dialog.add_response("create", t("create"))
+        dialog.set_response_appearance("create", Adw.ResponseAppearance.SUGGESTED)
+
+        def response(_dialog, answer):
+            name = entry.get_text().strip().replace("/", "-")
+            if answer != "create" or not name:
+                return
+            path = f"{parent.path}/{name}".strip("/")
+            env = self.env
+            in_thread(lambda: subprocess.run(cloud.rclone_args("mkdir", cloud.remote_path(path)),
+                                             env=env, capture_output=True, check=True),
+                      lambda _r, error: self._toast(error) if error else
+                      self._list(parent.path, self.stores.get(parent.path)
+                                 or Gio.ListStore.new(Folder)))
+        dialog.connect("response", response)
+        dialog.present(self)
+
+    def _use_account(self, obj):
+        self.obj = obj
+        self.working_status.set_title(t("loading", provider=self._provider_name()))
+        self.working_status.set_description("")
+        self._show("working")
+
+        def done(env, error):
+            if error:
+                self._error(error)
+                return
+            self.env = env
+            self.stores.clear()
+            self.root.remove_all()
+            _, identity = cloud.describe(obj)
+            self.root.append(Folder(f"{self._provider_name()} ({identity})", ""))
+            self.selection.set_selected(0)
+            self.selection.get_model().get_row(0).set_expanded(True)
+            self._on_folder()
+            self.stack.set_visible_child_name("folder")
+            self.back.set_visible(True)
+        in_thread(lambda: cloud.remote_env(obj)[0], done)
+
+    # --- the password, and the repository -------------------------------------------
+
+    def _page_password(self):
+        self.password_group = Adw.PreferencesGroup(title=t("password_title"))
+        self.password = Adw.PasswordEntryRow(title=t("password"), activates_default=True)
+        self.password_group.add(self.password)
+        self.password_error = Gtk.Label(wrap=True, xalign=0, margin_top=12)
+        self.password_error.add_css_class("error")
+        self.password_group.add(self.password_error)
+        self.password_next = self._button(t("continue"), suggested=True)
+        self.password_next.connect("clicked", lambda *_: self._check_password())
+        self.password.connect("entry-activated", lambda *_: self._check_password())
+        self.password.connect("changed", lambda *_: self.password_error.set_label(""))
+        self.stack.connect("notify::visible-child-name", self._on_page)
+        return self._page(self.password_group, self.password_next)
+
+    def _on_page(self, *_):
+        if self.stack.get_visible_child_name() == "password":
+            self.password_group.set_description(
+                t("password_body", provider=self._provider_name()))
+            self.password.grab_focus()
+
+    def _check_password(self):
+        password = self.password.get_text()
+        if not password:
+            return
+        self.password_next.set_sensitive(False)
+
+        def done(ok, _error):
+            self.password_next.set_sensitive(True)
+            if ok:
+                self._set_up(password)
+            else:
+                self.password_error.set_label(t("err_password"))
+        in_thread(lambda: check_password(password), done)
+
+    def _page_working(self):
+        self.working_status = Adw.StatusPage(vexpand=True)
+        self.working_status.set_child(Adw.Spinner(width_request=48, height_request=48))
+        return self.working_status
+
+    def _page_error(self):
+        self.error_status = Adw.StatusPage(icon_name="dialog-warning-symbolic", vexpand=True,
+                                           title=t("error_title"))
+        back = self._button(t("back"))
+        back.connect("clicked", lambda *_: self._back())
+        self.error_status.set_child(back)
+        return self.error_status
+
+    def _error(self, message):
+        self.error_status.set_description(GLib.markup_escape_text(message))
+        self.stack.set_visible_child_name("error")
+        self.back.set_visible(bool(self.history))
+
+    def _set_up(self, password):
+        folder = self._selected()
+        account = self.obj.get_account()
+        config = {"provider": account.props.provider_type, "account": account.props.id,
+                  "folder": folder.path, "repo": self._repo_for(folder)}
+        self.working_status.set_title(t("working_title"))
+        self.working_status.set_description(t("working_body"))
+        self._show("working")
+        env = cloud.restic_env(self.env, config, password)
+
+        def work():
+            # An existing repository (e.g. this computer's backups from an
+            # earlier install) is used again, if the password opens it.
+            found = restic(env, "cat", "config")
+            if found.returncode == cloud.RESTIC_BAD_PASSWORD:
+                return "bad_password"
+            if found.returncode == cloud.RESTIC_NO_REPO:
+                created = restic(env, "init")
+                if created.returncode != 0:
+                    raise RuntimeError(created.stderr.strip() or "restic init")
+            elif found.returncode != 0:
+                raise RuntimeError(found.stderr.strip() or "restic cat config")
+            cloud.store_password(config["repo"], password)
+            cloud.save_config(config)
+            for args in (("daemon-reload",), ("enable", "--now", "live-backup.timer"),
+                         ("start", "--no-block", "live-backup.service")):
+                result = systemctl(*args)
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr.strip())
+            return "ok"
+
+        def done(result, error):
+            if error:
+                self._error(error)
+            elif result == "bad_password":
+                self._error(t("err_repo_password"))
+            else:
+                if os.path.exists(AUTOSTART):
+                    os.remove(AUTOSTART)
+                self.password.set_text("")
+                self.history.clear()
+                self._show("done", remember=False)
+        in_thread(work, done)
+
+    def _page_done(self):
+        status = Adw.StatusPage(icon_name="emblem-ok-symbolic", title=t("done_title"),
+                                description=t("done_body"), vexpand=True)
+        close = self._button(t("close"), suggested=True)
+        close.connect("clicked", lambda *_: self.close())
+        status.set_child(close)
+        return status
+
+    # --- status ---------------------------------------------------------------------
+
+    def _page_status(self):
+        group = Adw.PreferencesGroup(title=t("status_title"))
+        self.status_rows = {}
+        for key in ("where", "folder", "last"):
+            row = Adw.ActionRow(title=t(key), subtitle_selectable=True)
+            row.add_css_class("property")
+            group.add(row)
+            self.status_rows[key] = row
+        now = self._button(t("backup_now"), suggested=True)
+        now.connect("clicked", lambda *_: self._backup_now())
+        change = self._button(t("change"))
+        change.connect("clicked", lambda *_: self._show("choose"))
+        stop = self._button(t("stop"), destructive=True)
+        stop.connect("clicked", lambda *_: self._stop())
+        buttons = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        for button in (now, change, stop):
+            buttons.append(button)
+        return self._page(group, buttons)
+
+    def _refresh_status(self):
+        config = cloud.load_config()
+        if not config:
+            return False
+        obj = cloud.account_by_id(self.client, config["account"])
+        if obj:
+            name, identity = cloud.describe(obj)
+            self.status_rows["where"].set_subtitle(f"{name} ({identity})")
+        else:
+            self.status_rows["where"].set_subtitle(t("no_account"))
+        self.status_rows["folder"].set_subtitle(config["repo"])
+        active = systemctl("is-active", "live-backup.service").stdout.strip() == "activating"
+        status = cloud.load_status()
+        if active:
+            last = t("running")
+        elif not status or "time" not in status:
+            last = t("never")
+        else:
+            when = GLib.DateTime.new_from_iso8601(status["time"], None)
+            when = when.to_local().format("%x %X") if when else status["time"]
+            last = f"{when} — {t('ok') if status.get('ok') else status.get('message', '')}"
+        self.status_rows["last"].set_subtitle(GLib.markup_escape_text(last))
+        if not hasattr(self, "_status_timer"):
+            self._status_timer = GLib.timeout_add_seconds(5, self._refresh_status)
+        return True
+
+    def _backup_now(self):
+        systemctl("start", "--no-block", "live-backup.service")
+        GLib.timeout_add(500, lambda: self._refresh_status() and False)
+
+    def _stop(self):
+        dialog = Adw.AlertDialog(heading=t("stop_confirm"), body=t("stop_body"),
+                                 close_response="cancel")
+        dialog.add_response("cancel", t("cancel"))
+        dialog.add_response("stop", t("stop"))
+        dialog.set_response_appearance("stop", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def response(_dialog, answer):
+            if answer == "stop":
+                systemctl("disable", "--now", "live-backup.timer")
+                if os.path.exists(cloud.CONFIG):
+                    os.remove(cloud.CONFIG)
+                self.history.clear()
+                self._show("choose", remember=False)
+        dialog.connect("response", response)
+        dialog.present(self)
+
+
+class BackupApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID,
+                         flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.first_run = False
+
+    def do_command_line(self, command_line):
+        self.first_run = "--first-run" in command_line.get_arguments()[1:]
+        self.activate()
+        return 0
+
+    def do_activate(self):
+        window = self.get_active_window()
+        if window is None:
+            # First run with the backups already set up: nothing to ask.
+            if self.first_run and cloud.load_config():
+                return
+            window = BackupWindow(self, self.first_run)
+        window.present()
+
+
+if __name__ == "__main__":
+    sys.exit(BackupApp().run(sys.argv))

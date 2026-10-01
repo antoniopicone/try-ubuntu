@@ -1,6 +1,6 @@
 # Ghostty's settings for new users (see `ghostty +show-config --default --docs`).
 # The interface follows the session's language: no `language` here.
-font-family = Hack Nerd Font Mono
+font-family = JetBrainsMono Nerd Font Mono
 font-size = 11
 window-padding-x = 10
 theme = Catppuccin Mocha

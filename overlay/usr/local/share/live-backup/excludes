@@ -1,0 +1,9 @@
+# Not backed up (restic --exclude-file): what can be made or downloaded
+# again, and what changes all the time.
+/home/*/.cache
+/home/*/.local/share/Trash
+# container images and layers (podman), Flatpak apps' caches
+/home/*/.local/share/containers
+/home/*/.var/app/*/cache
+# the backup's own state
+/home/*/.local/state/live-backup

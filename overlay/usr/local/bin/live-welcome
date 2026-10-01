@@ -2,8 +2,10 @@
 """live-welcome: the first-run welcome app of the GNOME live system (draft).
 
 Starts in the live user's session (autologin) and walks through language,
-keyboard layout, the account (full name, username, password, email) and the
-appearance (light/dark, accent color). The summary's "Start using Ubuntu"
+keyboard layout, the account (full name, username, password, email), its
+picture (an avatar in one of DiceBear's CC0 styles, or the initials) and
+the appearance
+(light/dark, accent color). The summary's "Start using Ubuntu"
 button hands the choices to /usr/local/lib/live-welcome/setup-user (through
 pkexec), which creates the user; then the live session logs out to GDM,
 where the new user logs in with everything already applied.
@@ -12,6 +14,7 @@ Keyboard layout and appearance are previewed live in the running session.
 The UI speaks English and Italian (switching as soon as a language is
 picked); other languages fall back to English for now.
 """
+import base64
 import json
 import os
 import re
@@ -22,6 +25,9 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+
+sys.path.insert(0, "/usr/local/lib/live-welcome")
+import avatars  # noqa: E402
 
 APP_ID = "org.ubuntu.LiveWelcome"
 SETUP_HELPER = "/usr/local/lib/live-welcome/setup-user"
@@ -83,6 +89,29 @@ STRINGS = {
         "err_password": "The password must be at least 6 characters long.",
         "err_password2": "The passwords do not match.",
         "err_email": "Enter a valid email address.",
+        "avatar_title": "Your Picture",
+        "avatar_body": "Make your avatar: pick a style, then change what you like.",
+        "use_picture": "Use a picture",
+        "use_picture_body": "Otherwise your initials",
+        "random": "Surprise Me",
+        "avatar_style": "Style",
+        "features": "Features",
+        "colors": "Colors",
+        "none": "None",
+        "part_hair": "Hair", "part_expression": "Expression", "part_face": "Face",
+        "part_head": "Head", "part_facialHair": "Beard", "part_beard": "Beard",
+        "part_mask": "Mask", "part_accessories": "Accessories", "part_glasses": "Glasses",
+        "part_earrings": "Earrings", "part_eyebrows": "Eyebrows", "part_brows": "Eyebrows",
+        "part_eyes": "Eyes", "part_freckles": "Freckles", "part_hairAccessories": "Hair clip",
+        "part_mouth": "Mouth", "part_lips": "Lips", "part_nose": "Nose", "part_body": "Clothes",
+        "part_bodyIcon": "Badge", "part_gesture": "Gesture", "part_clothing": "Clothes",
+        "part_hat": "Hat",
+        "color_skin": "Skin", "color_hair": "Hair", "color_headContrast": "Hair",
+        "color_clothing": "Clothes", "color_eyes": "Eyes", "color_glasses": "Glasses",
+        "color_hat": "Hat", "color_mouth": "Mouth", "color_accessories": "Accessories",
+        "color_shape": "Color", "color_background": "Background",
+        "previous": "Previous",
+        "next": "Next",
         "appearance_title": "Appearance",
         "appearance_body": "Choose the style and the accent color.",
         "style": "Style",
@@ -94,6 +123,8 @@ STRINGS = {
         "row_name": "Name",
         "row_username": "Username",
         "row_email": "Email",
+        "row_picture": "Picture",
+        "initials": "Your initials",
         "row_language": "Language",
         "row_keyboard": "Keyboard",
         "row_theme": "Theme",
@@ -101,7 +132,7 @@ STRINGS = {
         "working_title": "Setting Up Your Account",
         "working_body": "Just a moment…",
         "done_title": "All Set",
-        "done_body": "Logging out: log in as {user} with your new password.",
+        "done_body": "Logging out: log in as {user} with your new password, then choose where to keep your backups.",
         "error_title": "Something Went Wrong",
         "retry": "Try Again",
         "blue": "Blue", "teal": "Teal", "green": "Green", "yellow": "Yellow",
@@ -133,6 +164,29 @@ STRINGS = {
         "err_password": "La password deve essere lunga almeno 6 caratteri.",
         "err_password2": "Le password non coincidono.",
         "err_email": "Inserisci un indirizzo email valido.",
+        "avatar_title": "La tua immagine",
+        "avatar_body": "Crea il tuo avatar: scegli uno stile, poi cambia quello che vuoi.",
+        "use_picture": "Usa un'immagine",
+        "use_picture_body": "Altrimenti le tue iniziali",
+        "random": "Sorprendimi",
+        "avatar_style": "Stile",
+        "features": "Tratti",
+        "colors": "Colori",
+        "none": "Nessuno",
+        "part_hair": "Capelli", "part_expression": "Espressione", "part_face": "Viso",
+        "part_head": "Testa", "part_facialHair": "Barba", "part_beard": "Barba",
+        "part_mask": "Mascherina", "part_accessories": "Accessori", "part_glasses": "Occhiali",
+        "part_earrings": "Orecchini", "part_eyebrows": "Sopracciglia", "part_brows": "Sopracciglia",
+        "part_eyes": "Occhi", "part_freckles": "Lentiggini", "part_hairAccessories": "Fermaglio",
+        "part_mouth": "Bocca", "part_lips": "Labbra", "part_nose": "Naso", "part_body": "Vestiti",
+        "part_bodyIcon": "Spilla", "part_gesture": "Gesto", "part_clothing": "Vestiti",
+        "part_hat": "Cappello",
+        "color_skin": "Pelle", "color_hair": "Capelli", "color_headContrast": "Capelli",
+        "color_clothing": "Vestiti", "color_eyes": "Occhi", "color_glasses": "Occhiali",
+        "color_hat": "Cappello", "color_mouth": "Bocca", "color_accessories": "Accessori",
+        "color_shape": "Colore", "color_background": "Sfondo",
+        "previous": "Precedente",
+        "next": "Successivo",
         "appearance_title": "Aspetto",
         "appearance_body": "Scegli lo stile e il colore di accento.",
         "style": "Stile",
@@ -144,6 +198,8 @@ STRINGS = {
         "row_name": "Nome",
         "row_username": "Nome utente",
         "row_email": "Email",
+        "row_picture": "Immagine",
+        "initials": "Le tue iniziali",
         "row_language": "Lingua",
         "row_keyboard": "Tastiera",
         "row_theme": "Tema",
@@ -151,7 +207,7 @@ STRINGS = {
         "working_title": "Creazione dell'account",
         "working_body": "Solo un momento…",
         "done_title": "Fatto",
-        "done_body": "Uscita in corso: accedi come {user} con la nuova password.",
+        "done_body": "Uscita in corso: accedi come {user} con la nuova password, poi scegli dove tenere i tuoi backup.",
         "error_title": "Qualcosa è andato storto",
         "retry": "Riprova",
         "blue": "Blu", "teal": "Verde acqua", "green": "Verde", "yellow": "Giallo",
@@ -197,6 +253,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
         self.accent = self.interface.get_string("accent-color")
         self._translatable = []  # (setter, key)
         self._username_edited = False
+        self.styles = avatars.load_styles()
 
         provider = Gtk.CssProvider()
         provider.load_from_string(CSS)
@@ -210,6 +267,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
             ("language", self._page_language()),
             ("keyboard", self._page_keyboard()),
             ("account", self._page_account()),
+            *([("avatar", self._page_avatar())] if self.styles else []),
             ("appearance", self._page_appearance()),
             ("summary", self._page_summary()),
             ("finish", self._page_finish()),
@@ -279,6 +337,8 @@ class WelcomeWindow(Adw.ApplicationWindow):
     def _retranslate(self):
         for setter, key in self._translatable:
             setter(self.t(key))
+        if self.styles:
+            self.avatar_editor.retranslate()
         self.set_title(self.t("title"))
         self._update()
 
@@ -358,6 +418,13 @@ class WelcomeWindow(Adw.ApplicationWindow):
         box.append(self.account_error)
         return self._page(box)
 
+    def _page_avatar(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        box.append(self._group("avatar_title", "avatar_body"))
+        self.avatar_editor = avatars.AvatarEditor(self.styles, self.t)
+        box.append(self.avatar_editor)
+        return self._page(box)
+
     def _page_appearance(self):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
         style = self._group("style", "appearance_body")
@@ -402,13 +469,19 @@ class WelcomeWindow(Adw.ApplicationWindow):
     def _page_summary(self):
         group = self._group("summary_title", "summary_body")
         self.summary_rows = {}
-        for key in ("row_name", "row_username", "row_email", "row_language",
-                    "row_keyboard", "row_theme"):
+        keys = ["row_name", "row_username", "row_email", "row_language", "row_keyboard",
+                "row_theme"]
+        if self.styles:
+            keys.insert(3, "row_picture")
+        for key in keys:
             row = Adw.ActionRow(subtitle_selectable=True)
             row.add_css_class("property")
             self._tr(row.set_title, key)
             group.add(row)
             self.summary_rows[key] = row
+        if self.styles:
+            self.summary_avatar = Adw.Avatar(size=40, show_initials=True)
+            self.summary_rows["row_picture"].add_suffix(self.summary_avatar)
         return self._page(group)
 
     def _page_finish(self):
@@ -444,7 +517,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
         name = self.stack.get_visible_child_name() or "welcome"
         titles = {"welcome": "title", "language": "language_title",
                   "keyboard": "keyboard_title", "account": "account_title",
-                  "appearance": "appearance_title", "summary": "summary_title",
+                  "avatar": "avatar_title", "appearance": "appearance_title", "summary": "summary_title",
                   "finish": "working_title"}
         self.window_title.set_title(self.t(titles[name]))
         self.back.set_visible(name not in ("welcome", "finish"))
@@ -454,6 +527,8 @@ class WelcomeWindow(Adw.ApplicationWindow):
         if name == "account":
             error = self._account_error(show_all=False)
             self.account_error.set_label(self.t(error) if error else "")
+        if name == "avatar":
+            self.avatar_editor.set_name(self.fullname.get_text().strip())
         if name == "summary":
             self._fill_summary()
 
@@ -531,7 +606,11 @@ class WelcomeWindow(Adw.ApplicationWindow):
             "layout": self.layout,
             "color_scheme": self.color_scheme,
             "accent": self.accent,
+            "avatar": base64.b64encode(self._avatar_png()).decode() if self._avatar_png() else "",
         }
+
+    def _avatar_png(self):
+        return self.avatar_editor.png if self.styles else None
 
     def _fill_summary(self):
         c = self._choices()
@@ -539,6 +618,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
             "row_name": c["fullname"],
             "row_username": c["username"],
             "row_email": c["email"],
+            "row_picture": self.avatar_editor.title if self._avatar_png() else self.t("initials"),
             "row_language": dict((l[0], l[1]) for l in LANGUAGES)[self.lang],
             "row_keyboard": dict(LAYOUTS)[self.layout],
             "row_theme": f"{self.t('dark' if self.color_scheme == 'prefer-dark' else 'light')}, "
@@ -546,6 +626,9 @@ class WelcomeWindow(Adw.ApplicationWindow):
         }
         for key, row in self.summary_rows.items():
             row.set_subtitle(GLib.markup_escape_text(values[key]))
+        if self.styles:
+            self.summary_avatar.set_text(c["fullname"])
+            self.summary_avatar.set_custom_image(self.avatar_editor.texture)
 
     # --- finish --------------------------------------------------------------
 

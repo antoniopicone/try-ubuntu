@@ -1,0 +1,9 @@
+[Unit]
+Description=Back up the home folder (restic, see the Backup app)
+Documentation=file:/usr/local/lib/live-backup/run-backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/live-backup/run-backup
+Nice=10
+IOSchedulingClass=idle

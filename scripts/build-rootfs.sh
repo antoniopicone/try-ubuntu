@@ -36,6 +36,9 @@ PURE_SHA256=738b523c59823083de490b3eb6c1116fc45c342e6b32a7d3cf05fdd0f8aa75a8
 NERD_FONTS_VERSION=3.5.1
 HACK_NERD_URL="https://github.com/ryanoasis/nerd-fonts/releases/download/v$NERD_FONTS_VERSION/Hack.tar.xz"
 HACK_NERD_SHA256=cdd389472e10e2261520140ff1b382b4f8a226af5fd0b2735b975d31151d9c3c
+# JetBrains Mono Nerd Font (Ghostty's font), same release.
+JETBRAINS_NERD_URL="https://github.com/ryanoasis/nerd-fonts/releases/download/v$NERD_FONTS_VERSION/JetBrainsMono.tar.xz"
+JETBRAINS_NERD_SHA256=04d5e8f903693f9dd13e16f867e994834e681eb3c72c0d337a770dcda09010cf
 
 # fetch URL SHA256 DEST: download and verify.
 fetch() {
@@ -289,19 +292,36 @@ EOF
 in_chroot runuser -u "$LIVE_USER" -- zsh -i -c 'prompt -c' | grep -q pure \
   || { echo "pure prompt is not active in zsh" >&2; exit 1; }
 
-echo "==> Hack Nerd Font $NERD_FONTS_VERSION"
-# Only the Mono variant (the terminal's font, see /etc/skel/.config/ghostty):
-# the proportional ones would add ~20 MB.
+echo "==> Nerd Fonts $NERD_FONTS_VERSION: Hack, JetBrains Mono"
+# nerd_font TARBALL DIR DOC LICENSE FAMILY FILES...: the given fonts of a
+# Nerd Fonts release into /usr/share/fonts/truetype/DIR, and its LICENSE
+# file as /usr/share/doc/DOC/copyright.
+nerd_font() {
+  local tarball=$1 dir="$ROOTFS/usr/share/fonts/truetype/$2" doc=$3 license=$4 family=$5
+  shift 5
+  rm -rf "$dir" && mkdir -p "$dir"
+  tar xJf "$tarball" -C "$dir" --no-same-owner --wildcards "$@"
+  chmod 644 "$dir"/*.ttf
+  tar xJf "$tarball" -O "$license" | install -Dm644 /dev/stdin "$ROOTFS/usr/share/doc/$doc/copyright"
+  nerd_families+=("$family")
+}
+nerd_families=()
+# Only the Mono variants (terminal fonts): the proportional ones would add
+# ~20 MB each. Hack for prompts and eza; JetBrains Mono is Ghostty's font
+# (see /etc/skel/.config/ghostty), in the four styles a terminal uses
+# (all its weights would be ~39 MB).
 fetch "$HACK_NERD_URL" "$HACK_NERD_SHA256" "$dl/hack-nerd.tar.xz"
-fontdir="$ROOTFS/usr/share/fonts/truetype/hack-nerd-font"
-rm -rf "$fontdir" && mkdir -p "$fontdir"
-tar xJf "$dl/hack-nerd.tar.xz" -C "$fontdir" --no-same-owner --wildcards 'HackNerdFontMono-*.ttf'
-chmod 644 "$fontdir"/*.ttf
-tar xJf "$dl/hack-nerd.tar.xz" -O LICENSE.md | install -Dm644 /dev/stdin "$ROOTFS/usr/share/doc/fonts-hack-nerd/copyright"
+nerd_font "$dl/hack-nerd.tar.xz" hack-nerd-font fonts-hack-nerd LICENSE.md \
+  'Hack Nerd Font Mono' 'HackNerdFontMono-*.ttf'
+fetch "$JETBRAINS_NERD_URL" "$JETBRAINS_NERD_SHA256" "$dl/jetbrains-nerd.tar.xz"
+nerd_font "$dl/jetbrains-nerd.tar.xz" jetbrains-mono-nerd-font fonts-jetbrains-mono-nerd OFL.txt \
+  'JetBrainsMono Nerd Font Mono' JetBrainsMonoNerdFontMono-{Regular,Bold,Italic,BoldItalic}.ttf
 in_chroot fc-cache -f
-in_chroot fc-list : family | grep -qx 'Hack Nerd Font Mono' \
-  || { echo "Hack Nerd Font Mono is not installed" >&2; exit 1; }
-# Ghostty's settings for every user (Hack Nerd Font Mono, Catppuccin Mocha).
+for family in "${nerd_families[@]}"; do
+  in_chroot fc-list : family | tr ',' '\n' | grep -qx "$family" \
+    || { echo "$family is not installed" >&2; exit 1; }
+done
+# Ghostty's settings for every user (JetBrains Mono Nerd Font, Catppuccin Mocha).
 in_chroot runuser -u "$LIVE_USER" -- env HOME="/home/$LIVE_USER" ghostty +validate-config \
   || { echo "/etc/skel/.config/ghostty/config is not valid" >&2; exit 1; }
 
@@ -380,6 +400,9 @@ EOF
 
 desktop_configure
 in_chroot glib-compile-schemas /usr/share/glib-2.0/schemas
+[[ $(in_chroot env GSETTINGS_BACKEND=memory gsettings get org.gnome.desktop.interface monospace-font-name) \
+   == "'JetBrainsMono Nerd Font Mono 11'" ]] \
+  || { echo "GNOME's monospace font is not JetBrains Mono Nerd Font" >&2; exit 1; }
 
 echo "==> Slimming down"
 kver=$(ls "$ROOTFS/usr/lib/modules")

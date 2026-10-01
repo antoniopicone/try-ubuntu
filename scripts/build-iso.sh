@@ -13,7 +13,11 @@ set -euo pipefail
 # Limine, pinned: the files are checked individually (the release archive is
 # generated on the fly by the forge, its own hash is not stable).
 LIMINE_VERSION=11.2.1
-LIMINE_URL="https://codeberg.org/Limine/Limine/archive/v$LIMINE_VERSION-binary.tar.gz"
+# Codeberg first, the GitHub mirror when Codeberg is down (same files).
+LIMINE_URLS=(
+  "https://codeberg.org/Limine/Limine/archive/v$LIMINE_VERSION-binary.tar.gz"
+  "https://github.com/limine-bootloader/limine/archive/refs/tags/v$LIMINE_VERSION-binary.tar.gz"
+)
 LIMINE_BOOTAA64_SHA256=d06b255a8affd87f16bc7bdfce30a0a0ba3b883b8b0dae8146c81d6a56ed649d
 
 layout="$WORK/btrfs-layout"
@@ -91,9 +95,17 @@ btrfs inspect-internal dump-tree -t root "$img" | grep -oE 'ref .* name [@a-z]+'
 
 echo "==> Limine $LIMINE_VERSION (arm64 UEFI)"
 limine_dir="$WORK/limine"
+limine_tgz="$WORK/limine.tar.gz"
+for url in "${LIMINE_URLS[@]}"; do
+  curl -fsSL --retry 3 -o "$limine_tgz" "$url" && break
+  echo "    $url unavailable, trying the next source"
+  rm -f "$limine_tgz"
+done
+[[ -f $limine_tgz ]] || { echo "Limine $LIMINE_VERSION: no source reachable" >&2; exit 1; }
 rm -rf "$limine_dir"
 mkdir -p "$limine_dir"
-curl -fsSL "$LIMINE_URL" | tar xz -C "$limine_dir" --strip-components=1
+tar xzf "$limine_tgz" -C "$limine_dir" --strip-components=1
+rm -f "$limine_tgz"
 echo "$LIMINE_BOOTAA64_SHA256  $limine_dir/BOOTAA64.EFI" | sha256sum -c --quiet
 
 # Limine reads /boot/limine/limine.conf from the ISO 9660 volume, where the

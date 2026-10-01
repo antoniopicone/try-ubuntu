@@ -1,0 +1,126 @@
+#!/usr/bin/python3
+"""run-backup: one backup of the home folder with restic, then the old
+versions it no longer keeps are forgotten (and, once a day, pruned).
+
+Started every hour by live-backup.timer (a systemd user unit: the GNOME
+Online Accounts account and the keyring with the repository's password are
+the session's). With Google Drive the job gets GOA's access token, valid
+for at most an hour: a backup that takes longer is interrupted before it
+expires and the next one goes on from there (restic keeps what was sent).
+The result goes to ~/.local/state/live-backup/status.json, read by the
+Backup app; a failure is also a notification.
+"""
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+sys.path.insert(0, "/usr/local/lib/live-backup")
+import cloud  # noqa: E402
+
+KEEP = ["--keep-hourly", "24", "--keep-daily", "7", "--keep-weekly", "4",
+        "--keep-monthly", "12", "--keep-yearly", "3"]
+TAG = "live-backup"
+PRUNE_EVERY = 24 * 3600
+
+MESSAGES = {
+    "en": {"failed": "Backup failed", "no_account": "The online account is gone: open Backup.",
+           "no_password": "The keyring is locked: the backup password isn't available.",
+           "interrupted": "Not finished yet: it goes on at the next backup."},
+    "it": {"failed": "Backup non riuscito", "no_account": "L'account online non c'è più: apri Backup.",
+           "no_password": "Il portachiavi è bloccato: la password dei backup non è disponibile.",
+           "interrupted": "Non ancora finito: continua al prossimo backup."},
+}
+
+
+def t(key):
+    return MESSAGES.get(os.environ.get("LANG", "")[:2], MESSAGES["en"])[key]
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def finish(status, ok, message=""):
+    status.update(time=now(), ok=ok, message=message)
+    cloud.save_status(status)
+    if not ok:
+        subprocess.run(["notify-send", "--app-name=Backup", "--icon=folder-remote",
+                        t("failed"), message[-300:]])
+    sys.exit(0 if ok else 1)
+
+
+def run(cmd, env, timeout=None):
+    """restic, stopped with SIGINT (restic then saves what it has) at the
+    timeout. Returns (exit code or None if interrupted, JSON summary, stderr)."""
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.send_signal(signal.SIGINT)
+        out, err = proc.communicate()
+        return None, None, err
+    summary = None
+    for line in out.splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(message, dict) and message.get("message_type") == "summary":
+            summary = message
+    return proc.returncode, summary, err
+
+
+def main():
+    config = cloud.load_config()
+    if not config:
+        return
+    status = cloud.load_status() or {}
+    status["started"] = now()
+    obj = cloud.account_by_id(cloud.goa_client(), config["account"])
+    if obj is None:
+        finish(status, False, t("no_account"))
+    password = cloud.lookup_password(config["repo"])
+    if not password:
+        finish(status, False, t("no_password"))
+    try:
+        env, valid = cloud.remote_env(obj)
+    except Exception as e:  # GOA: offline, credentials to renew...
+        finish(status, False, str(getattr(e, "message", e)))
+    env = cloud.restic_env(env, config, password)
+    started = time.monotonic()
+    deadline = valid - 180 if valid else None
+
+    home = os.path.expanduser("~")
+    code, summary, err = run(
+        ["restic", "backup", "--json", "--host", socket.gethostname(), "--tag", TAG,
+         "--exclude-caches", "--exclude-file", cloud.EXCLUDES, home], env, deadline)
+    if code is None:
+        finish(status, False, t("interrupted"))
+    # 3: some files couldn't be read, the snapshot is there anyway
+    if code not in (0, 3):
+        finish(status, False, err.strip() or f"restic backup: {code}")
+    if summary:
+        status["snapshot"] = summary.get("snapshot_id")
+        status["files"] = summary.get("total_files_processed")
+        status["bytes"] = summary.get("total_bytes_processed")
+        status["added"] = summary.get("data_added")
+
+    left = deadline - (time.monotonic() - started) if deadline else None
+    prune = time.time() - status.get("pruned", 0) > PRUNE_EVERY
+    forget = ["restic", "forget", "--host", socket.gethostname(), "--tag", TAG, *KEEP]
+    code, _, err = run(forget + (["--prune"] if prune else []), env, left)
+    if code == 0 and prune:
+        status["pruned"] = time.time()
+    elif code != 0:
+        finish(status, False, (err or "").strip() or "restic forget")
+    finish(status, True)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,21 @@
+#!/bin/sh
+# ghostty: starts Ghostty (/usr/bin/ghostty.real) with OpenGL in software
+# on a virtio-gpu display.
+#
+# Ghostty needs OpenGL 4.3. On a Mac, QEMU's virgl renders on OpenGL ES
+# (ANGLE on Metal), and the guest's virgl driver offers less than that:
+# Ghostty then can't draw. llvmpipe has 4.5 and is enough for a terminal;
+# the rest of the desktop keeps the GPU. On real hardware, or any other
+# GPU, nothing changes. LIBGL_ALWAYS_SOFTWARE=0 in the environment keeps
+# the GPU for Ghostty too.
+#
+# /usr/bin/ghostty is this script (build-rootfs.sh diverts the package's
+# binary): the .desktop file, D-Bus and systemd start that path.
+for driver in /sys/class/drm/card*/device/driver; do
+  link=$(readlink "$driver") || continue
+  if [ "${link##*/}" = virtio_gpu ]; then
+    export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE-1}"
+    break
+  fi
+done
+exec /usr/bin/ghostty.real "$@"

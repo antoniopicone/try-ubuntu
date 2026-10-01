@@ -12,7 +12,9 @@
 # through QEMU's fw_cfg (live-locale.service picks it up).
 # The guest's serial console goes to this terminal only with --headless or
 # --serial (Ctrl-A X quits QEMU, Ctrl-A C toggles the QEMU monitor); with a
-# window the terminal stays quiet. By default the guest gets half of the
+# window the terminal stays quiet and the serial console is a text console
+# in the window (Ctrl-Opt-2, back with Ctrl-Opt-1). Either way it's logged
+# to dist/serial.log. By default the guest gets half of the
 # host's CPUs and a third of its RAM (at least 4 GiB).
 set -euo pipefail
 
@@ -28,8 +30,9 @@ Usage: ./run-qemu.sh [options]
                  the live root lives in RAM)
   --cpus N       guest vCPUs (default: half of the host's CPUs)
   --headless     no window: serial console only (login on ttyAMA0)
-  --serial       also attach the serial console to this terminal when
-                 there is a window (it's always there with --headless)
+  --serial       attach the serial console to this terminal instead of the
+                 window's text console (Ctrl-Opt-2; always the terminal
+                 with --headless)
   --vnc DISPLAY  graphics over VNC instead of a window (e.g. :1 -> port 5901;
                  no GPU acceleration)
   --no-gpu       render the desktop in software even when QEMU could use
@@ -250,11 +253,17 @@ if [[ "$machine" == *virtualization=on* ]]; then
 fi
 
 # Serial console on the terminal only when asked (always with --headless):
-# otherwise the guest's boot and console output would flood it.
+# otherwise the guest's boot and console output would flood it. Without it,
+# it's a text console in the window (View menu, or Ctrl-Opt-2 and back with
+# Ctrl-Opt-1; the same keys over VNC): a login prompt and the kernel's
+# messages even when the desktop doesn't come up. Either way it's also
+# logged to dist/serial.log (overwritten at every boot).
+serial_log="$(dirname "$vars")/serial.log"
 if ((headless || serial)); then
-  serial_args=(-serial mon:stdio)
+  serial_args=(-chardev "stdio,id=serial0,mux=on,signal=off,logfile=$serial_log"
+               -serial chardev:serial0 -mon chardev=serial0,mode=readline)
 else
-  serial_args=(-serial null)
+  serial_args=(-chardev "vc,id=serial0,logfile=$serial_log" -serial chardev:serial0)
 fi
 
 # GPU acceleration (VirGL) needs a QEMU with virtio-gpu-gl-pci and an
@@ -294,21 +303,40 @@ elif [[ "${accel[1]}" == kvm ]]; then
   balloon_args=(-device virtio-balloon-pci,free-page-reporting=on)
 fi
 
-exec "$qemu" \
-  -name "Ubuntu Live" \
-  -machine "$machine" "${accel[@]}" -smp "$cpus" -m "$mem" \
-  -drive if=pflash,format=raw,unit=0,readonly=on,file="$code" \
-  -drive if=pflash,format=raw,unit=1,file="$vars" \
-  -device virtio-scsi-pci,id=scsi0 \
-  -drive if=none,id=live,media=cdrom,readonly=on,format=raw,file="$iso" \
-  -device scsi-cd,bus=scsi0.0,drive=live,bootindex=0 \
-  ${persist_args[@]+"${persist_args[@]}"} \
-  -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:"$ssh_port"-:22 \
-  -device virtio-rng-pci \
-  ${balloon_args[@]+"${balloon_args[@]}"} \
-  ${kernel_args[@]+"${kernel_args[@]}"} \
-  ${lang_args[@]+"${lang_args[@]}"} \
-  -boot menu=on,splash-time=0 \
-  "${display[@]}" \
-  "${serial_args[@]}" \
-  "$@"
+# With nested virtualization a reboot started by the guest crashes edk2
+# (a stack overflow in ArmCpuDxe: once Linux has used EL2, HVF doesn't
+# reset all of it, while a reset from QEMU is fine). So there a guest
+# reboot makes QEMU quit, and it's started again from scratch: the serial
+# log tells a reboot ("reboot: Restarting system") from a power-off.
+reboot_args=()
+[[ "$machine" == *virtualization=on* ]] && reboot_args=(-action reboot=shutdown)
+
+qemu_args=(
+  -name "Ubuntu Live"
+  -machine "$machine" "${accel[@]}" -smp "$cpus" -m "$mem"
+  -drive if=pflash,format=raw,unit=0,readonly=on,file="$code"
+  -drive if=pflash,format=raw,unit=1,file="$vars"
+  -device virtio-scsi-pci,id=scsi0
+  -drive if=none,id=live,media=cdrom,readonly=on,format=raw,file="$iso"
+  -device scsi-cd,bus=scsi0.0,drive=live,bootindex=0
+  ${persist_args[@]+"${persist_args[@]}"}
+  -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:"$ssh_port"-:22
+  -device virtio-rng-pci
+  ${balloon_args[@]+"${balloon_args[@]}"}
+  ${kernel_args[@]+"${kernel_args[@]}"}
+  ${lang_args[@]+"${lang_args[@]}"}
+  -boot menu=on,splash-time=0
+  "${display[@]}"
+  "${serial_args[@]}"
+  ${reboot_args[@]+"${reboot_args[@]}"}
+)
+if ((${#reboot_args[@]} == 0)); then
+  exec "$qemu" "${qemu_args[@]}" "$@"
+fi
+while :; do
+  status=0
+  "$qemu" "${qemu_args[@]}" "$@" || status=$?
+  ((status == 0)) && tail -n 3 "$serial_log" 2>/dev/null | grep -qa 'reboot: Restarting system' ||
+    exit "$status"
+  echo "The guest rebooted: restarting QEMU"
+done

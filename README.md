@@ -88,8 +88,8 @@ app takes over: it creates your user and logs out to GDM (see
 | Filesystem | btrfs with the subvolumes `@` → `/`, `@home` → `/home`, `@var` → `/var`, `@snapshots` → `/.snapshots` (flat layout, `compress=zstd:1`). **snapper** manages `/`; snapshot #1 is the image as built |
 | Desktop | a minimal **GNOME 51**: Shell, Settings, the vanilla GNOME session, GDM (see [The desktop](#the-desktop)) |
 | Theme | dark style with GNOME's blue accent, Adwaita Sans, Yaru icons, and **one of Ubuntu's stock wallpapers, picked at random at each build** |
-| Apps | **ghostty** (Hack Nerd Font Mono, Catppuccin Mocha), **Nautilus** (with *Open in Ghostty*), **Chromium** (in the desktop's language and light/dark style, with uBlock Origin Lite), GNOME Software (with **Flatpak** and Flathub), Disks, Resources, Extensions |
-| Fonts | Adwaita Sans; Liberation, **Carlito** and **Caladea** (metric-compatible with Arial/Times New Roman/Courier New and Calibri/Cambria, so Office documents keep their layout); JetBrains Mono; **Hack Nerd Font Mono** |
+| Apps | **ghostty** (JetBrains Mono Nerd Font, Catppuccin Mocha; OpenGL in software under QEMU's virgl, which lacks the OpenGL 4.3 it needs), **Nautilus** (with *Open in Ghostty*), **Chromium** (in the desktop's language and light/dark style, with uBlock Origin Lite), GNOME Software (with **Flatpak** and Flathub), Disks, Resources, Extensions, **Backup** (hourly, end-to-end encrypted backups of your home folder with restic, to Google Drive or Nextcloud) |
+| Fonts | Adwaita Sans; Liberation, **Carlito** and **Caladea** (metric-compatible with Arial/Times New Roman/Courier New and Calibri/Cambria, so Office documents keep their layout); JetBrains Mono; **JetBrains Mono Nerd Font** (GNOME's monospace font and Ghostty's) and **Hack Nerd Font Mono** |
 | Network | NetworkManager (via netplan, as on Ubuntu Desktop) |
 | Services | polkit, UPower, power-profiles-daemon, BlueZ, GeoClue, avahi-daemon (+ nss-mdns), Tailscale, ufw |
 | Tools | podman (rootless: uidmap + passt), git, curl, wget, **eza** (`ls` is `eza --icons=always`), **apfs-fuse** (Mac disks, read-only, also from Nautilus) |
@@ -118,8 +118,9 @@ repository:
 - [Limine](https://codeberg.org/Limine/Limine) (`LIMINE_*` in
   build-iso.sh)
 - the GNOME Shell extensions (`EXTENSIONS` in desktop-gnome.sh)
-- [Hack Nerd Font](https://github.com/ryanoasis/nerd-fonts), the Mono
-  variant only (`HACK_NERD_*` in build-rootfs.sh)
+- [Hack and JetBrains Mono Nerd Fonts](https://github.com/ryanoasis/nerd-fonts),
+  the Mono variants only, JetBrains Mono in its four terminal styles
+  (`HACK_NERD_*`, `JETBRAINS_NERD_*` in build-rootfs.sh)
 - [apfs-fuse](https://github.com/sgan81/apfs-fuse) and its lzfse
   submodule, built from source by
   [scripts/build-apfs-fuse.sh](scripts/build-apfs-fuse.sh) (it has no
@@ -226,7 +227,7 @@ This means the live session runs on real btrfs, so snapshots,
    - adds the extra repositories and installs the packages and the
      [overlay/](overlay/)
    - sets up Plymouth, ufw, rootless podman, snapper, uv, zsh + pure,
-     Hack Nerd Font, apfs-fuse, Flathub and the default apps
+     Nerd Fonts, apfs-fuse, Flathub and the default apps
    - picks the wallpaper
    - configures GNOME, GDM and the welcome app
    - slims the image down and builds the initramfs
@@ -260,6 +261,7 @@ started by install.sh):
 | `persist.qcow2` | the persistent disk (sparse, 32G at most) |
 | `persist.qcow2.iso` | checksum of the ISO the disk belongs to; when the ISO changes, the disk is moved aside to `persist-<date>.qcow2` |
 | `efivars.fd` | UEFI variables (boot entries) |
+| `serial.log` | the guest's serial console output of the last boot |
 | `.kernel-<iso>/` | kernel, initramfs and `limine.conf` extracted from the ISO for nested virtualization, refreshed when the ISO changes |
 
 | Option | |
@@ -271,7 +273,7 @@ started by install.sh):
 | `--no-nested` | no virtualization extensions in the guest, and the Limine menu back (with nested virtualization the kernel boots directly, see below) |
 | `--qemu PATH` | the `qemu-system-aarch64` to use |
 | `--headless` | no graphics at all: login on the serial console |
-| `--serial` | with a window, also attach the serial console to the terminal |
+| `--serial` | with a window, attach the serial console to the terminal instead of the window's text console |
 | `--persist[=FILE]` | the persistent qcow2 disk, **on by default** (`dist/persist.qcow2`, 32G, created on first use; replaced by a new one, the old one kept, when the ISO changes) |
 | `--no-persist` | RAM only: everything is lost at shutdown |
 | `--efivars FILE` | UEFI variable store (default `dist/efivars.fd`); give each VM running at the same time its own |
@@ -280,7 +282,14 @@ started by install.sh):
 
 With a window the terminal stays quiet: the guest's serial console is
 attached to it only with `--headless` or `--serial`, multiplexed with the
-monitor (`Ctrl-A X` quits QEMU, `Ctrl-A C` opens the monitor).
+monitor (`Ctrl-A X` quits QEMU, `Ctrl-A C` opens the monitor). Otherwise
+it's a text console in the window itself: **Ctrl-Opt-2** (or the View
+menu) shows it, Ctrl-Opt-1 goes back to the desktop, and the same keys
+work over VNC. It has a login prompt (`ttyAMA0`) and the kernel's
+messages, so when the desktop doesn't come up (the window says *Display
+output is not active*) you can still log in and look around, e.g.
+`journalctl -b -p err`. Either way, everything the serial console prints
+is logged to `dist/serial.log`, overwritten at every boot.
 
 QEMU runs with `-boot menu=on,splash-time=0`. edk2 takes its boot timeout
 from QEMU, so instead of waiting ~5 s on the TianoCore logo it starts Limine
@@ -309,7 +318,11 @@ so the guest only gets a framebuffer and GNOME renders in software.
   anything that waits (Limine's countdown stays at 5): with nested
   virtualization, run-qemu.sh takes the kernel, the initramfs and the
   default entry's command line from the ISO and has QEMU load them, with no
-  Limine menu. Use `--no-nested` to get the menu (e.g. to boot a snapshot)
+  Limine menu. Use `--no-nested` to get the menu (e.g. to boot a snapshot).
+  A reboot from inside the guest would crash edk2 (once Linux has used
+  EL2, HVF doesn't reset all of it: a stack overflow in `ArmCpuDxe`), so
+  with nested virtualization it makes QEMU quit and run-qemu.sh starts it
+  again: the window closes and reopens
 - **memory**: free-page reporting (`virtio-balloon`) hands the RAM the guest
   frees back to macOS (it needs the HVF patch, so run-qemu.sh enables it
   only with this QEMU, and always with kvm)
@@ -373,9 +386,17 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
      it as you pick.
   3. **Account**: full name, username (suggested from the name), password
      twice, and email, with validation.
-  4. **Appearance**: light or dark, and one of GNOME's nine accent colors.
+  4. **Picture**: an avatar in one of DiceBear's CC0 styles (Open Peeps,
+     Lorelei, Notionists, Pixel Art, Thumbs), random at first. Arrows change
+     each part (hair, eyes, beard…) and swatches its colors. Or you can
+     switch it off and keep your initials. The app composes the avatars
+     itself ([avatars.py](overlay/usr/local/lib/live-welcome/avatars.py),
+     librsvg), from the style packages that
+     [dicebear.py](scripts/dicebear.py) turns into JSON at build time, so
+     it works offline and sends nothing anywhere.
+  5. **Appearance**: light or dark, and one of GNOME's nine accent colors.
      The live session previews the choice.
-  5. **Summary**, then **"Start using Ubuntu"**.
+  6. **Summary**, then **"Start using Ubuntu"**.
   
   That button runs [setup-user](overlay/usr/local/lib/live-welcome/setup-user)
   through `pkexec`. A [polkit policy](overlay/usr/share/polkit-1/actions/org.ubuntu.live-welcome.policy)
@@ -387,11 +408,45 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   - compiles the user's GNOME settings into their dconf database: style,
     accent, Yaru variant, input source and region. The first login is
     already themed
+  - installs the picture (AccountsService: GDM, the Shell and Settings
+    show it)
   - writes `~/.gitconfig` with `user.name` / `user.email`
+  - starts the Backup app at the first login (see below)
   - retires the live user: no autologin, hidden from GDM, password locked,
     passwordless sudo removed
   
   The session then logs out to GDM, where only the new user is listed.
+- **Backup** ([live-backup](overlay/usr/local/bin/live-backup)) opens by
+  itself at the new user's first login. It asks where to keep your data,
+  documents and preferences safe: a folder on **Google Drive** or on
+  **Nextcloud**. iCloud, Samba and SFTP are listed but not available yet.
+  "Set Up Later" skips it; the app stays in the app grid.
+  - The cloud access is a **GNOME Online Accounts** account, so it's in
+    Settings › Online Accounts too (and its files in Nautilus). The app
+    uses one that's already there, or opens Settings' own dialog to add
+    it.
+  - You pick the folder in a tree of the account's folders (and can create
+    one). The backups go in `Ubuntu Backup` inside it. A folder that
+    already has backups made with the same password (an earlier install)
+    is used again.
+  - **End-to-end encryption**: restic encrypts everything on the computer
+    with your login password (checked, and kept in the GNOME keyring)
+    before it's sent. The provider sees only encrypted data. Without the
+    password the backups can't be restored, and changing your login
+    password later doesn't change theirs.
+  - [run-backup](overlay/usr/local/lib/live-backup/run-backup), started
+    by a systemd user timer every hour while you're logged in (a missed
+    one runs at the next login), backs up your home folder (the `@home`
+    subvolume's), without caches, Trash and container images
+    ([excludes](overlay/usr/local/share/live-backup/excludes)). It keeps
+    24 hourly, 7 daily, 4 weekly, 12 monthly and 3 yearly versions (pruned
+    once a day). restic reaches the cloud through rclone, with the
+    credentials of the GOA account fetched at every backup: Google's token
+    lasts an hour, so a longer first backup continues at the next one. A
+    failure is a notification. The app shows the last backup, and can
+    start one, change the folder or stop them.
+  - Restoring has no UI yet: `restic` with the same repository
+    (`rclone:<remote>:<folder>/Ubuntu Backup`) does it.
 - **Chromium** follows the desktop, like a GNOME app:
   - **language**: its UI follows `LANG`, like the rest of the session.
     `chromium-l10n` provides the translations; the build keeps only the
