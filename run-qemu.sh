@@ -16,6 +16,10 @@
 # in the window (Ctrl-Opt-2, back with Ctrl-Opt-1). Either way it's logged
 # to dist/serial.log. By default the guest gets half of the
 # host's CPUs and a third of its RAM (at least 4 GiB).
+# When QEMU has them (the one from qemu/build.sh, Homebrew's), the guest
+# also gets sound (virtio-sound, through CoreAudio on macOS), the clipboard
+# shared with the window (qemu-vdagent, for the guest's spice-vdagent) and,
+# with --shared-folder, a folder of the host (9p).
 set -euo pipefail
 
 usage() {
@@ -47,6 +51,10 @@ Usage: ./run-qemu.sh [options]
   --ssh PORT     host port forwarded to guest SSH (default: 2222)
   --efivars FILE UEFI variable store (default: dist/efivars.fd); give
                  each VM running at the same time its own
+  --shared-folder PATH
+                 share a folder of the host with the guest, read/write: it
+                 shows up in Files under its own name (/media/NAME)
+  --no-audio     no sound device
   -- ARGS...     pass the remaining arguments to QEMU unchanged
 EOF
 }
@@ -65,6 +73,8 @@ vars=""
 gpu=1
 nested=1
 qemu=""
+shared=""
+audio=1
 while (($#)); do
   case "$1" in
     --iso)  iso=$2; shift 2 ;;
@@ -79,6 +89,8 @@ while (($#)); do
     --no-gpu) gpu=0; shift ;;
     --no-nested) nested=0; shift ;;
     --qemu) qemu=$2; shift 2 ;;
+    --shared-folder) shared=$2; shift 2 ;;
+    --no-audio) audio=0; shift ;;
     --persist) persist="$project_dir/dist/persist.qcow2"; shift ;;
     --persist=*) persist=${1#*=}; shift ;;
     --no-persist) persist=""; shift ;;
@@ -266,12 +278,17 @@ else
   serial_args=(-chardev "vc,id=serial0,logfile=$serial_log" -serial chardev:serial0)
 fi
 
+# What this QEMU can do: devices, audio backends, chardev backends.
+qemu_devices=$("$qemu" -device help 2>/dev/null || true)
+qemu_audio=$("$qemu" -audiodev help 2>/dev/null || true)
+qemu_chardevs=$("$qemu" -machine none -chardev help 2>/dev/null || true)
+has_device() { grep -qF "name \"$1\"" <<<"$qemu_devices"; }
+
 # GPU acceleration (VirGL) needs a QEMU with virtio-gpu-gl-pci and an
 # OpenGL display: on macOS that's the one from qemu/build.sh, whose Cocoa
 # window renders through ANGLE (OpenGL ES) on Metal. It follows the window's
 # size and the display's refresh rate.
-if ((gpu)) && [[ -z "$vnc" && $(uname -s) == Darwin ]] &&
-   "$qemu" -device help 2>/dev/null | grep -q '"virtio-gpu-gl-pci"'; then
+if ((gpu)) && [[ -z "$vnc" && $(uname -s) == Darwin ]] && has_device virtio-gpu-gl-pci; then
   gpu=1
 else
   gpu=0
@@ -303,6 +320,58 @@ elif [[ "${accel[1]}" == kvm ]]; then
   balloon_args=(-device virtio-balloon-pci,free-page-reporting=on)
 fi
 
+# Sound: virtio-sound, played by the host's sound system (the guest's
+# PipeWire sees it as an ordinary sound card).
+audio_args=()
+if ((audio)); then
+  case "$(uname -s)" in
+    Darwin) backends="coreaudio" ;;
+    *)      backends="pipewire pa alsa" ;;
+  esac
+  backend=""
+  for b in $backends; do
+    grep -qx "$b" <<<"$qemu_audio" && { backend=$b; break; }
+  done
+  if [[ -n "$backend" ]] && has_device virtio-sound-pci; then
+    # QEMU's CoreAudio only plays: just the output stream, no microphone
+    streams=2
+    [[ "$backend" == coreaudio ]] && streams=1
+    audio_args=(-audiodev "$backend,id=snd0" -device "virtio-sound-pci,audiodev=snd0,streams=$streams")
+  else
+    echo "No sound: this QEMU has no virtio-sound or no ${backends// / / } backend." >&2
+  fi
+fi
+
+# Clipboard shared with the window: QEMU's own SPICE agent channel, which
+# the guest's spice-vdagent talks to (as with a SPICE client).
+clipboard_args=()
+if ((!headless)); then
+  if grep -qx '  *qemu-vdagent' <<<"$qemu_chardevs" && has_device virtserialport; then
+    clipboard_args=(-device virtio-serial-pci
+                    -chardev qemu-vdagent,id=vdagent,name=vdagent,clipboard=on
+                    -device virtserialport,chardev=vdagent,name=com.redhat.spice.0)
+  else
+    echo "No shared clipboard: this QEMU has no qemu-vdagent." >&2
+  fi
+fi
+
+# Shared folder: 9p, read/write with the permissions of whoever runs QEMU
+# (security_model=none: the guest's owners aren't stored). The guest
+# (live-shared-folder.service) mounts the "shared" tag in /media, under the
+# name passed through fw_cfg.
+shared_args=()
+if [[ -n "$shared" ]]; then
+  [[ -d "$shared" ]] || { echo "Not a folder: $shared" >&2; exit 1; }
+  has_device virtio-9p-pci || {
+    echo "This QEMU can't share folders (no virtio-9p): use the one from qemu/build.sh or Homebrew's." >&2
+    exit 1; }
+  shared=$(cd "$shared" && pwd -P)
+  shared_name=$(basename "$shared")
+  # Commas are QEMU's option separators: doubled, they're literal.
+  shared_args=(-virtfs "local,path=${shared//,/,,},mount_tag=shared,security_model=none,id=shared"
+               -fw_cfg "name=opt/org.ubuntu.live/shared-name,string=${shared_name//,/,,}")
+fi
+
 # With nested virtualization a reboot started by the guest crashes edk2
 # (a stack overflow in ArmCpuDxe: once Linux has used EL2, HVF doesn't
 # reset all of it, while a reset from QEMU is fine). So there a guest
@@ -323,6 +392,9 @@ qemu_args=(
   -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:"$ssh_port"-:22
   -device virtio-rng-pci
   ${balloon_args[@]+"${balloon_args[@]}"}
+  ${audio_args[@]+"${audio_args[@]}"}
+  ${clipboard_args[@]+"${clipboard_args[@]}"}
+  ${shared_args[@]+"${shared_args[@]}"}
   ${kernel_args[@]+"${kernel_args[@]}"}
   ${lang_args[@]+"${lang_args[@]}"}
   -boot menu=on,splash-time=0

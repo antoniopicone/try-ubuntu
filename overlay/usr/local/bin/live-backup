@@ -38,6 +38,7 @@ gi.require_version("PangoCairo", "1.0")
 from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango, PangoCairo  # noqa: E402
 
 sys.path.insert(0, "/usr/local/lib/live-backup")
+import apps  # noqa: E402
 import cloud  # noqa: E402
 import mount  # noqa: E402
 import providers  # noqa: E402
@@ -205,6 +206,12 @@ STRINGS = {
         "restored_problems": "Not everything could be put back:",
         "problem_gnome": "GNOME's settings",
         "problem_picture": "The profile picture (set it in Settings › System › Users)",
+        "apps_body": "The backup lists {n} apps you had that aren't installed here.",
+        "reinstall": "Install the Apps Again",
+        "reinstalling_title": "Installing Your Apps",
+        "reinstalling_body": "Downloading them again: this can take a while…",
+        "reinstalled": "Your apps are installed again.",
+        "reinstall_failed": "These couldn't be installed:",
         "no_backup_yet": "There's no backup yet.",
         "no_password": "The keyring is locked: the backup password isn't available.",
         "kind_documents": "Documents", "kind_pictures": "Pictures", "kind_videos": "Videos",
@@ -382,6 +389,12 @@ STRINGS = {
         "restored_problems": "Non è stato possibile rimettere a posto tutto:",
         "problem_gnome": "Le impostazioni di GNOME",
         "problem_picture": "L'immagine profilo (impostala da Impostazioni › Sistema › Utenti)",
+        "apps_body": "Nel backup ci sono {n} app che avevi e che qui non sono installate.",
+        "reinstall": "Reinstalla le app",
+        "reinstalling_title": "Installazione delle tue app",
+        "reinstalling_body": "Le sto scaricando di nuovo: può volerci un po'…",
+        "reinstalled": "Le tue app sono di nuovo installate.",
+        "reinstall_failed": "Queste non è stato possibile installarle:",
         "no_backup_yet": "Non c'è ancora un backup.",
         "no_password": "Il portachiavi è bloccato: la password dei backup non è disponibile.",
         "kind_documents": "Documenti", "kind_pictures": "Immagini", "kind_videos": "Video",
@@ -1379,25 +1392,58 @@ class BackupWindow(Adw.ApplicationWindow):
         def progress(fraction):
             GLib.idle_add(lambda: self.progress.set_fraction(min(fraction, 1)) and False)
 
-        def done(problems, error):
+        def work():
+            problems = restore.restore(config, env, snapshot, progress, remote=remote)
+            # The backup's list of apps came back with the files
+            return problems, apps.missing()
+
+        def done(result, error):
             if error:
                 self._error(error)
                 return
+            problems, self.missing_apps = result
             body = t("restored_body")
             if problems:
                 body += "\n\n" + t("restored_problems") + "\n" + "\n".join(
                     t(f"problem_{p}") for p in problems)
+            count = self.missing_apps and (len(self.missing_apps["flatpak"])
+                                           + len(self.missing_apps["apt"]))
+            if count:
+                body += "\n\n" + t("apps_body", n=count)
+            self.reinstall_button.set_visible(bool(count))
             self.restored.set_description(GLib.markup_escape_text(body))
             self._show("restored")
             self.back.set_visible(False)
-        in_thread(lambda: restore.restore(config, env, snapshot, progress, remote=remote), done)
+        in_thread(work, done)
+
+    def _reinstall(self):
+        missing = self.missing_apps
+        self._working(t("reinstalling_title"), t("reinstalling_body"))
+        self.back.set_visible(False)
+
+        def done(failed, error):
+            body = t("reinstalled")
+            if error or failed:
+                body = t("reinstall_failed") + "\n" + (error or "\n".join(failed))
+            self.reinstall_button.set_visible(False)
+            self.restored.set_description(GLib.markup_escape_text(body))
+            self._show("restored")
+            self.back.set_visible(False)
+        in_thread(lambda: apps.reinstall(missing), done)
 
     def _page_restored(self):
         self.restored = Adw.StatusPage(icon_name="object-select-symbolic", vexpand=True,
                                        title=t("restored_title"))
-        go = self._button(t("continue"), suggested=True)
+        self.missing_apps = None
+        self.reinstall_button = self._button(t("reinstall"), suggested=True)
+        self.reinstall_button.connect("clicked", lambda *_: self._reinstall())
+        self.reinstall_button.set_visible(False)
+        go = self._button(t("continue"))
         go.connect("clicked", lambda *_: self.restore_after())
-        self.restored.set_child(go)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.append(self.reinstall_button)
+        box.append(go)
+        self.restored.set_child(box)
         return self.restored
 
     def _restore_from_status(self):

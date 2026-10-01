@@ -9,7 +9,10 @@
 # Adapted from Try Omarchy (https://github.com/omacom/try-omarchy,
 # macos/build-qemu-gpu-runtime.sh, MIT): the same pinned QEMU, VirGL and
 # ANGLE, and the patches in patches/ (see patches/README.md), without the
-# app-specific parts (audio, 9p, USB passthrough, pinch zoom...).
+# app-specific parts (USB passthrough, pinch zoom...). On top of that, what
+# run-qemu.sh uses for the desktop: CoreAudio (virtio-sound), 9p (the
+# shared folder) and qemu-vdagent (the clipboard, shared with the Cocoa
+# window through the guest's spice-vdagent).
 #
 # Every download is pinned by sha256. The libraries come from Homebrew's
 # arm64_sequoia bottles, fetched directly from ghcr.io (Homebrew itself is
@@ -78,6 +81,9 @@ virgl_tap_version=1.0.42
 angle_version=1.0.16
 epoxy_version=1.0.5
 
+# SPICE's protocol headers (header-only): QEMU's qemu-vdagent needs them.
+spice_protocol_version=0.14.5
+
 # Build tools: meson, ninja and PyYAML (virglrenderer's generated tables),
 # and the wheels QEMU's offline venv needs.
 meson_version=1.9.0
@@ -94,6 +100,7 @@ virglrenderer-$virgl_version.tar.gz	https://gitlab.freedesktop.org/virgl/virglre
 homebrew-virglrenderer-$virgl_tap_version.tar.gz	https://codeload.github.com/startergo/homebrew-virglrenderer/tar.gz/refs/tags/v$virgl_tap_version	950273fbba46905b6112ee2bd0598c1da706c25319a7347058cbc52f04ba96dd
 angle-$angle_version.arm64_sequoia.bottle.tar.gz	https://github.com/startergo/homebrew-angle/releases/download/v$angle_version/angle-$angle_version.arm64_sequoia.bottle.tar.gz	29fe2175b157a65f12879f9a12b5c8f94d0a76fafdf41ff009a2fdb4e9df525c
 libepoxy-$epoxy_version.arm64_sequoia.bottle.tar.gz	https://github.com/startergo/homebrew-libepoxy/releases/download/v$epoxy_version/libepoxy-$epoxy_version.arm64_sequoia.bottle.tar.gz	109384a1d37edf207a9b9f3d8950710c00767635b3c7ff295e3af83611876ef2
+spice-protocol-$spice_protocol_version.tar.xz	https://www.spice-space.org/download/releases/spice-protocol-$spice_protocol_version.tar.xz	baf58449f6e89d19f475899ad5fb9196fdc46c03cc53233f4e39cf2978f9cff7
 meson-$meson_version.tar.gz	https://github.com/mesonbuild/meson/releases/download/$meson_version/meson-$meson_version.tar.gz	cd27277649b5ed50d19875031de516e270b22e890d9db65ed9af57d18ebc498d
 ninja-$ninja_version-py3-none-macosx_10_9_universal2.whl	https://files.pythonhosted.org/packages/3c/74/d02409ed2aa865e051b7edda22ad416a39d81a84980f544f8de717cab133/ninja-$ninja_version-py3-none-macosx_10_9_universal2.whl	fa2a8bfc62e31b08f83127d1613d10821775a0eb334197154c4d6067b7068ff1
 pyyaml-$pyyaml_version.tar.gz	https://files.pythonhosted.org/packages/05/8e/961c0007c59b8dd7729d542c61a4d537767a59645b82a0b521206e1e25c2/pyyaml-$pyyaml_version.tar.gz	d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f
@@ -267,6 +274,16 @@ LDFLAGS="-mmacosx-version-min=$macos_min -Wl,-headerpad_max_install_names" \
 "$ninja" -C "$virgl_src/build"
 "${meson[@]}" install -C "$virgl_src/build" --no-rebuild >/dev/null
 
+# --- spice-protocol ---------------------------------------------------------
+
+log "Installing spice-protocol $spice_protocol_version"
+spice_protocol="$deps/spice-protocol"
+tar -xJf "$cache_dir/spice-protocol-$spice_protocol_version.tar.xz" -C "$src"
+"${meson[@]}" setup "$src/spice-protocol-$spice_protocol_version/build" \
+  "$src/spice-protocol-$spice_protocol_version" --prefix="$spice_protocol" >/dev/null
+"${meson[@]}" install -C "$src/spice-protocol-$spice_protocol_version/build" >/dev/null
+export PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR:$spice_protocol/share/pkgconfig"
+
 # --- QEMU -------------------------------------------------------------------
 
 log "Building QEMU $qemu_version"
@@ -291,6 +308,7 @@ mkdir "$qemu_src/build"
   --enable-hvf --disable-tcg \
   --enable-cocoa --enable-opengl --enable-virglrenderer \
   --enable-pixman --enable-slirp --enable-fdt=internal \
+  --enable-coreaudio --enable-virtfs --enable-spice-protocol \
   --disable-debug-info --disable-werror --disable-download \
   --disable-containers --container-command=false \
   --extra-cflags="$min_flags" \

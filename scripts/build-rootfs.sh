@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the live root filesystem in $ROOTFS: a hand-picked minimal Ubuntu
 # (arm64) via debootstrap, the arm64 "virtual" kernel pruned to what a VM
-# needs, Plymouth, Nautilus, Chromium, Tailscale, podman, Python (pip, uv),
+# needs, Plymouth, Nautilus, Brave Origin, Tailscale, podman, Python (pip, uv),
 # zsh with the pure prompt and eza, snapper, Flatpak with Flathub, fonts,
 # apfs-fuse (built by build-apfs-fuse.sh), and the btrfslive initramfs boot
 # script from overlay/. The desktop (GNOME with GDM) comes from
@@ -13,8 +13,9 @@ set -euo pipefail
 : "${LIVE_USER:=ubuntu}" "${LIVE_PASSWORD:=ubuntu}" "${LIVE_HOSTNAME:=ubuntu-live}"
 : "${XKB_LAYOUT:=us}"
 
-# ppa:xtradeb/apps (Chromium as a .deb: Ubuntu only ships it as a snap).
-XTRADEB_KEY_FPR=5301FA4FD93244FBC6F6149982BB6851C64F6880
+# Brave's package repository (Brave Origin, the browser). Its keyring holds
+# three signing keys.
+BRAVE_KEY_FPRS="DBF1A116C220B8C7164F98230686B78420038257 47D32A74E9A9E013A4B4926C68D513D36A73CD96 B2A3DCA350E67256740DF904DE4EC67BE4B0DCA0"
 # Tailscale's package repository. Its packages are static builds, the same
 # for every Ubuntu release, and new releases get their suite late: the LTS
 # suite serves them all.
@@ -128,25 +129,37 @@ check_key() {
     exit 1
   }
 }
-key="$OVERLAY/etc/apt/keyrings/xtradeb.asc"
-check_key "$key" "$XTRADEB_KEY_FPR"
-install -Dm644 "$key" "$ROOTFS/etc/apt/keyrings/xtradeb.asc"
-cat > "$ROOTFS/etc/apt/sources.list.d/xtradeb-apps.sources" <<EOF
+# Brave, laid out as its own install instructions do: the keyring where its
+# brave-keyring package keeps it (which then takes it over and updates it)
+# and the .sources file name that package looks for. With any other name it
+# would make Brave's keys trusted for every repository.
+key="$OVERLAY/etc/apt/keyrings/brave-browser-archive-keyring.gpg"
+check_key "$key" "$BRAVE_KEY_FPRS"
+install -Dm644 "$key" "$ROOTFS/usr/share/keyrings/brave-browser-archive-keyring.gpg"
+cat > "$ROOTFS/etc/apt/sources.list.d/brave-browser-release.sources" <<EOF
 Types: deb
-URIs: https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu
-Suites: $SUITE
+URIs: https://brave-browser-apt-release.s3.brave.com
+Suites: stable
 Components: main
-Signed-By: /etc/apt/keyrings/xtradeb.asc
+Architectures: arm64
+Signed-By: /usr/share/keyrings/brave-browser-archive-keyring.gpg
 EOF
-# Only Chromium comes from xtradeb: nothing else in the PPA may replace or
-# add to Ubuntu's packages.
-cat > "$ROOTFS/etc/apt/preferences.d/xtradeb-chromium-only" <<EOF
+# brave-origin's maintainer scripts come from Chrome's: unless told not to,
+# its postinst (and its daily cron job) adds a repository of its own, and
+# today's points at Google Chrome's (dl.google.com) with Google's key.
+# The repository above is the one: no other.
+cat > "$ROOTFS/etc/default/brave-origin" <<EOF
+repo_add_once="false"
+repo_reenable_on_distupgrade="false"
+EOF
+# Only Brave's own packages come from its repository.
+cat > "$ROOTFS/etc/apt/preferences.d/brave-only" <<EOF
 Package: *
-Pin: release o=LP-PPA-xtradeb-apps
+Pin: release o=Brave Software
 Pin-Priority: 1
 
-Package: chromium chromium-common chromium-sandbox chromium-driver chromium-l10n
-Pin: release o=LP-PPA-xtradeb-apps
+Package: brave-origin brave-keyring
+Pin: release o=Brave Software
 Pin-Priority: 500
 EOF
 
@@ -179,9 +192,9 @@ packages=(
   # system services the desktops integrate with
   polkitd upower power-profiles-daemon bluez geoclue-2.0
   dbus-user-session libpam-systemd
-  # file manager and browser (the terminal comes with the desktop), with
-  # the browser's translations (pruned to the image's languages below)
-  nautilus chromium chromium-l10n
+  # file manager and browser, Brave Origin: Brave without the Rewards,
+  # Wallet, VPN and AI extras (the terminal comes with the desktop)
+  nautilus brave-origin
   # networking and security
   ufw tailscale avahi-daemon libnss-mdns
   # containers (rootless needs uidmap, and pasta from passt for networking)
@@ -201,21 +214,19 @@ packages=(
   fonts-liberation fonts-crosextra-carlito fonts-crosextra-caladea fonts-jetbrains-mono
   # btrfs snapshots of / (the @ subvolume)
   snapper
+  # QEMU (run-qemu.sh): the clipboard shared with the host's window
+  # (spice-vdagent, on Xwayland: Mutter bridges its clipboard to Wayland's)
+  # and the host's shared folder (9p, shown to the user through bindfs)
+  spice-vdagent bindfs
 )
-# Chromium and its translations at the same version: the PPA builds
-# chromium-l10n (arch: all) as soon as any architecture is done, so it can
-# be ahead of arm64's chromium, and then the newest one can't be installed.
-chromium_version=$(in_chroot apt-cache policy chromium | awk '/Candidate:/ { print $2 }')
-[[ -n "$chromium_version" && "$chromium_version" != "(none)" ]] \
-  || { echo "no chromium to install" >&2; exit 1; }
-for i in "${!packages[@]}"; do
-  case "${packages[i]}" in
-    chromium|chromium-l10n) packages[i]="${packages[i]}=$chromium_version" ;;
-  esac
-done
 in_chroot apt-get install -y "${packages[@]}" "${DESKTOP_PACKAGES[@]}"
 if in_chroot dpkg -s modemmanager >/dev/null 2>&1; then
   echo "modemmanager got installed" >&2; exit 1
+fi
+# Brave's postinst added no repository or key (see /etc/default/brave-origin)
+if grep -rlsi "google" "$ROOTFS/etc/apt/sources.list.d/" \
+   || ls "$ROOTFS/etc/apt/trusted.gpg.d/" 2>/dev/null | grep -qiE "google|brave"; then
+  echo "brave-origin added an apt repository or a trusted key" >&2; exit 1
 fi
 
 # The rest of the overlay goes in after the packages whose conffiles it
@@ -266,9 +277,10 @@ grep -q "^$LIVE_USER:" "$ROOTFS/etc/subuid" 2>/dev/null \
 grep -q "^$LIVE_USER:" "$ROOTFS/etc/subgid" 2>/dev/null \
   || echo "$LIVE_USER:100000:65536" >> "$ROOTFS/etc/subgid"
 
-# Default apps: Chromium for the web, Nautilus for folders.
-browser_desktop=$(ls "$ROOTFS/usr/share/applications" | grep -iE "^chromium.*\.desktop$" | head -1 || true)
-[[ -n "$browser_desktop" ]] || { echo "chromium .desktop file not found" >&2; exit 1; }
+# Default apps: Brave Origin for the web, Nautilus for folders.
+browser_desktop=brave-origin.desktop
+[[ -f "$ROOTFS/usr/share/applications/$browser_desktop" ]] \
+  || { echo "$browser_desktop not found" >&2; exit 1; }
 mkdir -p "$ROOTFS/etc/xdg"
 cat > "$ROOTFS/etc/xdg/mimeapps.list" <<EOF
 [Default Applications]
@@ -387,11 +399,49 @@ EMPTY_PRE_POST_CLEANUP="yes"
 EMPTY_PRE_POST_MIN_AGE="1800"
 EOF
 chmod 640 "$ROOTFS/etc/snapper/configs/root"
+# Config for /home (@home): a snapshot every hour, the versions Files shows
+# under "Previous Versions" (live-file-versions). They live in
+# /home/.snapshots, a subvolume live-home-snapshots.service makes at the
+# first boot. SYNC_ACL lets the users in ALLOW_USERS (the live user, then
+# the one the welcome app creates) into it; inside, their files keep their
+# own permissions. Not in the Cloud Backup: run-backup stays on @home's own
+# filesystem (--one-file-system).
+cat > "$ROOTFS/etc/snapper/configs/home" <<EOF
+SUBVOLUME="/home"
+FSTYPE="btrfs"
+QGROUP=""
+SPACE_LIMIT="0.5"
+FREE_LIMIT="0.2"
+ALLOW_USERS="$LIVE_USER"
+ALLOW_GROUPS=""
+SYNC_ACL="yes"
+BACKGROUND_COMPARISON="yes"
+NUMBER_CLEANUP="yes"
+NUMBER_MIN_AGE="1800"
+NUMBER_LIMIT="10"
+NUMBER_LIMIT_IMPORTANT="5"
+TIMELINE_CREATE="yes"
+TIMELINE_CLEANUP="yes"
+TIMELINE_MIN_AGE="1800"
+TIMELINE_LIMIT_HOURLY="24"
+TIMELINE_LIMIT_DAILY="7"
+TIMELINE_LIMIT_WEEKLY="4"
+TIMELINE_LIMIT_MONTHLY="0"
+TIMELINE_LIMIT_YEARLY="0"
+EMPTY_PRE_POST_CLEANUP="yes"
+EMPTY_PRE_POST_MIN_AGE="1800"
+EOF
+chmod 640 "$ROOTFS/etc/snapper/configs/home"
 if grep -q '^SNAPPER_CONFIGS=' "$ROOTFS/etc/default/snapper"; then
-  sed -i 's/^SNAPPER_CONFIGS=.*/SNAPPER_CONFIGS="root"/' "$ROOTFS/etc/default/snapper"
+  sed -i 's/^SNAPPER_CONFIGS=.*/SNAPPER_CONFIGS="root home"/' "$ROOTFS/etc/default/snapper"
 else
-  echo 'SNAPPER_CONFIGS="root"' >> "$ROOTFS/etc/default/snapper"
+  echo 'SNAPPER_CONFIGS="root home"' >> "$ROOTFS/etc/default/snapper"
 fi
+# The hourly snapshots (only "home" has a timeline) and the cleanup
+for unit in snapper-timeline.timer snapper-cleanup.timer; do
+  [[ -f "$ROOTFS/usr/lib/systemd/system/$unit" ]] || { echo "$unit is missing" >&2; exit 1; }
+done
+in_chroot systemctl enable snapper-timeline.timer snapper-cleanup.timer live-home-snapshots.service
 cat > "$ROOTFS/etc/apt/apt.conf.d/80-snapper" <<'EOF'
 // Snapshot / before apt/dpkg changes packages (bootable from the Limine menu).
 DPkg::Pre-Invoke { "if [ -x /usr/bin/snapper ] && [ -e /etc/snapper/configs/root ] && [ -d /.snapshots ]; then snapper --no-dbus -c root create -c number -d 'before apt' || true; fi"; };
@@ -421,12 +471,19 @@ in_chroot glib-compile-schemas /usr/share/glib-2.0/schemas
    == "'JetBrainsMono Nerd Font Mono 11'" ]] \
   || { echo "GNOME's monospace font is not JetBrains Mono Nerd Font" >&2; exit 1; }
 
+# The image's own packages: Cloud Backup's list of the user's apps
+# (apps.py) is what apt-mark shows on top of these.
+in_chroot apt-mark showmanual > "$ROOTFS/usr/local/share/live-backup/image-packages"
+[[ -s "$ROOTFS/usr/local/share/live-backup/image-packages" ]] \
+  || { echo "no list of the image's packages" >&2; exit 1; }
+
 echo "==> Slimming down"
 kver=$(ls "$ROOTFS/usr/lib/modules")
 # Kernel modules: keep filesystems, networking, crypto and the drivers a VM
 # (QEMU virt, virtio) or a plain USB/NVMe/SCSI setup needs. GPU drivers
-# other than virtio-gpu, wireless/ethernet NICs, sound, media, etc. go.
-keep_modules='^(fs|crypto|lib|arch|block|kernel|mm|virt|security|net/(?!wireless/|mac80211/)[^ ]*|drivers/(virtio|block|cdrom|char|input|hid|tty|rtc|nvme|bluetooth|firmware|acpi|pci|dma|iommu|platform|base|clk|video|md)/|drivers/net/[^/]+\.ko|drivers/gpu/drm/([^/]+\.ko|virtio/|display/|tiny/|ttm/|clients/)|drivers/scsi/[^/]+\.ko|drivers/usb/(core|host|storage|common|class)/)'
+# other than virtio-gpu, wireless/ethernet NICs, sound cards other than
+# virtio-sound, media, etc. go.
+keep_modules='^(fs|crypto|lib|arch|block|kernel|mm|virt|security|net/(?!wireless/|mac80211/)[^ ]*|drivers/(virtio|block|cdrom|char|input|hid|tty|rtc|nvme|bluetooth|firmware|acpi|pci|dma|iommu|platform|base|clk|video|md)/|drivers/net/[^/]+\.ko|drivers/gpu/drm/([^/]+\.ko|virtio/|display/|tiny/|ttm/|clients/)|drivers/scsi/[^/]+\.ko|drivers/usb/(core|host|storage|common|class)/|sound/(core|virtio)/)'
 (cd "$ROOTFS/usr/lib/modules/$kver/kernel" && find . -name '*.ko*' -printf '%P\n' \
   | grep -vP "$keep_modules" | xargs -r rm -f)
 find "$ROOTFS/usr/lib/modules/$kver/kernel" -type d -empty -delete
@@ -434,7 +491,8 @@ find "$ROOTFS/usr/lib/modules/$kver/kernel" -type d -empty -delete
 rm -rf "$ROOTFS/usr/lib/firmware/$kver"
 in_chroot depmod -a "$kver"
 for m in btrfs isofs loop virtio_gpu virtio_net virtio_scsi virtio_blk sr_mod \
-         usbhid hid_generic xhci_pci btusb tun veth bridge overlay nf_tables; do
+         usbhid hid_generic xhci_pci btusb tun veth bridge overlay nf_tables \
+         virtio_snd 9p 9pnet_virtio; do
   in_chroot modinfo -k "$kver" "$m" >/dev/null 2>&1 \
     || { echo "module $m was pruned" >&2; exit 1; }
 done

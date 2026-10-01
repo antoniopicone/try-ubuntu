@@ -58,7 +58,7 @@ REPLACED = [
                ".bash_logout", ".bash_history", ".profile", ".config/zsh/"]),
     ("git", [".gitconfig", ".config/git/"]),
     ("ssh", [".ssh/"]),
-    ("browser", [".config/chromium/", ".config/google-chrome/", ".mozilla/"]),
+    ("browser", [".config/BraveSoftware/", ".config/chromium/", ".config/google-chrome/", ".mozilla/"]),
     ("extensions", [".local/share/gnome-shell/"]),
     ("flatpak", [".var/app/"]),
     ("apps", [".config/", ".local/share/", "."]),

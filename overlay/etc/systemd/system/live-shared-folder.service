@@ -1,0 +1,14 @@
+[Unit]
+Description=Folder shared by the host (run-qemu.sh --shared-folder)
+Documentation=file:/usr/local/sbin/live-shared-folder
+After=local-fs.target systemd-modules-load.service systemd-udevd.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/live-shared-folder
+ExecStop=/usr/local/sbin/live-shared-folder --stop
+
+[Install]
+WantedBy=multi-user.target

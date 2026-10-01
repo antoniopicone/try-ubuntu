@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 
 DONE = "/var/lib/live-welcome/done"
 RETIRE = "/var/lib/live-welcome/retire"
-SNAPPER = "/etc/snapper/configs/root"
+SNAPPER_CONFIGS = ("/etc/snapper/configs/root", "/etc/snapper/configs/home")
 GDM_CONF = "/etc/gdm3/custom.conf"
 ACCOUNTS = "/var/lib/AccountsService/users"
 ICONS = "/var/lib/AccountsService/icons"
@@ -217,12 +217,13 @@ region='{c['locale']}'
     if c["email"]:
         os.chown(os.path.join(pw.pw_dir, ".gitconfig"), pw.pw_uid, pw.pw_gid)
 
-    # Snapshots: the new user's, not the live user's
-    if os.path.exists(SNAPPER):
-        with open(SNAPPER) as f:
-            snapper = re.sub(r'(?m)^ALLOW_USERS=.*$', f'ALLOW_USERS="{user}"', f.read())
-        with open(SNAPPER, "w") as f:
-            f.write(snapper)
+    # Snapshots (/ and /home): the new user's, not the live user's. snapperd
+    # rereads its configs at start; for /home, SYNC_ACL moves the access to
+    # /home/.snapshots over (snapper's set-config does both).
+    for path in SNAPPER_CONFIGS:
+        if os.path.exists(path):
+            subprocess.run(["snapper", "-c", os.path.basename(path), "set-config",
+                            f"ALLOW_USERS={user}"], capture_output=True)
 
     # Retire the live user. Right away: no autologin, hidden from GDM,
     # locked, no admin groups (sudo, polkit), no sudoers file. It can't be
@@ -250,6 +251,9 @@ region='{c['locale']}'
     os.makedirs(os.path.dirname(DONE), exist_ok=True)
     with open(DONE, "w") as f:
         json.dump({"user": user, "date": datetime.now(timezone.utc).isoformat()}, f)
+    # The host's shared folder (run-qemu.sh --shared-folder) is the new
+    # user's now: live-shared-folder reads who from DONE, so after it
+    subprocess.run(["systemctl", "try-restart", "live-shared-folder.service"])
     print(json.dumps({"ok": True, "user": user}))
 
 

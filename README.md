@@ -86,12 +86,13 @@ app takes over: it creates your user and logs out to GDM (see
 | Base | `debootstrap --variant=minbase` resolute with a hand-picked package set (no `ubuntu-minimal` or console-setup): openssh, sudo |
 | Kernel | `linux-image-virtual` (7.0), pruned to the modules a VM needs, with no firmware. initramfs-tools with zstd -19 |
 | Boot | **Limine** 11 (arm64 UEFI), with a menu to boot snapper snapshots, and Plymouth with the `spinner` theme (GNOME's). The ISO is hybrid (El Torito EFI + appended GPT ESP), so it also boots when written with `dd` to a USB stick |
-| Filesystem | btrfs with the subvolumes `@` → `/`, `@home` → `/home`, `@var` → `/var`, `@snapshots` → `/.snapshots` (flat layout, `compress=zstd:1`). **snapper** manages `/`; snapshot #1 is the image as built |
+| Filesystem | btrfs with the subvolumes `@` → `/`, `@home` → `/home`, `@var` → `/var`, `@snapshots` → `/.snapshots` (flat layout, `compress=zstd:1`). **snapper** manages `/` (snapshot #1 is the image as built) and `/home` (every hour: *Previous Versions* in Files) |
 | Desktop | a minimal **GNOME 51**: Shell, Settings, the vanilla GNOME session, GDM (see [The desktop](#the-desktop)) |
 | Theme | dark style with GNOME's blue accent, Adwaita Sans, Yaru icons, and **one of Ubuntu's stock wallpapers, picked at random at each build** |
-| Apps | **ghostty** (JetBrains Mono Nerd Font, Catppuccin Mocha; OpenGL in software under QEMU's virgl, which lacks the OpenGL 4.3 it needs), **Nautilus** (with *Open in Ghostty*), **Chromium** (in the desktop's language and light/dark style, with uBlock Origin Lite), GNOME Software (with **Flatpak** and Flathub), Disks, Resources, Extensions, **Cloud Backup** (hourly, end-to-end encrypted backups of your home folder with restic, and restore, to Google Drive, OneDrive, Dropbox, Nextcloud, iCloud Drive, Samba or SFTP) |
+| Apps | **ghostty** (JetBrains Mono Nerd Font, Catppuccin Mocha; OpenGL in software under QEMU's virgl, which lacks the OpenGL 4.3 it needs), with **Ptyxis** when it can't start, **Nautilus** (with *Open in Ghostty* and *Previous Versions*), **Brave Origin** (in the desktop's language and light/dark style), GNOME Software (with **Flatpak** and Flathub), Calculator, Papers (PDF), Fonts, Text Editor, Disks, Resources, Extensions, **Cloud Backup** (hourly, end-to-end encrypted backups of your home folder with restic, and restore, to Google Drive, OneDrive, Dropbox, Nextcloud, iCloud Drive, Samba or SFTP) |
 | Fonts | Adwaita Sans; Liberation, **Carlito** and **Caladea** (metric-compatible with Arial/Times New Roman/Courier New and Calibri/Cambria, so Office documents keep their layout); JetBrains Mono; **JetBrains Mono Nerd Font** (GNOME's monospace font and Ghostty's) and **Hack Nerd Font Mono** |
 | Network | NetworkManager (via netplan, as on Ubuntu Desktop) |
+| QEMU integration | sound (virtio-sound, PipeWire), the clipboard shared with the QEMU window (**spice-vdagent**), the host's shared folder (9p + **bindfs**, see [Running](#running)) |
 | Services | polkit, UPower, power-profiles-daemon, BlueZ, GeoClue, avahi-daemon (+ nss-mdns), Tailscale, ufw |
 | Tools | podman (rootless: uidmap + passt), git, curl, wget, **eza** (`ls` is `eza --icons=always`), **apfs-fuse** (Mac disks, read-only, also from Nautilus) |
 | Development | Python 3.14 with `pip` and `venv`, **uv** / uvx (0.12, from Astral's releases), **zsh** (the default shell) with the **pure** prompt |
@@ -109,7 +110,7 @@ each keyring's fingerprints and fails if they don't match exactly.
 | Ubuntu `resolute` (main, restricted, universe) | base system | `ubuntu-keyring` |
 | Flathub (a Flatpak remote, [scripts/flathub.flatpakrepo](scripts/flathub.flatpakrepo)) | Flatpak apps, in GNOME Software | `6E5C05D9…4184DD4D907A7CAE` |
 | Ubuntu `stonking` (26.10) sources | GNOME 51, rebuilt for 26.04 (see [The desktop](#the-desktop)) | `ubuntu-keyring` |
-| `ppa:xtradeb/apps` | Chromium as a .deb (Ubuntu only ships it as a snap). Pinned so it provides **only** `chromium*` | `5301FA4F…82BB6851C64F6880` |
+| `brave-browser-apt-release.s3.brave.com` | Brave Origin (`brave-origin`, and `brave-keyring`, which then keeps the keyring up to date). Pinned so it provides **only** those | `DBF1A116…0686B78420038257`, `47D32A74…68D513D36A73CD96`, `B2A3DCA3…DE4EC67BE4B0DCA0` |
 | `pkgs.tailscale.com` | tailscale | `2596A99E…458CA832957F5868` |
 
 These files are pinned and checked with sha256, not taken from a
@@ -136,19 +137,19 @@ The ISO would be much larger without these measures:
 - dpkg path-excludes skip docs, man pages, info pages, translations and
   Qt translations ([overlay/etc/dpkg/dpkg.cfg.d](overlay/etc/dpkg/dpkg.cfg.d/01-live-excludes)).
 - Kernel modules are cut down to filesystems, networking, crypto, virtio,
-  USB/HID/SCSI/NVMe and the virtio-gpu DRM driver. Sound, other GPUs,
-  wireless/ethernet NICs and media drivers are gone, and so is all
-  firmware. The build fails if a required module was removed.
+  USB/HID/SCSI/NVMe, the virtio-gpu DRM driver and virtio-sound. Other
+  sound cards, other GPUs, wireless/ethernet NICs and media drivers are
+  gone, and so is all firmware. The build fails if a required module was removed.
 - glibc's extra charset converters (`libc-gconv-modules-extra`) are
   removed.
-- Chromium keeps only the translations for the image's languages (all
-  of them take ~120 MB).
+- Brave keeps only the translations for the image's languages (all of
+  them take ~100 MB).
 - `/boot` isn't in the rootfs: the kernel and initramfs sit only on the ISO.
 - Snapshot #1 shares every extent with `@`, so it costs only metadata.
 - The btrfs seed uses zstd:15.
 
 What's left is mostly needed at runtime: LLVM for Mesa's llvmpipe
-(software rendering), GNOME, Chromium, GTK 4. Limine also needs the kernel
+(software rendering), GNOME, Brave, GTK 4. Limine also needs the kernel
 as a raw `Image` (~70 MB instead of the ~24 MB zboot vmlinuz, see below).
 
 ## How the live btrfs works
@@ -233,6 +234,26 @@ files install.sh keeps, pass
   - any you make yourself with `sudo snapper create -d "…"`
   
   Snapshots survive reboots only with the persistent disk.
+- **snapper** (`/etc/snapper/configs/home`) also snapshots `/home`, every
+  hour (`snapper-timeline.timer`). It keeps 24 hourly, 7 daily and 4
+  weekly ones, as long as they fit in half the disk. They live in
+  `/home/.snapshots`, a subvolume of `@home` that
+  [live-home-snapshots.service](overlay/etc/systemd/system/live-home-snapshots.service)
+  makes at the first boot. They aren't in the Cloud Backup: run-backup
+  stays on `@home` itself. `SYNC_ACL` lets the user (`ALLOW_USERS`: the
+  live user, then the one the welcome app creates) list them and go into
+  them. Inside, their files keep their own permissions.
+- **Previous Versions** in Files: right-click a file or folder in a home
+  folder, or a folder's background. A Nautilus extension
+  ([live-file-versions.py](overlay/usr/share/nautilus-python/extensions/live-file-versions.py))
+  opens [live-file-versions](overlay/usr/local/bin/live-file-versions):
+  - **a file**: its distinct versions, newest first. Snapshots in which it
+    didn't change count as one. Each version can be opened (read-only),
+    saved as a copy next to the file ("name (version of …).ext"), or
+    restored. Before restoring, snapper takes a snapshot, so the version
+    being replaced shows up among the earlier ones.
+  - **a folder**: the snapshots it's in, each opened in Files as the folder
+    was then, to copy back what was deleted or changed.
 - The **Limine menu** has a *Snapper snapshots* section:
   - *#1 Live image as built*
   - *Choose at boot*: the initramfs lists every snapshot, including the ones
@@ -295,6 +316,29 @@ on virtio-blk, virtio-rng, and user networking with SSH on
 takes the QEMU in `dist/qemu-macos-arm64` when it's there (see below),
 otherwise the one on `PATH`.
 
+When that QEMU has them (the one from `qemu/build.sh` and Homebrew's do),
+the guest also gets the following. When it doesn't, run-qemu.sh says
+what's missing and boots without it:
+
+- **Sound**: `virtio-sound`, played through CoreAudio on macOS, or
+  PipeWire, PulseAudio or ALSA on Linux. In the guest it's an ordinary
+  sound card for PipeWire. Output only on macOS, because QEMU's CoreAudio
+  can't record. `--no-audio` turns it off.
+- **Clipboard**: shared both ways with the QEMU window. QEMU's own SPICE
+  agent channel (`qemu-vdagent`) talks to the guest's `spice-vdagent`.
+  That runs on Xwayland, and Mutter bridges its clipboard to the Wayland
+  one. Not with `--headless`.
+- **Shared folder**: `--shared-folder PATH` shares a host folder over
+  9p, read/write. In the guest,
+  [live-shared-folder.service](overlay/usr/local/sbin/live-shared-folder)
+  mounts it in `/media/<the folder's name>`, which Files shows in its
+  sidebar. The 9p files carry the host's owner (uid 501 on a Mac), so the
+  raw mount stays private, and bindfs shows the folder as the desktop
+  user's: the one the welcome app created, or `ubuntu` before that. Every
+  user can read and write it, whatever the host's permissions say (a
+  Mac's home folders are 700). What the guest writes lands on the host as
+  the user running QEMU.
+
 It keeps its state in `dist/` (`~/.local/share/try-ubuntu/dist` when
 started by install.sh):
 
@@ -319,6 +363,8 @@ started by install.sh):
 | `--persist[=FILE]` | the persistent qcow2 disk, **on by default** (`dist/persist.qcow2`, 32G, created on first use; replaced by a new one, the old one kept, when the ISO changes) |
 | `--no-persist` | RAM only: everything is lost at shutdown |
 | `--efivars FILE` | UEFI variable store (default `dist/efivars.fd`); give each VM running at the same time its own |
+| `--shared-folder PATH` | share a host folder with the guest, read/write, in `/media/<name>` (see above) |
+| `--no-audio` | no sound device |
 | `--mem`, `--cpus`, `--ssh`, `--iso` | RAM in MiB (default: a third of the host's, at least 4096), vCPUs (default: half of the host's), SSH port, ISO path |
 | `-- ARGS…` | extra arguments passed straight to QEMU (e.g. `-- -monitor tcp:127.0.0.1:4444,server,nowait`) |
 
@@ -345,7 +391,10 @@ so the guest only gets a framebuffer and GNOME renders in software.
 [Try Omarchy](https://github.com/omacom/try-omarchy)'s runtime:
 
 - **QEMU 11.1.1**, `aarch64-softmmu` only, HVF only (no TCG), with the
-  Cocoa display, OpenGL, virglrenderer and slirp, plus `qemu-img`
+  Cocoa display, OpenGL, virglrenderer and slirp, plus `qemu-img`. It also
+  has CoreAudio (`virtio-sound`), 9p (`--shared-folder`) and
+  `qemu-vdagent` (the shared clipboard, built against spice-protocol's
+  headers). There's no VNC server
 - **GPU**: the guest's Mesa virgl driver → `virtio-gpu-gl-pci` →
   **virglrenderer** 1.3.0 (with startergo's macOS patches) → **ANGLE**
   (OpenGL ES) → **Metal**, and the Cocoa window shows the result as a
@@ -372,7 +421,7 @@ so the guest only gets a framebuffer and GNOME renders in software.
   fixes, HVF fixes (among them a crash on writes to the UEFI flash)
 
 Everything it downloads is pinned by sha256: the QEMU, virglrenderer,
-dtc and keycodemapdb sources, ANGLE and libepoxy (startergo's bottles), and
+dtc, keycodemapdb and spice-protocol sources, ANGLE and libepoxy (startergo's bottles), and
 GLib, gettext, PCRE2, Pixman and libslirp as Homebrew's arm64_sequoia
 bottles, fetched straight from ghcr.io. It needs only Xcode's command line
 tools, `python3` and `pkg-config`, and takes ~10 minutes. The result, in
@@ -411,9 +460,9 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
 | | |
 |---|---|
 | Shell | `gnome-shell`, `gnome-session` (the vanilla GNOME session, not Ubuntu's), `gdm3`, `xdg-desktop-portal-gnome`, NetworkManager |
-| Apps | Settings, Nautilus, Chromium, **ghostty** (the default terminal: Ctrl+Alt+T and Nautilus' "Open in Terminal", through `xdg-terminal-exec`), **GNOME Software** (apt, through PackageKit), **Disks** (`gnome-disk-utility`, with udisks2), **Resources**, **Extensions** (`gnome-extensions-app`) |
+| Apps | Settings, Nautilus, Brave Origin, **ghostty** (the default terminal: Ctrl+Alt+T and Nautilus' "Open in Terminal", through `xdg-terminal-exec`), **Ptyxis** (Ubuntu's terminal, for when Ghostty can't start, see below), **Calculator**, **Papers** (PDF), **Fonts**, **Text Editor**, **GNOME Software** (apt, through PackageKit), **Disks** (`gnome-disk-utility`, with udisks2), **Resources**, **Extensions** (`gnome-extensions-app`) |
 | Icons | **Yaru**, and the variant follows the accent color and the style, as on Ubuntu (see below) |
-| Extensions | **Dash to Dock**, set up as Ubuntu's dash: a full-height panel on the left with Files, Chromium, Ghostty and Software, "Show Apps" at the bottom, trash and mounted drives. **Kiwi Menu**, with the Ubuntu logo. **Caffeine** (on from login: no screen blanking or automatic suspend), **Vitals** (average temperature, memory, network speed), **Rounded Corners** (6 px screen corners) |
+| Extensions | **Dash to Dock**, set up as Ubuntu's dash: a full-height panel on the left with Files, Brave Origin, Ghostty and Software, "Show Apps" at the bottom, trash and mounted drives. **Kiwi Menu**, with the Ubuntu logo. **Caffeine** (on from login: no screen blanking or automatic suspend), **Vitals** (average temperature, memory, network speed), **Rounded Corners** (6 px screen corners) |
 | Wallpaper | one of Ubuntu's stock wallpapers (`ubuntu-wallpapers`, which Ubuntu's gnome-shell depends on), picked at random at each build by [pick-wallpaper.py](scripts/pick-wallpaper.py), with its dark variant if it has one. The build log names the pick; the others stay available in Settings › Appearance |
 
 - **First boot and the welcome app**: GDM logs the live user
@@ -570,26 +619,47 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
     and the profile picture, which run-backup copies into the backup from
     AccountsService, is set back through AccountsService. The status page
     can restore the newest backup at any time.
+  - **The apps come back too**
+    ([apps.py](overlay/usr/local/lib/live-backup/apps.py)). Before each
+    backup, run-backup writes the list of the user's apps into
+    `~/.local/share/live-backup/apps.json`, so it's in the backup:
+    - the Flatpak apps, with their remote and installation (system or user)
+    - the apt packages installed by hand that the image doesn't have
+      (`apt-mark showmanual`, less the image's own list, which the build
+      writes to `/usr/local/share/live-backup/image-packages`)
 
-- **Chromium** follows the desktop, like a GNOME app:
-  - **language**: its UI follows `LANG`, like the rest of the session.
-    `chromium-l10n` provides the translations; the build keeps only the
-    image's languages.
-  - **light/dark style**: Chromium's initial preferences
-    (`/etc/chromium/master_preferences`, copied into each new profile)
-    set its mode to "Device". It reads the style from the settings portal,
-    so it matches the choice made in the welcome app and follows later
-    changes right away. The accent color isn't carried over: on Linux,
-    Chromium's palette comes only from its own "Customize Chromium"
-    panel.
-  - **uBlock Origin Lite** is installed as an
-    [external extension](overlay/usr/lib/chromium/extensions/ddkjiahejlhfcafbddmgiahcphecmpfh.json):
-    Chromium downloads it from the Chrome Web Store on its first start
-    (the network is needed then) and keeps it updated. It's an ordinary
-    extension, so you can disable or remove it, and Chromium doesn't
-    show "managed by your organization". It's the Lite version because
-    Chromium 154 no longer runs Manifest V2 extensions like the original
-    uBlock Origin.
+    After a restore, when some of them aren't installed, the app offers to
+    install them again. The Flatpak apps come from their remotes. The
+    packages go through
+    [install-packages](overlay/usr/local/lib/live-backup/install-packages),
+    as root through `pkexec` (so the user's password): it refreshes the
+    package lists and skips what the archive doesn't have, e.g. a package
+    from a repository added by hand. What couldn't be installed is listed.
+
+- **Brave Origin** is the browser: Brave with its Shields but without
+  what funds Brave (Rewards, Wallet, VPN, Leo AI, News, Talk, Tor,
+  Playlist, Speedreader…) and without the usage ping, crash reports and
+  analytics. It's free on Linux, and comes from Brave's own repository.
+  - **language and style**: its UI follows `LANG`, like the rest of the
+    session (the build keeps only the image's languages), and by default
+    its light or dark mode is the device's.
+  - **ads and trackers**: Brave's own Shields block them, so no extension
+    is needed.
+  - **its repository, and no other**: brave-origin's maintainer scripts
+    come from Chrome's. Unless `/etc/default/brave-origin` says
+    `repo_add_once="false"`, its postinst adds a repository of its own, and
+    the one in today's package is Google Chrome's (`dl.google.com`, with
+    Google's key). The build writes that file before the install and fails
+    if any Google repository or any key in `trusted.gpg.d` shows up. The
+    `.sources` file has the name and `Signed-By` that `brave-keyring`
+    expects. With any other name, that package would put Brave's keys in
+    `trusted.gpg.d`, trusted for every repository.
+- **Ghostty, or Ptyxis**: `/usr/bin/ghostty` is
+  [a wrapper](overlay/usr/local/bin/ghostty). When Ghostty fails within its
+  first 10 seconds (no usable OpenGL, a broken config…), Ptyxis opens
+  instead, with the same working directory and command, and a
+  notification says so. `xdg-terminals.list` names Ptyxis second, for
+  when Ghostty isn't installed at all.
 - **Yaru ↔ accent color**: [yaru-accent-sync](overlay/usr/local/bin/yaru-accent-sync)
   runs in every session (from `/etc/xdg/autostart`). It follows
   Settings › Appearance and sets `Yaru-<variant>[-dark]` with Ubuntu's own
@@ -662,7 +732,7 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   - the wallpaper
   - the Yaru icons
   - the enabled extensions
-  - the dash favorites (Nautilus, Chromium, Ghostty, Software)
+  - the dash favorites (Nautilus, Brave Origin, Ghostty, Software)
   - the extensions' settings
   - no welcome tour
 
@@ -713,8 +783,11 @@ git tag v1.0.0 && git push origin v1.0.0
   - it has no timezone page
 - The host's language reaches the guest only under QEMU (`run-qemu.sh`);
   on other hypervisors or hardware the live session starts in English.
-- No sound drivers, and no firmware for real hardware (Wi-Fi, non-virtio
-  GPUs): the image is aimed at VMs.
+- No sound drivers other than virtio-sound, and no firmware for real
+  hardware (Wi-Fi, non-virtio GPUs): the image is aimed at VMs.
+- With the QEMU from `qemu/build.sh`, sound is output only (no
+  microphone), and `--vnc` doesn't work (no VNC server in it): use
+  Homebrew's with `--qemu`.
 - apfs-fuse only reads APFS: Mac disks can't be written to.
 - The Microsoft core fonts (Arial, Times New Roman…) aren't included: their
   license allows redistributing only the original installers. Liberation,

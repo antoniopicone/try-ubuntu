@@ -1,6 +1,7 @@
 #!/bin/sh
 # ghostty: starts Ghostty (/usr/bin/ghostty.real) with OpenGL in software
-# on a virtio-gpu display.
+# on a virtio-gpu display, and Ptyxis (GNOME's terminal on Ubuntu) when
+# Ghostty can't start.
 #
 # Ghostty needs OpenGL 4.3. On a Mac, QEMU's virgl renders on OpenGL ES
 # (ANGLE on Metal), and the guest's virgl driver offers less than that:
@@ -8,6 +9,11 @@
 # the rest of the desktop keeps the GPU. On real hardware, or any other
 # GPU, nothing changes. LIBGL_ALWAYS_SOFTWARE=0 in the environment keeps
 # the GPU for Ghostty too.
+#
+# Fallback: when Ghostty fails within its first seconds (no OpenGL, a
+# broken config...), Ptyxis opens instead, with the same command, and a
+# notification says so. Ghostty's own subcommands (+list-fonts...) never
+# fall back.
 #
 # /usr/bin/ghostty is this script (build-rootfs.sh diverts the package's
 # binary): the .desktop file, D-Bus and systemd start that path.
@@ -18,4 +24,39 @@ for driver in /sys/class/drm/card*/device/driver; do
     break
   fi
 done
-exec /usr/bin/ghostty.real "$@"
+
+case "${1:-}" in
+  +*|--version|--help|-h) exec /usr/bin/ghostty.real "$@" ;;
+esac
+
+start=$(date +%s)
+status=0
+/usr/bin/ghostty.real "$@" || status=$?
+if [ "$status" -eq 0 ] || [ $(($(date +%s) - start)) -ge 10 ] || ! command -v ptyxis >/dev/null; then
+  exit "$status"
+fi
+
+# Ghostty's options that matter to Ptyxis: the working directory and the
+# command (-e CMD ARGS..., what xdg-terminal-exec passes); the rest is
+# Ghostty's own.
+dir="" cmd=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --working-directory=*) dir=${1#*=} ;;
+    -e) shift; cmd=1; break ;;
+  esac
+  shift
+done
+notify-send -a Terminal -i org.gnome.Ptyxis "Ghostty didn't start" \
+  "Opened Ptyxis instead. To see why: ghostty.real in Ptyxis." 2>/dev/null || true
+if [ -n "$cmd" ] && [ $# -gt 0 ]; then
+  # Ptyxis' -x takes the command as one string: each argument quoted
+  line=""
+  for a in "$@"; do
+    line="$line '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"
+  done
+  set -- -x "$line"
+else
+  set --
+fi
+exec ptyxis --new-window ${dir:+--working-directory="$dir"} "$@"

@@ -130,7 +130,7 @@ mount -t btrfs -o ro,subvol=@home "$nbd" /mnt/home 2>/dev/null \
 # The welcome adds the user's own account next to the image's "ubuntu"
 share=/mnt/home user=$USER_NAME
 if [ "$ALL" = 0 ] && [ -z "$user" ]; then
-  users=$(find /mnt/home -mindepth 1 -maxdepth 1 -type d ! -name ubuntu -printf '%f\n')
+  users=$(find /mnt/home -mindepth 1 -maxdepth 1 -type d ! -name ubuntu ! -name '.*' -printf '%f\n')
   count=$(echo "$users" | grep -c . || true)
   if [ "$count" = 0 ]; then user=ubuntu; elif [ "$count" = 1 ]; then user=$users; fi
 fi

@@ -1,0 +1,63 @@
+#!/bin/sh
+# Mounts the host folder that run-qemu.sh --shared-folder shares (9p, tag
+# "shared") in /media/NAME, NAME being the host folder's name (passed
+# through QEMU's fw_cfg as opt/org.ubuntu.live/shared-name). Files lists it
+# in its sidebar, as it does everything in /media.
+#
+# The 9p files carry the host's owner (e.g. uid 501 on a Mac), which no
+# user here has, so the 9p mount stays private (/run/live-shared) and
+# bindfs shows it in /media as the desktop user's, read/write for every
+# user here (what is shown as their owner can be out of date: the live
+# user's until the welcome app has made the real one, say). What the guest
+# writes is written on the host as whoever runs QEMU.
+#
+#   live-shared-folder          mount (live-shared-folder.service, at boot)
+#   live-shared-folder --stop   unmount
+set -eu
+
+tag=shared
+private=/run/live-shared
+fw_cfg=/sys/firmware/qemu_fw_cfg/by_name/opt/org.ubuntu.live/shared-name/raw
+
+stop() {
+  for m in $(awk '$3 == "fuse.bindfs" && $1 == "'"$private"'" { print $2 }' /proc/mounts); do
+    umount -l "$m" && rmdir "$m" 2>/dev/null || true
+  done
+  if mountpoint -q "$private"; then umount -l "$private"; fi
+}
+if [ "${1:-}" = --stop ]; then
+  stop
+  exit 0
+fi
+
+# Only when QEMU shares a folder with this tag
+modprobe -q 9pnet_virtio 2>/dev/null || true
+found=""
+for f in /sys/bus/virtio/drivers/9pnet_virtio/virtio*/mount_tag; do
+  [ -r "$f" ] && [ "$(tr -d '\0' < "$f")" = "$tag" ] && found=1
+done
+[ -n "$found" ] || exit 0
+
+# Its name: the host folder's, without what a path can't hold
+modprobe -q qemu_fw_cfg 2>/dev/null || true
+name=""
+[ -r "$fw_cfg" ] && name=$(head -c 200 "$fw_cfg" | tr -d '/\0\n' | sed 's/^\.*//')
+[ -n "$name" ] || name=Shared
+
+# Whose: the user the welcome app created, else the live user
+owner=$(sed -n 's/.*"user": *"\([^"]*\)".*/\1/p' /var/lib/live-welcome/done 2>/dev/null || true)
+[ -n "$owner" ] && id "$owner" >/dev/null 2>&1 \
+  || owner=$(sed -n 's/^AutomaticLogin=//p' /etc/gdm3/custom.conf)
+id "$owner" >/dev/null 2>&1 || owner=root
+
+stop
+mkdir -p "$private"
+chmod 700 "$private"
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=1048576,cache=none "$tag" "$private"
+mkdir -p "/media/$name"
+# Shown as the owner's, and readable and writable by every user whatever
+# the host's modes say (a Mac's home folders are 700); new files are
+# created by bindfs (root), which 9p maps to the host user anyway.
+bindfs -o allow_other,default_permissions --force-user="$owner" --force-group="$owner" --perms=a+rwX \
+  --create-as-mounter "$private" "/media/$name"
+echo "live-shared-folder: the host's \"$name\" in /media/$name ($owner)"

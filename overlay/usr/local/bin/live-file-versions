@@ -1,0 +1,293 @@
+#!/usr/bin/python3
+"""live-file-versions: the earlier versions of a file or folder in /home,
+from snapper's hourly snapshots of /home (the "home" config).
+
+    live-file-versions PATH
+
+Nautilus opens it from "Previous Versions" (the right-click menu, through
+/usr/share/nautilus-python/extensions/live-file-versions.py).
+
+- A file: its distinct versions, newest first (snapshots where it hadn't
+  changed are folded into one), each to open (read-only), save as a copy
+  next to it, or put back in its place. Before putting one back, snapper
+  takes a snapshot, so the current version is among the earlier ones.
+- A folder: the snapshots it is in, each to open in Files as it was then,
+  to copy back what was deleted or changed.
+
+The snapshots are read as the user: snapper's ALLOW_USERS (with SYNC_ACL)
+lets them list the snapshots and enter /home/.snapshots, and inside them
+their files keep their own permissions.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+
+APP_ID = "org.ubuntu.LiveFileVersions"
+HOME_ROOT = "/home"
+SNAPSHOTS = "/home/.snapshots"
+CONFIG = "home"
+
+STRINGS = {
+    "en": {
+        "title": "Previous Versions",
+        "none_title": "No Earlier Versions",
+        "none_body": "Snapshots of the home folders are taken every hour: earlier versions "
+                     "show up here once there are some.",
+        "not_home": "Only the files in the home folders have earlier versions.",
+        "no_snapper": "The snapshots can't be read: {error}",
+        "current": "Current version",
+        "modified": "Modified {when}",
+        "in_snapshot": "{size} · in the snapshot of {when}",
+        "folder_row": "Snapshot of {when}",
+        "folder_sub": "The folder as it was then",
+        "open": "Open",
+        "save_copy": "Save a Copy",
+        "restore": "Restore",
+        "restore_title": "Restore This Version?",
+        "restore_body": "“{name}” goes back to the version modified {when}. The current "
+                        "version stays among the earlier ones.",
+        "cancel": "Cancel",
+        "copied": "Saved as “{name}”",
+        "restored": "“{name}” restored",
+        "failed": "Couldn't do it: {error}",
+        "before": "before restoring {name}",
+        "copy_name": "{stem} (version of {when}){ext}",
+    },
+    "it": {
+        "title": "Versioni precedenti",
+        "none_title": "Nessuna versione precedente",
+        "none_body": "Le cartelle home vengono salvate ogni ora: le versioni precedenti "
+                     "compaiono qui appena ce ne sono.",
+        "not_home": "Solo i file nelle cartelle home hanno versioni precedenti.",
+        "no_snapper": "Impossibile leggere gli snapshot: {error}",
+        "current": "Versione attuale",
+        "modified": "Modificato il {when}",
+        "in_snapshot": "{size} · nello snapshot del {when}",
+        "folder_row": "Snapshot del {when}",
+        "folder_sub": "La cartella com'era allora",
+        "open": "Apri",
+        "save_copy": "Salva una copia",
+        "restore": "Ripristina",
+        "restore_title": "Ripristinare questa versione?",
+        "restore_body": "«{name}» torna alla versione modificata il {when}. La versione "
+                        "attuale resta tra quelle precedenti.",
+        "cancel": "Annulla",
+        "copied": "Salvato come «{name}»",
+        "restored": "«{name}» ripristinato",
+        "failed": "Impossibile: {error}",
+        "before": "prima di ripristinare {name}",
+        "copy_name": "{stem} (versione del {when}){ext}",
+    },
+}
+
+
+def t(key, **kw):
+    lang = os.environ.get("LANG", "")[:2]
+    return STRINGS.get(lang, STRINGS["en"]).get(key, STRINGS["en"][key]).format(**kw)
+
+
+def local_time(dt):
+    return dt.to_local().format("%x %H:%M")
+
+
+def snapshots():
+    """[(number, GLib.DateTime)] of the home config, newest first."""
+    out = subprocess.run(["snapper", "-c", CONFIG, "--jsonout", "list", "--disable-used-space"],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip() or "snapper")
+    result = []
+    for snap in json.loads(out.stdout).get(CONFIG, []):
+        if snap["number"] == 0:  # the live filesystem
+            continue
+        when = GLib.DateTime.new_from_iso8601(snap["date"].replace(" ", "T") + "Z", None)
+        if when:
+            result.append((snap["number"], when))
+    return sorted(result, key=lambda s: s[1].to_unix(), reverse=True)
+
+
+def in_snapshot(number, rel):
+    return os.path.join(SNAPSHOTS, str(number), "snapshot", rel)
+
+
+def versions(path):
+    """A file's distinct earlier versions: [(snapshot path, mtime, size,
+    snapshot date)], newest first, without the current one."""
+    rel = os.path.relpath(path, HOME_ROOT)
+    try:
+        st = os.stat(path)
+        seen = {(st.st_mtime_ns, st.st_size)}
+    except FileNotFoundError:
+        seen = set()
+    result = []
+    for number, when in snapshots():
+        old = in_snapshot(number, rel)
+        try:
+            st = os.stat(old)
+        except OSError:
+            continue
+        key = (st.st_mtime_ns, st.st_size)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((old, st.st_mtime, st.st_size, when))
+    return result
+
+
+def folder_snapshots(path):
+    rel = os.path.relpath(path, HOME_ROOT)
+    return [(in_snapshot(n, rel), when) for n, when in snapshots()
+            if os.path.isdir(in_snapshot(n, rel))]
+
+
+class VersionsWindow(Adw.ApplicationWindow):
+    def __init__(self, app, path):
+        super().__init__(application=app, title=t("title"), default_width=560,
+                         default_height=600)
+        self.path = path
+        self.toasts = Adw.ToastOverlay()
+        view = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        header.set_title_widget(Adw.WindowTitle(title=t("title"),
+                                                subtitle=os.path.basename(path)))
+        view.add_top_bar(header)
+        self.toasts.set_child(view)
+        self.set_content(self.toasts)
+        self.view = view
+        self._load()
+
+    def _status(self, title, body, icon="document-open-recent-symbolic"):
+        self.view.set_content(Adw.StatusPage(icon_name=icon, title=title, description=body))
+
+    def _load(self):
+        self.view.set_content(Adw.Spinner(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER,
+                                          width_request=32, height_request=32))
+        is_dir = os.path.isdir(self.path)
+
+        def work():
+            try:
+                rows = folder_snapshots(self.path) if is_dir else versions(self.path)
+                GLib.idle_add(self._show, rows, is_dir, None)
+            except Exception as e:  # noqa: BLE001
+                GLib.idle_add(self._show, None, is_dir, str(e))
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show(self, rows, is_dir, error):
+        if error:
+            self._status(t("title"), t("no_snapper", error=GLib.markup_escape_text(error)),
+                         "dialog-warning-symbolic")
+            return False
+        if not rows:
+            self._status(t("none_title"), t("none_body"))
+            return False
+        group = Adw.PreferencesGroup()
+        if is_dir:
+            for old, when in rows:
+                row = Adw.ActionRow(title=t("folder_row", when=local_time(when)),
+                                    subtitle=t("folder_sub"), activatable=True)
+                row.add_prefix(Gtk.Image(icon_name="folder-symbolic"))
+                row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+                row.connect("activated", lambda _r, o=old: self._open(o))
+                group.add(row)
+        else:
+            for old, mtime, size, when in rows:
+                modified = local_time(GLib.DateTime.new_from_unix_utc(int(mtime)))
+                row = Adw.ActionRow(
+                    title=t("modified", when=modified),
+                    subtitle=t("in_snapshot", size=GLib.format_size(size),
+                               when=local_time(when)))
+                row.add_prefix(Gtk.Image(icon_name="document-open-recent-symbolic"))
+                for label, action in ((t("open"), lambda _b, o=old: self._open(o)),
+                                      (t("save_copy"),
+                                       lambda _b, o=old, m=modified: self._copy(o, m)),
+                                      (t("restore"),
+                                       lambda _b, o=old, m=modified: self._ask_restore(o, m))):
+                    button = Gtk.Button(label=label, valign=Gtk.Align.CENTER)
+                    button.add_css_class("flat")
+                    button.connect("clicked", action)
+                    row.add_suffix(button)
+                group.add(row)
+        page = Adw.PreferencesPage()
+        page.add(group)
+        self.view.set_content(page)
+        return False
+
+    def _open(self, old):
+        Gtk.FileLauncher.new(Gio.File.new_for_path(old)).launch(self, None, None, None)
+
+    def _copy(self, old, modified):
+        stem, ext = os.path.splitext(os.path.basename(self.path))
+        name = t("copy_name", stem=stem, when=modified.replace("/", "-").replace(":", "."),
+                 ext=ext)
+        target = os.path.join(os.path.dirname(self.path), name)
+        try:
+            shutil.copy2(old, target)
+        except OSError as e:
+            self._toast(t("failed", error=e.strerror or str(e)))
+            return
+        self._toast(t("copied", name=name))
+
+    def _ask_restore(self, old, modified):
+        name = os.path.basename(self.path)
+        dialog = Adw.AlertDialog(heading=t("restore_title"),
+                                 body=t("restore_body", name=name, when=modified))
+        dialog.add_response("cancel", t("cancel"))
+        dialog.add_response("restore", t("restore"))
+        dialog.set_response_appearance("restore", Adw.ResponseAppearance.SUGGESTED)
+        dialog.connect("response", lambda _d, r: r == "restore" and self._restore(old))
+        dialog.present(self)
+
+    def _restore(self, old):
+        name = os.path.basename(self.path)
+        # The current version into a snapshot first: it can come back too
+        subprocess.run(["snapper", "-c", CONFIG, "create", "-c", "number",
+                        "-d", t("before", name=name)], capture_output=True)
+        try:
+            tmp = self.path + ".restoring"
+            shutil.copy2(old, tmp)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            self._toast(t("failed", error=e.strerror or str(e)))
+            return
+        self._toast(t("restored", name=name))
+        self._load()
+
+    def _toast(self, message):
+        self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(message), timeout=5))
+
+
+class App(Adw.Application):
+    def __init__(self, path):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.NON_UNIQUE)
+        self.path = path
+
+    def do_activate(self):
+        if not self.path.startswith(HOME_ROOT + "/"):
+            dialog = Adw.AlertDialog(heading=t("title"), body=t("not_home"))
+            dialog.add_response("cancel", t("cancel"))
+            window = Adw.ApplicationWindow(application=self)
+            dialog.connect("response", lambda *_: window.close())
+            window.present()
+            dialog.present(window)
+            return
+        VersionsWindow(self, self.path).present()
+
+
+def main():
+    if len(sys.argv) != 2:
+        print("usage: live-file-versions PATH", file=sys.stderr)
+        return 64
+    path = os.path.realpath(sys.argv[1])
+    return App(path).run([sys.argv[0]])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,16 @@
+[Unit]
+Description=Subvolume for the snapshots of /home (snapper's "home" config)
+# snapper keeps /home's snapshots in /home/.snapshots, a subvolume of @home.
+# The ISO doesn't carry it (a persistent disk made by an older ISO neither):
+# made here the first time.
+ConditionPathExists=!/home/.snapshots
+RequiresMountsFor=/home
+Before=snapper-timeline.service snapper-cleanup.service snapperd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/btrfs subvolume create /home/.snapshots
+ExecStart=/usr/bin/chmod 750 /home/.snapshots
+
+[Install]
+WantedBy=multi-user.target

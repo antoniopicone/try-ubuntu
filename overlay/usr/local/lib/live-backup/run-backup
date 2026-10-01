@@ -23,6 +23,7 @@ import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, "/usr/local/lib/live-backup")
+import apps  # noqa: E402
 import cloud  # noqa: E402
 import providers  # noqa: E402
 import restore  # noqa: E402
@@ -135,6 +136,11 @@ def main():
     try:
         restore.save_face()
     except OSError:
+        pass
+    # The installed apps' list: after a restore, the app installs them again
+    try:
+        apps.save()
+    except (OSError, subprocess.SubprocessError):
         pass
     # --one-file-system: not ~/iCloud and the other mounts in the home folder
     code, summary, err = restic(

@@ -1,7 +1,8 @@
 # Desktop part of build-rootfs.sh (sourced): a minimal GNOME 51 with GDM, on
 # NetworkManager, set up like Ubuntu's desktop:
-#   - ghostty as the terminal ("Open in Ghostty" in Nautilus), GNOME
-#     Software (with Flatpak), Disks, Resources, Extensions
+#   - ghostty as the terminal ("Open in Ghostty" in Nautilus), with Ptyxis
+#     to fall back on, GNOME Software (with Flatpak), Disks, Resources,
+#     Extensions, Calculator, Papers (PDF), Fonts, Text Editor
 #   - Yaru icons, their variant following the accent color (yaru-accent-sync)
 #   - Dash to Dock as Ubuntu's dash (a panel on the left), Kiwi Menu with
 #     the Ubuntu logo, Caffeine, Vitals and Rounded Corners
@@ -58,10 +59,14 @@ DESKTOP_PACKAGES=(
   gdm3 gnome-session gnome-shell
   # Settings, the portal (dark style, file chooser)
   gnome-control-center xdg-desktop-portal-gnome
-  # apps: terminal (ghostty, the default through xdg-terminal-exec),
+  # apps: terminal (ghostty, the default through xdg-terminal-exec; Ptyxis,
+  # Ubuntu's, when ghostty can't start: overlay/usr/local/bin/ghostty),
   # software center (PackageKit/apt), disks, system monitor, extensions
-  ghostty xdg-terminal-exec gnome-software gnome-disk-utility udisks2
+  ghostty xdg-terminal-exec ptyxis gnome-software gnome-disk-utility udisks2
   resources gnome-extensions-app
+  # GNOME's basic apps: calculator, PDF viewer (Papers, Evince's successor),
+  # fonts, text editor
+  gnome-calculator papers gnome-font-viewer gnome-text-editor
   # Nautilus's Python extensions: ghostty ships one ("Open in Ghostty")
   python3-nautilus
   # Cloud Backup (live-backup): restic through rclone (installed below:
@@ -114,6 +119,11 @@ desktop_install() {
   rm -f "$ROOTFS/etc/apt/sources.list.d/gnome-backports.list"
   for f in /usr/share/wayland-sessions/gnome.desktop \
            /usr/share/applications/com.mitchellh.ghostty.desktop \
+           /usr/share/applications/org.gnome.Ptyxis.desktop \
+           /usr/share/applications/org.gnome.Calculator.desktop \
+           /usr/share/applications/org.gnome.Papers.desktop \
+           /usr/share/applications/org.gnome.font-viewer.desktop \
+           /usr/share/applications/org.gnome.TextEditor.desktop \
            /usr/share/nautilus-python/extensions/ghostty.py \
            /usr/share/applications/org.gnome.Software.desktop \
            /usr/share/icons/Yaru-blue-dark/index.theme; do
@@ -137,18 +147,18 @@ desktop_install() {
   [[ -x "$ROOTFS/usr/bin/ghostty.real" && -x "$ROOTFS/usr/local/bin/ghostty" ]] \
     || { echo "the ghostty wrapper isn't in place" >&2; exit 1; }
 
-  # Chromium's UI follows LANG: keep its translations for the languages
-  # above only (chromium-l10n has ~120 MB of them), and no .pak.info files
-  # (build-time resource lists).
-  for pak in "$ROOTFS"/usr/lib/chromium/locales/*; do
+  # Brave's UI follows LANG: keep its translations for the languages above
+  # only (all of them take ~100 MB), and no .pak.info files (build-time
+  # resource lists).
+  for pak in "$ROOTFS"/opt/brave.com/brave-origin/locales/*; do
     keep=0
     for lang in en "${LANGPACKS[@]}"; do
       case "${pak##*/}" in "$lang.pak"|"$lang"-*.pak) keep=1 ;; esac
     done
     ((keep)) || rm -f "$pak"
   done
-  [[ -f "$ROOTFS/usr/lib/chromium/locales/${LANGPACKS[0]}.pak" ]] \
-    || { echo "Chromium's translations are missing" >&2; exit 1; }
+  [[ -f "$ROOTFS/opt/brave.com/brave-origin/locales/${LANGPACKS[0]}.pak" ]] \
+    || { echo "Brave's translations are missing" >&2; exit 1; }
 
   echo "==> GNOME Shell extensions"
   mkdir -p "$WORK/downloads"
@@ -219,6 +229,8 @@ desktop_configure() {
   in_chroot systemctl enable live-locale.service
   # Once the welcome has created the real user, the live one goes
   in_chroot systemctl enable live-retire-user.service
+  # The host's folder (run-qemu.sh --shared-folder) in /media, so in Files
+  in_chroot systemctl enable live-shared-folder.service
 
   # The live user logs straight in (no GDM login screen) and gets the welcome
   # app. It creates the real user, turns this off and logs out to GDM.
@@ -321,19 +333,6 @@ processor-colors=@as []
 show-memory=true
 use-higher-precision=true
 EOF
-
-  # Chromium: light or dark as GNOME is ("Device" mode, which reads it from
-  # the settings portal and follows later changes too). Set once, in the
-  # initial preferences Chromium copies into each new profile.
-  python3 - "$ROOTFS/etc/chromium/master_preferences" <<'PY'
-import json, sys
-path = sys.argv[1]
-prefs = json.load(open(path))
-prefs.setdefault("browser", {}).setdefault("theme", {})["color_scheme2"] = 0  # 0 = device
-with open(path, "w") as f:
-    json.dump(prefs, f, indent=2)
-    f.write("\n")
-PY
 
   # Ctrl+Alt+T opens ghostty too (GNOME's own binding runs the
   # xdg-terminal-exec default, see overlay/etc/xdg/xdg-terminals.list).

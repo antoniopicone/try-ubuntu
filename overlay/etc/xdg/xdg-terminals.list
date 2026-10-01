@@ -1,3 +1,6 @@
 # Default terminal for xdg-terminal-exec: GNOME (Ctrl+Alt+T, Nautilus' "Open
-# in Terminal") and every app that asks for "a terminal".
+# in Terminal") and every app that asks for "a terminal". Ghostty falls back
+# on Ptyxis by itself when it can't start (/usr/local/bin/ghostty); Ptyxis
+# is next here for when Ghostty isn't installed.
 com.mitchellh.ghostty.desktop
+org.gnome.Ptyxis.desktop
