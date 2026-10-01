@@ -88,6 +88,17 @@ def texture(surface):
                                  GLib.Bytes.new(bytes(surface.get_data())), surface.get_stride())
 
 
+def show(avatar, texture):
+    """The picture on an Adw.Avatar, or its initials. libadwaita sizes the
+    initials when the name is set: set while a picture was showing, they
+    come back tiny, so the name is set again."""
+    avatar.set_custom_image(texture)
+    if texture is None:
+        name = avatar.get_text() or ""
+        avatar.set_text("")
+        avatar.set_text(name)
+
+
 def backgrounds(style):
     return style["backgrounds"] or BACKGROUNDS
 
@@ -275,7 +286,7 @@ class AvatarEditor(Gtk.Box):
             self.png, self.texture = png(surface), texture(surface)
         else:
             self.png = self.texture = None
-        self.preview.set_custom_image(self.texture)
+        show(self.preview, self.texture)
         self.emit("changed")
 
     @property

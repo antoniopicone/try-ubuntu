@@ -4,9 +4,10 @@ versions it no longer keeps are forgotten (and, once a day, pruned).
 
 Started every hour by live-backup.timer (a systemd user unit: the GNOME
 Online Accounts account and the keyring with the repository's password are
-the session's). With Google Drive the job gets GOA's access token, valid
-for at most an hour: a backup that takes longer is interrupted before it
-expires and the next one goes on from there (restic keeps what was sent).
+the session's). With OneDrive the job gets GOA's access token, valid for
+about an hour: a backup that takes longer is interrupted before it expires
+and the next one goes on from there (restic keeps what was sent). Google
+Drive and Dropbox have rclone's own sign-in, which renews its token.
 The result goes to ~/.local/state/live-backup/status.json, read by the
 Backup app; a failure is also a notification.
 """
@@ -82,14 +83,13 @@ def main():
         return
     status = cloud.load_status() or {}
     status["started"] = now()
-    obj = cloud.account_by_id(cloud.goa_client(), config["account"])
-    if obj is None:
-        finish(status, False, t("no_account"))
     password = cloud.lookup_password(config["repo"])
     if not password:
         finish(status, False, t("no_password"))
     try:
-        env, valid = cloud.remote_env(obj)
+        env, valid = cloud.env_for(config, cloud.goa_client())
+    except LookupError:
+        finish(status, False, t("no_account"))
     except Exception as e:  # GOA: offline, credentials to renew...
         finish(status, False, str(getattr(e, "message", e)))
     env = cloud.restic_env(env, config, password)

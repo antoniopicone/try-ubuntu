@@ -88,7 +88,7 @@ app takes over: it creates your user and logs out to GDM (see
 | Filesystem | btrfs with the subvolumes `@` → `/`, `@home` → `/home`, `@var` → `/var`, `@snapshots` → `/.snapshots` (flat layout, `compress=zstd:1`). **snapper** manages `/`; snapshot #1 is the image as built |
 | Desktop | a minimal **GNOME 51**: Shell, Settings, the vanilla GNOME session, GDM (see [The desktop](#the-desktop)) |
 | Theme | dark style with GNOME's blue accent, Adwaita Sans, Yaru icons, and **one of Ubuntu's stock wallpapers, picked at random at each build** |
-| Apps | **ghostty** (JetBrains Mono Nerd Font, Catppuccin Mocha; OpenGL in software under QEMU's virgl, which lacks the OpenGL 4.3 it needs), **Nautilus** (with *Open in Ghostty*), **Chromium** (in the desktop's language and light/dark style, with uBlock Origin Lite), GNOME Software (with **Flatpak** and Flathub), Disks, Resources, Extensions, **Backup** (hourly, end-to-end encrypted backups of your home folder with restic, to Google Drive or Nextcloud) |
+| Apps | **ghostty** (JetBrains Mono Nerd Font, Catppuccin Mocha; OpenGL in software under QEMU's virgl, which lacks the OpenGL 4.3 it needs), **Nautilus** (with *Open in Ghostty*), **Chromium** (in the desktop's language and light/dark style, with uBlock Origin Lite), GNOME Software (with **Flatpak** and Flathub), Disks, Resources, Extensions, **Backup** (hourly, end-to-end encrypted backups of your home folder with restic, to Google Drive, OneDrive, Dropbox or Nextcloud) |
 | Fonts | Adwaita Sans; Liberation, **Carlito** and **Caladea** (metric-compatible with Arial/Times New Roman/Courier New and Calibri/Cambria, so Office documents keep their layout); JetBrains Mono; **JetBrains Mono Nerd Font** (GNOME's monospace font and Ghostty's) and **Hack Nerd Font Mono** |
 | Network | NetworkManager (via netplan, as on Ubuntu Desktop) |
 | Services | polkit, UPower, power-profiles-daemon, BlueZ, GeoClue, avahi-daemon (+ nss-mdns), Tailscale, ufw |
@@ -418,13 +418,21 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   The session then logs out to GDM, where only the new user is listed.
 - **Backup** ([live-backup](overlay/usr/local/bin/live-backup)) opens by
   itself at the new user's first login. It asks where to keep your data,
-  documents and preferences safe: a folder on **Google Drive** or on
-  **Nextcloud**. iCloud, Samba and SFTP are listed but not available yet.
-  "Set Up Later" skips it; the app stays in the app grid.
-  - The cloud access is a **GNOME Online Accounts** account, so it's in
-    Settings › Online Accounts too (and its files in Nautilus). The app
-    uses one that's already there, or opens Settings' own dialog to add
-    it.
+  documents and preferences safe: a folder on **Google Drive**,
+  **OneDrive**, **Dropbox** or **Nextcloud**. iCloud, Samba and SFTP are
+  listed but not available yet. "Set Up Later" skips it; the app stays in
+  the app grid.
+  - **Nextcloud and OneDrive** are **GNOME Online Accounts** accounts
+    (OneDrive is GOA's Microsoft 365), so they're in Settings › Online
+    Accounts too, with their files in Nautilus. The app uses one that's
+    already there, or opens Settings' own dialog to add it, in front of
+    its window.
+  - **Google Drive and Dropbox** can't be: Ubuntu's GOA is built without
+    Google's Files feature (so its Google accounts have no Drive access)
+    and has no Dropbox provider. You sign in to them in the browser with
+    rclone's own sign-in (`rclone authorize`), and rclone keeps and renews
+    the token in `~/.config/live-backup/rclone.conf` (readable only by
+    you).
   - You pick the folder in a tree of the account's folders (and can create
     one). The backups go in `Ubuntu Backup` inside it. A folder that
     already has backups made with the same password (an earlier install)
@@ -440,9 +448,9 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
     subvolume's), without caches, Trash and container images
     ([excludes](overlay/usr/local/share/live-backup/excludes)). It keeps
     24 hourly, 7 daily, 4 weekly, 12 monthly and 3 yearly versions (pruned
-    once a day). restic reaches the cloud through rclone, with the
-    credentials of the GOA account fetched at every backup: Google's token
-    lasts an hour, so a longer first backup continues at the next one. A
+    once a day). restic reaches the cloud through rclone. For GOA accounts
+    the credentials are fetched at every backup: OneDrive's token lasts
+    about an hour, so a longer first backup continues at the next one. A
     failure is a notification. The app shows the last backup, and can
     start one, change the folder or stop them.
   - Restoring has no UI yet: `restic` with the same repository

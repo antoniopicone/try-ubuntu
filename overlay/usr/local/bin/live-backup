@@ -4,9 +4,11 @@ backups of the home folder (restic, see /usr/local/lib/live-backup).
 
 At the first login of the user live-welcome created it starts by itself
 (--first-run, ~/.config/autostart) and asks where to keep the backups: a
-folder on Google Drive or on Nextcloud, through a GNOME Online Accounts
-account (an existing one, or one added in Settings' own dialog, so it's in
-Settings too). Then the folder, picked in a tree of the account's folders,
+folder on Nextcloud or OneDrive, through a GNOME Online Accounts account
+(an existing one, or one added in Settings' own dialog, so it's in Settings
+too), or on Google Drive or Dropbox, signed in in the browser with rclone
+(Ubuntu's GOA has neither). Then the folder, picked in a tree of the
+account's folders,
 and the user's password, which encrypts the backups on this computer before
 they leave it (restic). iCloud, Samba and SFTP are listed, not there yet.
 "Later" skips it all: the app stays in the app grid.
@@ -17,6 +19,7 @@ or stop the backups.
 import json
 import os
 import pwd
+import re
 import subprocess
 import sys
 import threading
@@ -37,9 +40,11 @@ CHKPWD = "/usr/sbin/unix_chkpwd"
 # id, icon, title key, body key, available
 DESTINATIONS = [
     ("google", "goa-account-google", "dest_google", "dest_google_body", True),
+    ("ms_graph", "goa-account-ms365", "dest_onedrive", "dest_onedrive_body", True),
+    ("dropbox", "folder-remote", "dest_dropbox", "dest_dropbox_body", True),
     ("owncloud", "goa-account-owncloud", "dest_nextcloud", "dest_nextcloud_body", True),
     ("icloud", "weather-overcast-symbolic", "dest_icloud", "soon", False),
-    ("samba", "folder-remote-symbolic", "dest_samba", "soon", False),
+    ("samba", "network-server-symbolic", "dest_samba", "soon", False),
     ("sftp", "utilities-terminal-symbolic", "dest_sftp", "soon", False),
 ]
 
@@ -51,6 +56,8 @@ STRINGS = {
                        "preferences safe:",
         "dest_google": "Google Drive", "dest_google_body": "A folder on your Google Drive",
         "dest_nextcloud": "Nextcloud", "dest_nextcloud_body": "A folder on your Nextcloud",
+        "dest_onedrive": "OneDrive", "dest_onedrive_body": "A folder on your OneDrive",
+        "dest_dropbox": "Dropbox", "dest_dropbox_body": "A folder on your Dropbox",
         "dest_icloud": "iCloud Drive",
         "dest_samba": "Network folder (Samba)",
         "dest_sftp": "Remote server (SFTP, with a password or a key file)",
@@ -63,7 +70,12 @@ STRINGS = {
         "accounts_body": "The online accounts of this computer that can hold your backups.",
         "add_account": "Add another account",
         "wait_title": "Sign In",
-        "wait_body": "Sign in to {provider} in the window that has just opened. The "
+        "browser_body": "Sign in to {provider} in the browser that has just opened, and let "
+                        "rclone (the program that sends the backups) in.",
+        "open_browser": "Open the Browser Again",
+        "open_settings": "Open Settings Again",
+        "err_sign_in": "The sign-in didn't work.",
+        "wait_body": "Sign in to {provider} in the Settings window that has just opened. The "
                      "account will also be in Settings › Online Accounts.",
         "wait_files": "Keep “Files” turned on for the account: that's where the backups go.",
         "cancel": "Cancel",
@@ -114,6 +126,8 @@ STRINGS = {
                        "e preferenze:",
         "dest_google": "Google Drive", "dest_google_body": "Una cartella sul tuo Google Drive",
         "dest_nextcloud": "Nextcloud", "dest_nextcloud_body": "Una cartella sul tuo Nextcloud",
+        "dest_onedrive": "OneDrive", "dest_onedrive_body": "Una cartella sul tuo OneDrive",
+        "dest_dropbox": "Dropbox", "dest_dropbox_body": "Una cartella sul tuo Dropbox",
         "dest_icloud": "iCloud Drive",
         "dest_samba": "Cartella di rete (Samba)",
         "dest_sftp": "Server remoto (SFTP, con password o file di chiave)",
@@ -126,7 +140,13 @@ STRINGS = {
         "accounts_body": "Gli account online di questo computer che possono ospitare i backup.",
         "add_account": "Aggiungi un altro account",
         "wait_title": "Accedi",
-        "wait_body": "Accedi a {provider} nella finestra che si è appena aperta. L'account "
+        "browser_body": "Accedi a {provider} nel browser che si è appena aperto e consenti "
+                        "l'accesso a rclone (il programma che invia i backup).",
+        "open_browser": "Riapri il browser",
+        "open_settings": "Riapri Impostazioni",
+        "err_sign_in": "L'accesso non è riuscito.",
+        "wait_body": "Accedi a {provider} nella finestra delle Impostazioni che si è appena "
+                     "aperta. L'account "
                      "sarà anche in Impostazioni › Account online.",
         "wait_files": "Lascia attiva la voce «File» dell'account: è lì che vanno i backup.",
         "cancel": "Annulla",
@@ -222,8 +242,10 @@ class BackupWindow(Adw.ApplicationWindow):
         self.client = cloud.goa_client()
         self.client.connect("account-added", self._on_account)
         self.client.connect("account-changed", self._on_account)
-        self.provider = self.obj = self.env = None
+        self.provider = self.env = None
         self.waiting = False
+        self.login = self.login_url = None
+        self.access = {}
         self.stores = {}
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
@@ -279,6 +301,7 @@ class BackupWindow(Adw.ApplicationWindow):
 
     def _back(self):
         self.waiting = False
+        self._stop_login()
         if self.history:
             self.stack.set_visible_child_name(self.history.pop())
         self.back.set_visible(bool(self.history))
@@ -317,6 +340,9 @@ class BackupWindow(Adw.ApplicationWindow):
 
     def _pick_provider(self, provider):
         self.provider = provider
+        if provider in cloud.RCLONE_PROVIDERS:
+            self._sign_in()
+            return
         found = cloud.accounts(self.client, provider)
         if not found:
             self._add_account()
@@ -349,25 +375,111 @@ class BackupWindow(Adw.ApplicationWindow):
     # --- a new GNOME Online Accounts account, in Settings' dialog ----------------
 
     def _page_wait(self):
-        self.wait_status = Adw.StatusPage(icon_name="system-users-symbolic", vexpand=True)
+        self.wait_status = Adw.StatusPage(icon_name="system-users-symbolic", vexpand=True,
+                                          title=t("wait_title"))
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         box.append(Adw.Spinner(width_request=32, height_request=32))
-        hint = Gtk.Label(label=t("wait_files"), wrap=True, justify=Gtk.Justification.CENTER)
-        hint.add_css_class("dim-label")
-        box.append(hint)
+        self.wait_hint = Gtk.Label(label=t("wait_files"), wrap=True,
+                                   justify=Gtk.Justification.CENTER)
+        self.wait_hint.add_css_class("dim-label")
+        box.append(self.wait_hint)
+        self.wait_again = self._button("")
+        self.wait_again.connect("clicked", lambda *_: self._wait_again())
+        box.append(self.wait_again)
         cancel = self._button(t("cancel"))
         cancel.connect("clicked", lambda *_: self._back())
         box.append(cancel)
         self.wait_status.set_child(box)
         return self.wait_status
 
+    def _wait_again(self):
+        if self.login_url:
+            self._open_uri(self.login_url)
+        else:
+            self._launch_settings()
+
     def _add_account(self):
-        self.wait_status.set_title(t("wait_title"))
         self.wait_status.set_description(t("wait_body", provider=self._provider_name()))
+        self.wait_hint.set_visible(True)
+        self.wait_again.set_label(t("open_settings"))
+        self.wait_again.set_visible(True)
+        self.login_url = None
         self.waiting = True
         self._show("wait")
-        Gio.Subprocess.new(["gnome-control-center", "online-accounts", "add", self.provider],
-                           Gio.SubprocessFlags.NONE)
+        self._launch_settings()
+
+    def _launch_settings(self):
+        # Through a launch context: Settings gets an activation token, so
+        # its window comes to the front instead of opening behind this one.
+        info = Gio.AppInfo.create_from_commandline(
+            f"gnome-control-center online-accounts add {self.provider}", "Settings",
+            Gio.AppInfoCreateFlags.SUPPORTS_STARTUP_NOTIFICATION)
+        try:
+            info.launch([], self.get_display().get_app_launch_context())
+        except GLib.Error as e:
+            self._error(e.message)
+
+    # --- rclone's sign-in in the browser (Google Drive, Dropbox) -----------------
+
+    def _sign_in(self):
+        self.wait_status.set_description(t("browser_body", provider=self._provider_name()))
+        self.wait_hint.set_visible(False)
+        self.wait_again.set_label(t("open_browser"))
+        self.wait_again.set_visible(False)
+        self.login_url = None
+        self.waiting = True
+        self._show("wait")
+        self._stop_login()
+        provider = self.provider
+        login = self.login = subprocess.Popen(cloud.authorize_cmd(provider), text=True,
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        def run():
+            errors = []
+            for line in login.stderr:
+                url = re.search(r"(http://127\.0\.0\.1:\d+/auth\S*)", line)
+                if url:
+                    GLib.idle_add(lambda u=url[1]: self._open_uri(u) and False)
+                elif "ERROR" in line or "Failed" in line:
+                    errors.append(line.split(":", 3)[-1].strip())
+            token = cloud.token_from(login.stdout.read())
+            login.wait()
+            GLib.idle_add(lambda: self._signed_in(login, provider, token, errors) and False)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _open_uri(self, url):
+        self.login_url = url
+        self.wait_again.set_visible(True)
+        Gtk.UriLauncher.new(url).launch(self, None, None, None)
+
+    def _stop_login(self):
+        if getattr(self, "login", None) and self.login.poll() is None:
+            self.login.terminate()
+
+    def _signed_in(self, login, provider, token, errors):
+        if login is not self.login or not self.waiting:  # cancelled
+            return
+        self.waiting = False
+        if not token:
+            self._error(errors[-1] if errors else t("err_sign_in"))
+            return
+        cloud.save_rclone_remote(provider, token)
+        self.working_status.set_title(t("loading", provider=self._provider_name()))
+        self.working_status.set_description("")
+        self._show("working")
+
+        def work():
+            env = cloud.env_for({"auth": "rclone"}, None)[0]
+            return env, cloud.rclone_identity(env)
+
+        def done(result, error):
+            if error:
+                self._error(error)
+                return
+            env, identity = result
+            self.access = {"auth": "rclone", "account": "", "identity": identity}
+            self._open_folders(env, identity)
+        in_thread(work, done)
 
     def _on_account(self, _client, obj):
         if self.waiting and cloud.usable(obj, self.provider):
@@ -490,7 +602,9 @@ class BackupWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def _use_account(self, obj):
-        self.obj = obj
+        _, identity = cloud.describe(obj)
+        self.access = {"auth": "goa", "account": obj.get_account().props.id,
+                       "identity": identity}
         self.working_status.set_title(t("loading", provider=self._provider_name()))
         self.working_status.set_description("")
         self._show("working")
@@ -498,18 +612,21 @@ class BackupWindow(Adw.ApplicationWindow):
         def done(env, error):
             if error:
                 self._error(error)
-                return
-            self.env = env
-            self.stores.clear()
-            self.root.remove_all()
-            _, identity = cloud.describe(obj)
-            self.root.append(Folder(f"{self._provider_name()} ({identity})", ""))
-            self.selection.set_selected(0)
-            self.selection.get_model().get_row(0).set_expanded(True)
-            self._on_folder()
-            self.stack.set_visible_child_name("folder")
-            self.back.set_visible(True)
-        in_thread(lambda: cloud.remote_env(obj)[0], done)
+            else:
+                self._open_folders(env, identity)
+        in_thread(lambda: cloud.goa_env(obj)[0], done)
+
+    def _open_folders(self, env, identity):
+        self.env = env
+        self.stores.clear()
+        self.root.remove_all()
+        name = self._provider_name()
+        self.root.append(Folder(f"{name} ({identity})" if identity else name, ""))
+        self.selection.set_selected(0)
+        self.selection.get_model().get_row(0).set_expanded(True)
+        self._on_folder()
+        self.stack.set_visible_child_name("folder")
+        self.back.set_visible(True)
 
     # --- the password, and the repository -------------------------------------------
 
@@ -567,9 +684,8 @@ class BackupWindow(Adw.ApplicationWindow):
 
     def _set_up(self, password):
         folder = self._selected()
-        account = self.obj.get_account()
-        config = {"provider": account.props.provider_type, "account": account.props.id,
-                  "folder": folder.path, "repo": self._repo_for(folder)}
+        config = {"provider": self.provider, **self.access, "folder": folder.path,
+                  "repo": self._repo_for(folder)}
         self.working_status.set_title(t("working_title"))
         self.working_status.set_description(t("working_body"))
         self._show("working")
@@ -642,12 +758,13 @@ class BackupWindow(Adw.ApplicationWindow):
         config = cloud.load_config()
         if not config:
             return False
-        obj = cloud.account_by_id(self.client, config["account"])
-        if obj:
-            name, identity = cloud.describe(obj)
-            self.status_rows["where"].set_subtitle(f"{name} ({identity})")
+        name, identity = cloud.PROVIDERS[config["provider"]], config.get("identity")
+        if config.get("auth") == "goa" and not cloud.account_by_id(self.client,
+                                                                   config["account"]):
+            where = t("no_account")
         else:
-            self.status_rows["where"].set_subtitle(t("no_account"))
+            where = f"{name} ({identity})" if identity else name
+        self.status_rows["where"].set_subtitle(GLib.markup_escape_text(where))
         self.status_rows["folder"].set_subtitle(config["repo"])
         active = systemctl("is-active", "live-backup.service").stdout.strip() == "activating"
         status = cloud.load_status()

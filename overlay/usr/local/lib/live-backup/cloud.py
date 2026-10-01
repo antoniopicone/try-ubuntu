@@ -1,18 +1,25 @@
 """cloud: what the Backup app (live-backup) and the backup job (run-backup)
-share: the configuration, the cloud accounts of GNOME Online Accounts as
-rclone remotes, the repository's password in the keyring, and restic.
+share: the configuration, the cloud accounts as rclone remotes, the
+repository's password in the keyring, and restic.
 
-The backups are restic repositories reached through rclone, whose remote
-("cloud:") is defined in the environment from a GNOME Online Accounts
-account at every use: Google Drive with the account's OAuth token,
-Nextcloud (GOA's "owncloud") over WebDAV with its password. Nothing about
-the account is stored here but its id.
+The backups are restic repositories reached through rclone, on a remote
+called "cloud:" made in one of two ways:
+  - from a GNOME Online Accounts account, at every use, in the environment:
+    Nextcloud (GOA's "owncloud") over WebDAV with its password, OneDrive
+    (GOA's "ms_graph", Microsoft 365) with its OAuth token. Only the
+    account's id is stored here.
+  - with rclone's own sign-in (`rclone authorize`, in the browser) for
+    Google Drive and Dropbox: Ubuntu's GOA has no Google Drive (built
+    without its Files feature) and no Dropbox. rclone keeps the token, and
+    renews it, in ~/.config/live-backup/rclone.conf (only the user's).
 """
+import configparser
 import datetime
 import json
 import os
 import subprocess
 import time
+import urllib.request
 
 import gi
 
@@ -24,8 +31,13 @@ CONFIG = os.path.expanduser("~/.config/live-backup/config.json")
 STATUS = os.path.expanduser("~/.local/state/live-backup/status.json")
 RCLONE_CONFIG = os.path.expanduser("~/.config/live-backup/rclone.conf")
 EXCLUDES = "/usr/local/share/live-backup/excludes"
-# GOA provider type -> what the app calls it
-PROVIDERS = {"google": "Google Drive", "owncloud": "Nextcloud"}
+# provider -> what the app calls it
+PROVIDERS = {"google": "Google Drive", "dropbox": "Dropbox", "owncloud": "Nextcloud",
+             "ms_graph": "OneDrive"}
+# reached through a GNOME Online Accounts account (the GOA provider type)
+GOA_PROVIDERS = {"owncloud", "ms_graph"}
+# signed in with rclone: provider -> rclone backend
+RCLONE_PROVIDERS = {"google": "drive", "dropbox": "dropbox"}
 REPO_DIR = "Ubuntu Backup"
 REMOTE = "cloud"
 SCHEMA = Secret.Schema.new("org.ubuntu.LiveBackup", Secret.SchemaFlags.NONE,
@@ -72,7 +84,7 @@ def usable(obj, provider=None):
     if account is None or obj.get_files() is None:
         return False
     return (account.props.provider_type == provider if provider
-            else account.props.provider_type in PROVIDERS)
+            else account.props.provider_type in GOA_PROVIDERS)
 
 
 def accounts(client, provider):
@@ -98,27 +110,42 @@ def webdav_env(url, user, password):
             "PASS": obscured}
 
 
-def drive_env(access_token, expires_in):
+def onedrive_env(access_token, expires_in):
     expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=expires_in)
     # Only the access token: rclone can't refresh it (GOA does), so it is
     # fetched again for every job.
     token = {"access_token": access_token, "token_type": "Bearer",
              "expiry": expiry.isoformat(timespec="seconds")}
-    return {"TYPE": "drive", "SCOPE": "drive", "TOKEN": json.dumps(token)}
+    request = urllib.request.Request("https://graph.microsoft.com/v1.0/me/drive",
+                                     headers={"Authorization": f"Bearer {access_token}"})
+    drive = json.load(urllib.request.urlopen(request, timeout=30))
+    return {"TYPE": "onedrive", "TOKEN": json.dumps(token), "DRIVE_ID": drive["id"],
+            "DRIVE_TYPE": drive["driveType"]}
 
 
-def remote_env(obj):
-    """(environment for rclone and restic, seconds it stays valid or None)."""
+def _env(remote):
+    os.makedirs(os.path.dirname(RCLONE_CONFIG), exist_ok=True)
+    if not os.path.exists(RCLONE_CONFIG):
+        open(RCLONE_CONFIG, "w").close()
+    os.chmod(RCLONE_CONFIG, 0o600)
+    env = dict(os.environ, RCLONE_CONFIG=RCLONE_CONFIG)
+    env.update({f"RCLONE_CONFIG_{REMOTE.upper()}_{k}": v for k, v in remote.items()})
+    return env
+
+
+def goa_env(obj):
+    """(environment for rclone and restic, seconds it stays valid or None)
+    for a GOA account."""
     account = obj.get_account()
     account.call_ensure_credentials_sync(None)
-    if account.props.provider_type == "google":
+    if account.props.provider_type == "ms_graph":
         oauth2 = obj.get_oauth2_based()
         token, expires_in = oauth2.call_get_access_token_sync(None)
         if expires_in < 600:  # about to expire: wait for GOA's next one
             time.sleep(expires_in + 5)
             account.call_ensure_credentials_sync(None)
             token, expires_in = oauth2.call_get_access_token_sync(None)
-        remote, valid = drive_env(token, expires_in), expires_in
+        remote, valid = onedrive_env(token, expires_in), expires_in
     else:
         uri = GLib.Uri.parse(obj.get_files().props.uri, GLib.UriFlags.NONE)
         scheme = "https" if uri.get_scheme() == "davs" else "http"
@@ -127,11 +154,57 @@ def remote_env(obj):
         user = uri.get_user() or account.props.identity
         password = obj.get_password_based().call_get_password_sync("password", None)
         remote, valid = webdav_env(url, user, password), None
+    return _env(remote), valid
+
+
+# --- rclone's own sign-in (Google Drive, Dropbox) -----------------------------
+
+def authorize_cmd(provider):
+    """`rclone authorize`: prints the sign-in URL (stderr), serves the
+    redirect on 127.0.0.1:53682 and prints the token (stdout)."""
+    return ["rclone", "authorize", RCLONE_PROVIDERS[provider], "--auth-no-open-browser"]
+
+
+def token_from(output):
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            return json.loads(line)
+    return None
+
+
+def save_rclone_remote(provider, token):
+    """The signed-in remote, in rclone's config file (where rclone writes
+    the renewed tokens back)."""
+    config = configparser.ConfigParser()
+    config[REMOTE] = {"type": RCLONE_PROVIDERS[provider], "token": json.dumps(token)}
+    if provider == "google":
+        config[REMOTE]["scope"] = "drive"
     os.makedirs(os.path.dirname(RCLONE_CONFIG), exist_ok=True)
-    open(RCLONE_CONFIG, "a").close()  # empty: the remote is in the environment
-    env = dict(os.environ, RCLONE_CONFIG=RCLONE_CONFIG)
-    env.update({f"RCLONE_CONFIG_{REMOTE.upper()}_{k}": v for k, v in remote.items()})
-    return env, valid
+    with open(os.open(RCLONE_CONFIG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        config.write(f)
+
+
+def rclone_identity(env):
+    """The signed-in user, when the backend tells (Dropbox does)."""
+    out = subprocess.run(rclone_args("config", "userinfo", "--json", f"{REMOTE}:"), env=env,
+                         capture_output=True, text=True)
+    try:
+        info = json.loads(out.stdout)
+    except ValueError:
+        return ""
+    return info.get("Email") or info.get("Name") or ""
+
+
+def env_for(config, client):
+    """(environment, seconds it stays valid or None) for the configured
+    backups; LookupError if their GOA account is gone."""
+    if config.get("auth") == "rclone":
+        return _env({}), None
+    obj = account_by_id(client, config["account"])
+    if obj is None:
+        raise LookupError(config["account"])
+    return goa_env(obj)
 
 
 def remote_path(path):

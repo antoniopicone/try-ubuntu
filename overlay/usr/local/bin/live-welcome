@@ -479,10 +479,15 @@ class WelcomeWindow(Adw.ApplicationWindow):
             self._tr(row.set_title, key)
             group.add(row)
             self.summary_rows[key] = row
-        if self.styles:
-            self.summary_avatar = Adw.Avatar(size=40, show_initials=True)
-            self.summary_rows["row_picture"].add_suffix(self.summary_avatar)
-        return self._page(group)
+        if not self.styles:
+            return self._page(group)
+        # The picture on top, as big as in the avatar page
+        self.summary_avatar = Adw.Avatar(size=128, show_initials=True,
+                                         halign=Gtk.Align.CENTER)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        box.append(self.summary_avatar)
+        box.append(group)
+        return self._page(box)
 
     def _page_finish(self):
         self.finish_status = Adw.StatusPage(vexpand=True)
@@ -628,7 +633,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
             row.set_subtitle(GLib.markup_escape_text(values[key]))
         if self.styles:
             self.summary_avatar.set_text(c["fullname"])
-            self.summary_avatar.set_custom_image(self.avatar_editor.texture)
+            avatars.show(self.summary_avatar, self.avatar_editor.texture)
 
     # --- finish --------------------------------------------------------------
 
