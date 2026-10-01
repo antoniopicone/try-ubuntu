@@ -1,234 +1,238 @@
-"""cloud: what the Backup app (live-backup) and the backup job (run-backup)
-share: the configuration, the cloud accounts as rclone remotes, the
-repository's password in the keyring, and restic.
+"""cloud: what the Cloud Backup app (live-backup) and the backup job
+(run-backup) share: the configuration, where the backups go, the recovery
+key in the keyring, and restic.
 
-The backups are restic repositories reached through rclone, on a remote
-called "cloud:" made in one of two ways:
-  - from a GNOME Online Accounts account, at every use, in the environment:
-    Nextcloud (GOA's "owncloud") over WebDAV with its password, OneDrive
-    (GOA's "ms_graph", Microsoft 365) with its OAuth token. Only the
-    account's id is stored here.
-  - with rclone's own sign-in (`rclone authorize`, in the browser) for
-    Google Drive and Dropbox: Ubuntu's GOA has no Google Drive (built
-    without its Files feature) and no Dropbox. rclone keeps the token, and
-    renews it, in ~/.config/live-backup/rclone.conf (only the user's).
+The backups are encrypted twice, end to end, with keys that come from one
+recovery key (random, 160 bits, shown to the user once as 8 groups of 4
+characters, to keep somewhere safe):
+  - restic encrypts the content, the names and the layout of the home
+    folder (the repository's password is derived from the key);
+  - under it, rclone's crypt encrypts the names of restic's own files and
+    folders: the destination holds one folder with a neutral random name,
+    and in it only encrypted names. Nothing there says it's a backup,
+    restic, Ubuntu, or whose.
+The key never goes to a file: it's in the GNOME keyring, and crypt's two
+passwords, derived from it, reach rclone through the environment.
+
+Destinations are rclone remotes in ~/.config/live-backup/rclone.conf (only
+the user can read it): "cloud:" is the destination (Google Drive, OneDrive,
+Dropbox with rclone's sign-in, Nextcloud, Samba, SFTP; iCloud Drive as an
+alias of the icloud-linux mount ~/iCloud), "vault:" the encrypted folder in
+it. While the app sets up a destination they're "setup:" and "setupvault:",
+and they replace the others only once the backups are set up, so backing
+out halfway leaves the current backups alone.
 """
 import configparser
-import datetime
+import hashlib
 import json
 import os
+import re
+import secrets
 import subprocess
-import time
-import urllib.request
 
 import gi
 
-gi.require_version("Goa", "1.0")
 gi.require_version("Secret", "1")
-from gi.repository import GLib, Goa, Secret  # noqa: E402
+from gi.repository import Secret  # noqa: E402
 
-CONFIG = os.path.expanduser("~/.config/live-backup/config.json")
-STATUS = os.path.expanduser("~/.local/state/live-backup/status.json")
-RCLONE_CONFIG = os.path.expanduser("~/.config/live-backup/rclone.conf")
+HOME = os.path.expanduser("~")
+CONFIG = os.path.join(HOME, ".config/live-backup/config.json")
+STATUS = os.path.join(HOME, ".local/state/live-backup/status.json")
+RCLONE_CONFIG = os.path.join(HOME, ".config/live-backup/rclone.conf")
+KNOWN_HOSTS = os.path.join(HOME, ".config/live-backup/known_hosts")
 EXCLUDES = "/usr/local/share/live-backup/excludes"
-# provider -> what the app calls it
-PROVIDERS = {"google": "Google Drive", "dropbox": "Dropbox", "owncloud": "Nextcloud",
-             "ms_graph": "OneDrive"}
-# reached through a GNOME Online Accounts account (the GOA provider type)
-GOA_PROVIDERS = {"owncloud", "ms_graph"}
-# signed in with rclone: provider -> rclone backend
-RCLONE_PROVIDERS = {"google": "drive", "dropbox": "dropbox"}
-REPO_DIR = "Ubuntu Backup"
-REMOTE = "cloud"
+ICLOUD_MOUNT = os.path.join(HOME, "iCloud")
+PROVIDERS = {"google": "Google Drive", "onedrive": "OneDrive", "dropbox": "Dropbox",
+             "nextcloud": "Nextcloud", "icloud": "iCloud Drive", "samba": "Samba",
+             "sftp": "SFTP"}
+REMOTE, VAULT = "cloud", "vault"
+SETUP_REMOTE, SETUP_VAULT = "setup", "setupvault"
 SCHEMA = Secret.Schema.new("org.ubuntu.LiveBackup", Secret.SchemaFlags.NONE,
                            {"repository": Secret.SchemaAttributeType.STRING})
 # restic's exit codes (0.17+)
 RESTIC_NO_REPO, RESTIC_BAD_PASSWORD = 10, 12
 
+# The encrypted folder's neutral name: 20 characters of base32
+VAULT_NAME = re.compile(r"^[a-z2-7]{20}$")
+# The recovery key: Crockford's base32 (no I, L, O, U), 8 groups of 4
+KEY_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+KEY_GROUPS = 8
 
-def load_config():
+
+def _load(path):
     try:
-        return json.load(open(CONFIG))
+        return json.load(open(path))
     except (OSError, ValueError):
         return None
+
+
+def _save(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_config():
+    return _load(CONFIG)
 
 
 def save_config(config):
-    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
-    with open(CONFIG, "w") as f:
-        json.dump(config, f, indent=2)
+    _save(CONFIG, config)
 
 
 def load_status():
-    try:
-        return json.load(open(STATUS))
-    except (OSError, ValueError):
-        return None
+    return _load(STATUS)
 
 
 def save_status(status):
-    os.makedirs(os.path.dirname(STATUS), exist_ok=True)
-    with open(STATUS, "w") as f:
-        json.dump(status, f, indent=2)
+    _save(STATUS, status)
 
 
-# --- GNOME Online Accounts ------------------------------------------------------
+# --- the recovery key -------------------------------------------------------------
 
-def goa_client():
-    return Goa.Client.new_sync(None)
-
-
-def usable(obj, provider=None):
-    """A GOA account with files, of the provider (any of ours if None)."""
-    account = obj.get_account()
-    if account is None or obj.get_files() is None:
-        return False
-    return (account.props.provider_type == provider if provider
-            else account.props.provider_type in GOA_PROVIDERS)
+def new_key():
+    return "-".join("".join(secrets.choice(KEY_ALPHABET) for _ in range(4))
+                    for _ in range(KEY_GROUPS))
 
 
-def accounts(client, provider):
-    return [o for o in client.get_accounts() if usable(o, provider)]
+def _raw(text):
+    """As typed: any case, spaces or dashes, O for 0, I or L for 1."""
+    return re.sub(r"[\s\-]", "", text.upper()).translate(str.maketrans("OIL", "011"))
 
 
-def account_by_id(client, account_id):
-    obj = client.lookup_by_id(account_id)
-    return obj if obj is not None and usable(obj) else None
+def normalize_group(text):
+    return _raw(text)
 
 
-def describe(obj):
-    account = obj.get_account()
-    return PROVIDERS[account.props.provider_type], account.props.presentation_identity
+def normalize_key(text):
+    """The key as typed, in its canonical form; None if it can't be one."""
+    raw = _raw(text)
+    if len(raw) != 4 * KEY_GROUPS or any(c not in KEY_ALPHABET for c in raw):
+        return None
+    return "-".join(raw[i:i + 4] for i in range(0, len(raw), 4))
 
 
-# --- rclone -------------------------------------------------------------------------
-
-def webdav_env(url, user, password):
-    obscured = subprocess.run(["rclone", "obscure", "-"], input=password, text=True,
-                              capture_output=True, check=True).stdout.strip()
-    return {"TYPE": "webdav", "URL": url, "VENDOR": "nextcloud", "USER": user,
-            "PASS": obscured}
+def key_groups(key):
+    return key.split("-")
 
 
-def onedrive_env(access_token, expires_in):
-    expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=expires_in)
-    # Only the access token: rclone can't refresh it (GOA does), so it is
-    # fetched again for every job.
-    token = {"access_token": access_token, "token_type": "Bearer",
-             "expiry": expiry.isoformat(timespec="seconds")}
-    request = urllib.request.Request("https://graph.microsoft.com/v1.0/me/drive",
-                                     headers={"Authorization": f"Bearer {access_token}"})
-    drive = json.load(urllib.request.urlopen(request, timeout=30))
-    return {"TYPE": "onedrive", "TOKEN": json.dumps(token), "DRIVE_ID": drive["id"],
-            "DRIVE_TYPE": drive["driveType"]}
+def _derive(key, purpose):
+    return hashlib.sha256(f"live-backup/{purpose}/{key}".encode()).hexdigest()
 
 
-def _env(remote):
-    os.makedirs(os.path.dirname(RCLONE_CONFIG), exist_ok=True)
-    if not os.path.exists(RCLONE_CONFIG):
-        open(RCLONE_CONFIG, "w").close()
-    os.chmod(RCLONE_CONFIG, 0o600)
-    env = dict(os.environ, RCLONE_CONFIG=RCLONE_CONFIG)
-    env.update({f"RCLONE_CONFIG_{REMOTE.upper()}_{k}": v for k, v in remote.items()})
-    return env
+def restic_password(key):
+    return _derive(key, "restic")
 
 
-def goa_env(obj):
-    """(environment for rclone and restic, seconds it stays valid or None)
-    for a GOA account."""
-    account = obj.get_account()
-    account.call_ensure_credentials_sync(None)
-    if account.props.provider_type == "ms_graph":
-        oauth2 = obj.get_oauth2_based()
-        token, expires_in = oauth2.call_get_access_token_sync(None)
-        if expires_in < 600:  # about to expire: wait for GOA's next one
-            time.sleep(expires_in + 5)
-            account.call_ensure_credentials_sync(None)
-            token, expires_in = oauth2.call_get_access_token_sync(None)
-        remote, valid = onedrive_env(token, expires_in), expires_in
-    else:
-        uri = GLib.Uri.parse(obj.get_files().props.uri, GLib.UriFlags.NONE)
-        scheme = "https" if uri.get_scheme() == "davs" else "http"
-        port = f":{uri.get_port()}" if uri.get_port() > 0 else ""
-        url = f"{scheme}://{uri.get_host()}{port}{uri.get_path()}".rstrip("/")
-        user = uri.get_user() or account.props.identity
-        password = obj.get_password_based().call_get_password_sync("password", None)
-        remote, valid = webdav_env(url, user, password), None
-    return _env(remote), valid
+def new_vault_name():
+    return "".join(secrets.choice("abcdefghijklmnopqrstuvwxyz234567") for _ in range(20))
 
 
-# --- rclone's own sign-in (Google Drive, Dropbox) -----------------------------
-
-def authorize_cmd(provider):
-    """`rclone authorize`: prints the sign-in URL (stderr), serves the
-    redirect on 127.0.0.1:53682 and prints the token (stdout)."""
-    return ["rclone", "authorize", RCLONE_PROVIDERS[provider], "--auth-no-open-browser"]
-
-
-def token_from(output):
-    for line in output.splitlines():
-        line = line.strip()
-        if line.startswith("{"):
-            return json.loads(line)
-    return None
-
-
-def save_rclone_remote(provider, token):
-    """The signed-in remote, in rclone's config file (where rclone writes
-    the renewed tokens back)."""
-    config = configparser.ConfigParser()
-    config[REMOTE] = {"type": RCLONE_PROVIDERS[provider], "token": json.dumps(token)}
-    if provider == "google":
-        config[REMOTE]["scope"] = "drive"
-    os.makedirs(os.path.dirname(RCLONE_CONFIG), exist_ok=True)
-    with open(os.open(RCLONE_CONFIG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-        config.write(f)
-
-
-def rclone_identity(env):
-    """The signed-in user, when the backend tells (Dropbox does)."""
-    out = subprocess.run(rclone_args("config", "userinfo", "--json", f"{REMOTE}:"), env=env,
-                         capture_output=True, text=True)
-    try:
-        info = json.loads(out.stdout)
-    except ValueError:
-        return ""
-    return info.get("Email") or info.get("Name") or ""
-
-
-def env_for(config, client):
-    """(environment, seconds it stays valid or None) for the configured
-    backups; LookupError if their GOA account is gone."""
-    if config.get("auth") == "rclone":
-        return _env({}), None
-    obj = account_by_id(client, config["account"])
-    if obj is None:
-        raise LookupError(config["account"])
-    return goa_env(obj)
-
-
-def remote_path(path):
-    return f"{REMOTE}:{path.strip('/')}"
-
-
-def rclone_args(*args):
-    return ["rclone", "--contimeout", "20s", "--low-level-retries", "2", *args]
-
-
-# --- the repository and its password -------------------------------------------
-
-def repository(config):
-    return f"rclone:{remote_path(config['repo'])}"
-
-
-def store_password(repo, password):
+def store_key(repo, key):
     Secret.password_store_sync(SCHEMA, {"repository": repo}, Secret.COLLECTION_DEFAULT,
-                               f"Backup password ({repo})", password, None)
+                               f"Cloud Backup recovery key ({repo})", key, None)
 
 
-def lookup_password(repo):
+def lookup_key(repo):
     return Secret.password_lookup_sync(SCHEMA, {"repository": repo}, None)
 
 
-def restic_env(env, config, password):
-    return dict(env, RESTIC_REPOSITORY=repository(config), RESTIC_PASSWORD=password)
+# --- rclone ------------------------------------------------------------------------
+
+def _private(path):
+    """Create the file (and its folder) readable by the user only."""
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
+    os.chmod(path, 0o600)
+
+
+def obscure(secret):
+    return subprocess.run(["rclone", "obscure", "-"], input=secret, text=True,
+                          capture_output=True, check=True).stdout.strip()
+
+
+def env(key=None):
+    """rclone's environment; with the key, the vaults' crypt passwords too."""
+    _private(RCLONE_CONFIG)
+    result = dict(os.environ, RCLONE_CONFIG=RCLONE_CONFIG)
+    if key:
+        first, second = obscure(_derive(key, "crypt")), obscure(_derive(key, "crypt-salt"))
+        for vault in (VAULT, SETUP_VAULT):
+            result[f"RCLONE_CONFIG_{vault.upper()}_PASSWORD"] = first
+            result[f"RCLONE_CONFIG_{vault.upper()}_PASSWORD2"] = second
+    return result
+
+
+def remote_path(path, remote=REMOTE):
+    return f"{remote}:{path.strip('/')}"
+
+
+def _remotes():
+    _private(RCLONE_CONFIG)
+    config = configparser.RawConfigParser()
+    config.read(RCLONE_CONFIG)
+    return config
+
+
+def _write(config):
+    with open(RCLONE_CONFIG, "w") as f:
+        config.write(f)
+
+
+def remote_options(remote=REMOTE):
+    config = _remotes()
+    return dict(config[remote]) if config.has_section(remote) else {}
+
+
+def set_setup_remote(options):
+    """The destination being set up, as the "setup:" remote."""
+    config = _remotes()
+    config[SETUP_REMOTE] = {k: str(v) for k, v in options.items() if v not in (None, "")}
+    _write(config)
+
+
+def set_setup_vault(path):
+    """The encrypted folder at `path` of the destination being set up."""
+    config = _remotes()
+    config[SETUP_VAULT] = {"type": "crypt", "remote": remote_path(path, SETUP_REMOTE),
+                           "filename_encryption": "standard",
+                           "directory_name_encryption": "true"}
+    _write(config)
+
+
+def promote_setup_remote():
+    """The set-up destination becomes the backups' ("cloud:", "vault:");
+    rclone may have renewed its token in the meantime, so it's read back."""
+    config = _remotes()
+    if config.has_section(SETUP_REMOTE):
+        config[REMOTE] = dict(config[SETUP_REMOTE])
+        config.remove_section(SETUP_REMOTE)
+    if config.has_section(SETUP_VAULT):
+        vault = dict(config[SETUP_VAULT])
+        vault["remote"] = REMOTE + vault["remote"][len(SETUP_REMOTE):]
+        config[VAULT] = vault
+        config.remove_section(SETUP_VAULT)
+    _write(config)
+
+
+# --- restic --------------------------------------------------------------------------
+
+def vault_of(remote):
+    return SETUP_VAULT if remote == SETUP_REMOTE else VAULT
+
+
+def repository(config, remote=REMOTE):
+    return f"rclone:{vault_of(remote)}:"
+
+
+def restic_cmd(config, *args, remote=REMOTE):
+    return ["restic", *args]
+
+
+def restic_env(base, config, key, remote=REMOTE):
+    """restic's environment: the repository (the vault), its password
+    (derived from the key), and crypt's passwords for rclone."""
+    result = dict(base, RESTIC_REPOSITORY=repository(config, remote),
+                  RESTIC_PASSWORD=restic_password(key))
+    result.update({k: v for k, v in env(key).items() if k.startswith("RCLONE_CONFIG_")})
+    return result

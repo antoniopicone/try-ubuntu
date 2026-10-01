@@ -8,7 +8,7 @@
 # scripts/desktop-gnome.sh.
 set -euo pipefail
 
-: "${ROOTFS:?}" "${OVERLAY:?}" "${SUITE:?}" "${MIRROR:?}" "${WORK:?}" "${APFS_FUSE_OUT:?}"
+: "${ROOTFS:?}" "${OVERLAY:?}" "${SUITE:?}" "${MIRROR:?}" "${WORK:?}" "${APFS_FUSE_OUT:?}" "${ICLOUD_LINUX_OUT:?}"
 : "${ISO_LABEL:?}" "${PERSIST_SERIAL:?}"
 : "${LIVE_USER:=ubuntu}" "${LIVE_PASSWORD:=ubuntu}" "${LIVE_HOSTNAME:=ubuntu-live}"
 : "${XKB_LAYOUT:=us}"
@@ -330,6 +330,12 @@ echo "==> apfs-fuse"
 # lets mount(8), and so udisks2 and Nautilus, mount APFS partitions with it.
 install -m 755 "$APFS_FUSE_OUT/apfs-fuse" "$APFS_FUSE_OUT/apfsutil" "$ROOTFS/usr/local/bin/"
 install -Dm644 "$APFS_FUSE_OUT/LICENSE" "$ROOTFS/usr/local/share/doc/apfs-fuse/copyright"
+
+echo "==> icloud-linux"
+# iCloud Drive in ~/iCloud (FUSE), for the Backup app's iCloud backups. Each
+# user sets it up (icloudctl init, through the app): a systemd user service.
+install -m 755 "$ICLOUD_LINUX_OUT"/{icloudctl,icloudd,icloud-status} "$ROOTFS/usr/local/bin/"
+install -Dm644 "$ICLOUD_LINUX_OUT/README.md" "$ROOTFS/usr/local/share/doc/icloud-linux/README.md"
 install -Dm644 "$APFS_FUSE_OUT/LICENSE.lzfse" "$ROOTFS/usr/local/share/doc/apfs-fuse/copyright.lzfse"
 missing=$(in_chroot ldd /usr/local/bin/apfs-fuse | grep 'not found' || true)
 [[ -z "$missing" ]] || { echo "apfs-fuse lacks libraries: $missing" >&2; exit 1; }

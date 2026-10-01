@@ -5,5 +5,7 @@
 # container images and layers (podman), Flatpak apps' caches
 /home/*/.local/share/containers
 /home/*/.var/app/*/cache
+# iCloud Drive (icloud-linux): it lives in iCloud already
+/home/*/iCloud
 # the backup's own state
 /home/*/.local/state/live-backup

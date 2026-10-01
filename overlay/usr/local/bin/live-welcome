@@ -670,7 +670,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
             self._setup_failed(reply.get("error", ""))
             return
         self.spinner.set_visible(False)
-        self.finish_status.set_icon_name("emblem-ok-symbolic")
+        self.finish_status.set_icon_name("object-select-symbolic")
         self.finish_status.set_title(self.t("done_title"))
         self.finish_status.set_description(
             GLib.markup_escape_text(self.t("done_body").format(user=reply["user"])))

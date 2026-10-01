@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F6844F"/>
+      <stop offset="1" stop-color="#E95420"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#C7421A"/>
+      <stop offset="1" stop-color="#A9370F"/>
+    </linearGradient>
+    <linearGradient id="cloud" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EDEDED"/>
+    </linearGradient>
+    <linearGradient id="hole" gradientUnits="userSpaceOnUse" x1="0" y1="105" x2="0" y2="220">
+      <stop offset="0" stop-color="#77216F"/>
+      <stop offset="1" stop-color="#5E2750"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="150%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="3"/>
+      <feOffset dy="4"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.25"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="tile" x="-10%" y="-10%" width="120%" height="125%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2.5"/>
+      <feOffset dy="3"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.3"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Base tile (Yaru rounded square with bottom edge) -->
+  <g filter="url(#tile)">
+    <rect x="20" y="24" width="216" height="212" rx="44" fill="url(#edge)"/>
+    <rect x="20" y="20" width="216" height="208" rx="44" fill="url(#bg)"/>
+    <rect x="21" y="21" width="214" height="206" rx="43" fill="none" stroke="#FFFFFF" stroke-opacity="0.25" stroke-width="2"/>
+  </g>
+
+  <!-- Cloud with upload arrow -->
+  <g transform="translate(46 42) scale(0.32)" filter="url(#soft)">
+    <path fill="url(#cloud)" d="M115.2 435.2C51.6 435.2 0 383.6 0 320c0-50.24 32.16-92.960 76.96-108.72-.08-2.16-.16-4.32-.16-6.48 0-70.72 57.280-128 128-128 47.44 0 88.8 25.76 110.96 64.16A76.4 76.4 0 0 1 358.4 128c42.4 0 76.8 34.4 76.8 76.8 0 9.76-1.84 19.04-5.12 27.68C476.8 241.920 512 283.28 512 332.8c0 56.56-45.84 102.4-102.4 102.4z"/>
+  </g>
+  <!-- Upload arrow rising from below into the cloud -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#soft)">
+    <path d="M128 206V120M104 144l24-24 24 24" stroke="#FFFFFF" stroke-width="22"/>
+    <path d="M128 206V120M104 144l24-24 24 24" stroke="url(#hole)" stroke-width="13"/>
+  </g>
+</svg>

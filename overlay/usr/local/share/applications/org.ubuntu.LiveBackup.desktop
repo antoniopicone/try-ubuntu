@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Backup
+Name=Cloud Backup
 Comment=Keep your files safe in the cloud, encrypted
 Comment[it]=Metti al sicuro i tuoi file nel cloud, cifrati
 Exec=live-backup
-Icon=folder-remote
+Icon=org.ubuntu.LiveBackup
 Categories=GTK;GNOME;Utility;Archiving;
 Keywords=backup;restore;restic;cloud;
 Keywords[it]=backup;ripristino;restic;cloud;salvataggio;

@@ -16,7 +16,7 @@ be used to create more users. Besides the user it sets:
   - the user's GNOME settings (style, accent, Yaru variant, input source,
     region) in their dconf database, so the first login is already themed
   - git's user.name / user.email
-  - the Backup app at the first login (live-backup --first-run, which
+  - the Cloud Backup app at the first login (live-backup --first-run, which
     removes itself from autostart once the backups are set up or put off)
   - the user's picture (the avatar, when there is one), for GDM and GNOME
 and it hides and locks the live user and turns GDM's autologin off.
@@ -196,12 +196,12 @@ region='{c['locale']}'
             f.write(keyfile)
         run("dconf", "compile", os.path.join(dconf_dir, "user"), tmp)
 
-    # The Backup app at the first login: where the encrypted backups go
+    # The Cloud Backup app at the first login: where the encrypted backups go
     autostart = os.path.join(pw.pw_dir, ".config", "autostart")
     os.makedirs(autostart, exist_ok=True)
     with open(os.path.join(autostart, "org.ubuntu.LiveBackup.desktop"), "w") as f:
-        f.write("[Desktop Entry]\nType=Application\nName=Backup\n"
-                "Exec=live-backup --first-run\nIcon=folder-remote\n"
+        f.write("[Desktop Entry]\nType=Application\nName=Cloud Backup\n"
+                "Exec=live-backup --first-run\nIcon=org.ubuntu.LiveBackup\n"
                 "X-GNOME-Autostart-Delay=3\nNoDisplay=true\n")
 
     # git

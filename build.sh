@@ -11,10 +11,16 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: ./build.sh [--xkb LAYOUT] [--clean]
+Usage: ./build.sh [--xkb LAYOUT] [--oauth-clients FILE] [--clean]
 
   --xkb LAYOUT   keyboard layout for the session and the login screen
                  (default: us, e.g. it)
+  --oauth-clients FILE
+                 the Backup app's own OAuth clients, a JSON file:
+                 {"drive": {"client_id": "...", "client_secret": "..."},
+                  "onedrive": {...}, "dropbox": {...}} (any of them).
+                 Without one, Google Drive, OneDrive and Dropbox use
+                 rclone's, which Google often rate-limits
   --clean        drop the build cache (GNOME backport, rootfs)
 EOF
 }
@@ -26,9 +32,14 @@ cache_volume=try-ubuntu-cache
 iso_name=ubuntu-live-arm64.iso
 
 xkb_layout=us
+oauth_clients=""
 while (($#)); do
   case "$1" in
     --xkb) (($# >= 2)) || { usage >&2; exit 64; }; xkb_layout=$2; shift 2 ;;
+    --oauth-clients)
+      (($# >= 2)) || { usage >&2; exit 64; }
+      oauth_clients=$(cat "$2") || exit 1
+      shift 2 ;;
     --clean)
       podman volume rm -f "$cache_volume" >/dev/null && echo "Build cache removed."
       exit 0 ;;
@@ -68,6 +79,7 @@ podman run --rm --privileged \
   -v "$project_dir:/src:ro" \
   -v "$dist_dir:/out" \
   -e XKB_LAYOUT="$xkb_layout" \
+  -e OAUTH_CLIENTS="$oauth_clients" \
   -e SUITE=resolute \
   -e MIRROR=http://ports.ubuntu.com/ubuntu-ports \
   -e ISO_LABEL=UBUNTU_LIVE \

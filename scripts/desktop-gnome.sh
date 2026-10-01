@@ -30,6 +30,12 @@ EXTENSIONS=(
   "Rounded_Corners@lennart-k|70231|f10cf2ee9f621e13f720e987c295a6edd78db8297f560e43cc46d64883a55856||force"
 )
 
+# rclone for Cloud Backup: upstream's, not Ubuntu 26.04's 1.60, whose
+# `serve restic` hangs reading from SFTP (restores never finish); 1.75 is
+# fine. Its own static build, checked by sha256.
+RCLONE_VERSION=1.75.1
+RCLONE_SHA256=03f2504174034b6d004152ed7369251c9a9ec1f7e0836eda420f5c7a5ec0dff9
+
 # The welcome app's avatars: DiceBear's styles whose drawings are CC0 and
 # made of parts one can pick (not the abstract ones), turned into JSON by
 # dicebear.py. style|sha256 of @dicebear/<style>-$DICEBEAR_VERSION.tgz
@@ -58,11 +64,17 @@ DESKTOP_PACKAGES=(
   resources gnome-extensions-app
   # Nautilus's Python extensions: ghostty ships one ("Open in Ghostty")
   python3-nautilus
-  # Backup (live-backup): restic through rclone to a folder of a GNOME
-  # Online Accounts account (Google Drive, Nextcloud; gvfs for their files
-  # in Nautilus too), the password in the keyring (libsecret), notifications
-  restic rclone gnome-online-accounts gir1.2-goa-1.0 gir1.2-secret-1 gvfs-backends
-  libnotify-bin
+  # Cloud Backup (live-backup): restic through rclone (installed below:
+  # Google Drive, OneDrive, Dropbox, Nextcloud, Samba, SFTP; ssh-keyscan for
+  # SFTP's host keys) or into iCloud Drive (icloud-linux, built by
+  # build-icloud-linux.sh, on FUSE), the recovery key in the keyring
+  # (libsecret), notifications
+  restic openssh-client gir1.2-secret-1 libnotify-bin
+  # the providers' icons the Backup app shows (goa-account-google, ...)
+  gnome-online-accounts
+  # the keyring (org.freedesktop.secrets: the backups' password, apps'
+  # secrets), unlocked by the login password through GDM's PAM stack
+  gnome-keyring libpam-gnome-keyring
   # Flatpak apps (Flathub) in GNOME Software
   gnome-software-plugin-flatpak
   # Ubuntu's Yaru icons (every accent variant)
@@ -107,6 +119,13 @@ desktop_install() {
            /usr/share/icons/Yaru-blue-dark/index.theme; do
     [[ -e "$ROOTFS$f" ]] || { echo "$f is missing" >&2; exit 1; }
   done
+  # The Backup app keeps its password in the keyring: a secrets service, and
+  # GDM unlocking it at login.
+  grep -rqs "Name=org.freedesktop.secrets" "$ROOTFS/usr/share/dbus-1/services/" \
+    || { echo "no secrets service (gnome-keyring)" >&2; exit 1; }
+  grep -q pam_gnome_keyring "$ROOTFS/etc/pam.d/gdm-password" \
+    && [[ -n $(find "$ROOTFS/usr/lib" -name pam_gnome_keyring.so -print -quit) ]] \
+    || { echo "GDM doesn't unlock the keyring at login" >&2; exit 1; }
 
   # Ghostty through overlay/usr/local/bin/ghostty (OpenGL in software on
   # virtio-gpu, where virgl lacks the OpenGL 4.3 it needs). The .desktop
@@ -341,4 +360,38 @@ PY
     "${packages[@]}"
   chmod 644 "$ROOTFS/usr/local/share/live-welcome/dicebear.json"
   rm -rf "$tmp"
+
+  # rclone (see RCLONE_VERSION)
+  fetch "https://downloads.rclone.org/v$RCLONE_VERSION/rclone-v$RCLONE_VERSION-linux-arm64.zip" \
+    "$RCLONE_SHA256" "$WORK/downloads/rclone.zip"
+  python3 - "$WORK/downloads/rclone.zip" "$ROOTFS/usr/local/bin/rclone" <<'PY'
+import shutil, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    name = next(n for n in z.namelist() if n.endswith("/rclone"))
+    with z.open(name) as src, open(sys.argv[2], "wb") as dst:
+        shutil.copyfileobj(src, dst)
+PY
+  chmod 755 "$ROOTFS/usr/local/bin/rclone"
+  in_chroot rclone version | grep -q "^rclone v$RCLONE_VERSION\$" \
+    || { echo "rclone $RCLONE_VERSION isn't working" >&2; exit 1; }
+
+  # The Backup app's own OAuth clients (build.sh --oauth-clients), for
+  # Google Drive, OneDrive and Dropbox instead of rclone's shared ones. A
+  # desktop app's client secret isn't a secret (it ships with the app).
+  if [[ -n "${OAUTH_CLIENTS:-}" ]]; then
+    install -d -m 755 "$ROOTFS/etc/live-backup"
+    printf '%s' "$OAUTH_CLIENTS" | python3 -c '
+import json, sys
+clients = json.load(sys.stdin)
+assert isinstance(clients, dict) and clients, "not a JSON object"
+for name, client in clients.items():
+    assert name in ("drive", "onedrive", "dropbox"), f"unknown provider {name}"
+    assert client.get("client_id"), f"{name}: no client_id"
+json.dump(clients, sys.stdout, indent=2)
+' > "$ROOTFS/etc/live-backup/oauth-clients.json" \
+      || { rm -f "$ROOTFS/etc/live-backup/oauth-clients.json"
+           echo "--oauth-clients: not a valid clients file" >&2; exit 1; }
+    chmod 644 "$ROOTFS/etc/live-backup/oauth-clients.json"
+    echo "==> Backup: own OAuth clients for $(python3 -c 'import json,sys; print(", ".join(json.load(open(sys.argv[1]))))' "$ROOTFS/etc/live-backup/oauth-clients.json")"
+  fi
 }

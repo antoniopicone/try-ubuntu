@@ -2,18 +2,17 @@
 """run-backup: one backup of the home folder with restic, then the old
 versions it no longer keeps are forgotten (and, once a day, pruned).
 
-Started every hour by live-backup.timer (a systemd user unit: the GNOME
-Online Accounts account and the keyring with the repository's password are
-the session's). With OneDrive the job gets GOA's access token, valid for
-about an hour: a backup that takes longer is interrupted before it expires
-and the next one goes on from there (restic keeps what was sent). Google
-Drive and Dropbox have rclone's own sign-in, which renews its token.
-The result goes to ~/.local/state/live-backup/status.json, read by the
-Backup app; a failure is also a notification.
+Started every hour by live-backup.timer, a systemd user unit: the keyring
+with the recovery key is the session's. restic writes into the encrypted
+folder "vault:" of the destination "cloud:" (cloud.py: rclone, whose OAuth
+tokens it renews by itself). For iCloud Drive the destination is the
+icloud-linux mount (~/iCloud), started here if it isn't, and the job waits
+for icloudd to upload what it wrote. The result goes to
+~/.local/state/live-backup/status.json, read by the Cloud Backup app; a failure
+is also a notification.
 """
 import json
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -22,6 +21,8 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, "/usr/local/lib/live-backup")
 import cloud  # noqa: E402
+import providers  # noqa: E402
+import restore  # noqa: E402
 
 KEEP = ["--keep-hourly", "24", "--keep-daily", "7", "--keep-weekly", "4",
         "--keep-monthly", "12", "--keep-yearly", "3"]
@@ -29,12 +30,16 @@ TAG = "live-backup"
 PRUNE_EVERY = 24 * 3600
 
 MESSAGES = {
-    "en": {"failed": "Backup failed", "no_account": "The online account is gone: open Backup.",
-           "no_password": "The keyring is locked: the backup password isn't available.",
-           "interrupted": "Not finished yet: it goes on at the next backup."},
-    "it": {"failed": "Backup non riuscito", "no_account": "L'account online non c'è più: apri Backup.",
-           "no_password": "Il portachiavi è bloccato: la password dei backup non è disponibile.",
-           "interrupted": "Non ancora finito: continua al prossimo backup."},
+    "en": {"failed": "Backup failed",
+           "no_password": "The keyring is locked: the recovery key isn't available.",
+           "old_config": "These backups were set up by an older version: open Cloud Backup "
+                         "and choose where they go again.",
+           "icloud": "iCloud Drive isn't available: open Cloud Backup and sign in again."},
+    "it": {"failed": "Backup non riuscito",
+           "no_password": "Il portachiavi è bloccato: la chiave di recupero non è disponibile.",
+           "old_config": "Questi backup sono stati configurati da una versione precedente: "
+                         "apri Cloud Backup e scegli di nuovo dove salvarli.",
+           "icloud": "iCloud Drive non è disponibile: apri Cloud Backup e accedi di nuovo."},
 }
 
 
@@ -47,34 +52,32 @@ def now():
 
 
 def finish(status, ok, message=""):
+    if not ok and providers.RATE_LIMIT.search(message):
+        backend = cloud.remote_options().get("type", "")
+        message = providers.rclone_error(message, backend)
+    elif not ok:
+        message = "\n".join(message.strip().splitlines()[-3:])
     status.update(time=now(), ok=ok, message=message)
     cloud.save_status(status)
     if not ok:
-        subprocess.run(["notify-send", "--app-name=Backup", "--icon=folder-remote",
+        subprocess.run(["notify-send", "--app-name=Cloud Backup", "--icon=org.ubuntu.LiveBackup",
                         t("failed"), message[-300:]])
     sys.exit(0 if ok else 1)
 
 
-def run(cmd, env, timeout=None):
-    """restic, stopped with SIGINT (restic then saves what it has) at the
-    timeout. Returns (exit code or None if interrupted, JSON summary, stderr)."""
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True)
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.send_signal(signal.SIGINT)
-        out, err = proc.communicate()
-        return None, None, err
+def restic(config, args, env):
+    """(exit code, JSON summary, stderr)."""
+    proc = subprocess.run(cloud.restic_cmd(config, *args), env=env, capture_output=True,
+                          text=True)
     summary = None
-    for line in out.splitlines():
+    for line in proc.stdout.splitlines():
         try:
             message = json.loads(line)
         except ValueError:
             continue
         if isinstance(message, dict) and message.get("message_type") == "summary":
             summary = message
-    return proc.returncode, summary, err
+    return proc.returncode, summary, proc.stderr.strip()
 
 
 def main():
@@ -83,42 +86,55 @@ def main():
         return
     status = cloud.load_status() or {}
     status["started"] = now()
-    password = cloud.lookup_password(config["repo"])
-    if not password:
+    if not config.get("vault"):
+        finish(status, False, t("old_config"))
+    key = cloud.lookup_key(config["repo"])
+    if not key:
         finish(status, False, t("no_password"))
-    try:
-        env, valid = cloud.env_for(config, cloud.goa_client())
-    except LookupError:
-        finish(status, False, t("no_account"))
-    except Exception as e:  # GOA: offline, credentials to renew...
-        finish(status, False, str(getattr(e, "message", e)))
-    env = cloud.restic_env(env, config, password)
-    started = time.monotonic()
-    deadline = valid - 180 if valid else None
+    if config["provider"] == "icloud":
+        try:
+            providers.icloud_start()
+        except providers.SignInError:
+            finish(status, False, t("icloud"))
+    env = cloud.restic_env(cloud.env(), config, key)
 
-    home = os.path.expanduser("~")
-    code, summary, err = run(
-        ["restic", "backup", "--json", "--host", socket.gethostname(), "--tag", TAG,
-         "--exclude-caches", "--exclude-file", cloud.EXCLUDES, home], env, deadline)
-    if code is None:
-        finish(status, False, t("interrupted"))
+    # A backup cut short (a shutdown, a crash) leaves its lock behind: unlock
+    # removes the stale ones only (this computer's dead processes, or older
+    # than 30 minutes), never a running backup's.
+    restic(config, ["unlock"], env)
+    # The profile picture lives outside the home folder (AccountsService):
+    # a copy goes in, for a restore to put it back.
+    try:
+        restore.save_face()
+    except OSError:
+        pass
+    # --one-file-system: not ~/iCloud and the other mounts in the home folder
+    code, summary, err = restic(
+        config, ["backup", "--json", "--host", socket.gethostname(), "--tag", TAG, "--one-file-system",
+         "--exclude-caches", "--exclude-file", cloud.EXCLUDES, cloud.HOME], env)
     # 3: some files couldn't be read, the snapshot is there anyway
     if code not in (0, 3):
-        finish(status, False, err.strip() or f"restic backup: {code}")
+        finish(status, False, err or f"restic backup: {code}")
     if summary:
         status["snapshot"] = summary.get("snapshot_id")
         status["files"] = summary.get("total_files_processed")
         status["bytes"] = summary.get("total_bytes_processed")
         status["added"] = summary.get("data_added")
 
-    left = deadline - (time.monotonic() - started) if deadline else None
     prune = time.time() - status.get("pruned", 0) > PRUNE_EVERY
-    forget = ["restic", "forget", "--host", socket.gethostname(), "--tag", TAG, *KEEP]
-    code, _, err = run(forget + (["--prune"] if prune else []), env, left)
-    if code == 0 and prune:
+    code, _, err = restic(config, ["forget", "--host", socket.gethostname(), "--tag", TAG, *KEEP]
+                          + (["--prune"] if prune else []), env)
+    if code != 0:
+        finish(status, False, err or "restic forget")
+    if prune:
         status["pruned"] = time.time()
-    elif code != 0:
-        finish(status, False, (err or "").strip() or "restic forget")
+    if config["provider"] == "icloud":
+        # icloudd uploads in the background: done when it has sent it all
+        try:
+            subprocess.run([providers.ICLOUDCTL, "sync", "--timeout", "3600", "--quiet"],
+                           capture_output=True)
+        except OSError:
+            pass  # the backup is in the mount: icloudd uploads it anyway
     finish(status, True)
 
 
