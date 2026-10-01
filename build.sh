@@ -59,9 +59,12 @@ mkdir -p "$dist_dir"
 # (to add the snapper snapshot), and loop devices are created on demand.
 # ISO_LABEL is the live medium's label and PERSIST_SERIAL the serial of the
 # persistent disk (run-qemu.sh --persist): btrfslive looks for both.
+# The cache volume holds the rootfs, with device nodes (debootstrap writes
+# to its /dev/null) and setuid files: podman 6 mounts named volumes nodev
+# and nosuid unless told otherwise.
 podman run --rm --privileged \
   -v /dev:/dev \
-  -v "$cache_volume:/cache" \
+  -v "$cache_volume:/cache:dev,suid" \
   -v "$project_dir:/src:ro" \
   -v "$dist_dir:/out" \
   -e XKB_LAYOUT="$xkb_layout" \
