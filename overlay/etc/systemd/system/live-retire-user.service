@@ -1,0 +1,16 @@
+[Unit]
+Description=Delete the live user once the real one exists
+Documentation=file:/usr/local/sbin/live-retire-user
+# Written by the welcome app's setup-user, which also starts this right
+# away: it then waits for the live session to log out.
+ConditionPathExists=/var/lib/live-welcome/retire
+After=local-fs.target systemd-logind.service
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/live-retire-user
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=graphical.target

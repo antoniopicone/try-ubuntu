@@ -1,0 +1,34 @@
+#!/bin/sh
+# Deletes the live user (the image's "ubuntu", an administrator) once the
+# welcome app has created the real one. setup-user writes its name to
+# /var/lib/live-welcome/retire and starts live-retire-user.service: the
+# live user is still logged in then (the welcome runs in its session), so
+# this waits for the logout that follows, then deletes it with its home.
+# If the system goes down first, the service does it at the next boot,
+# before GDM.
+set -eu
+
+marker=/var/lib/live-welcome/retire
+user=$(cat "$marker")
+case "$user" in
+  ""|root) rm -f "$marker"; exit 0 ;;
+esac
+if ! id "$user" >/dev/null 2>&1; then
+  rm -f "$marker"
+  exit 0
+fi
+
+# Logged out when logind lets go of the user (its user manager stops a few
+# seconds after the session ends)
+while loginctl show-user "$user" >/dev/null 2>&1; do
+  sleep 2
+done
+# What the session left running (no KillUserProcesses on Ubuntu)
+pkill -KILL -u "$user" 2>/dev/null || true
+sleep 1
+
+userdel -r "$user" 2>/dev/null || userdel -r -f "$user"
+rm -f "/var/lib/AccountsService/users/$user" "/var/lib/AccountsService/icons/$user"
+systemctl try-restart accounts-daemon.service || true
+rm -f "$marker"
+echo "live-retire-user: $user deleted"

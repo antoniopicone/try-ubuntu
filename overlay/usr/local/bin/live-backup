@@ -557,6 +557,11 @@ class BackupWindow(Adw.ApplicationWindow):
     def _working(self, title, body=""):
         self.working_status.set_title(title)
         self.working_status.set_description(body)
+        self._show_working()
+
+    def _show_working(self):
+        # A new spinner each time: a reused one can stay on its first frame
+        self.working_status.set_child(Adw.Spinner(width_request=48, height_request=48))
         self._show("working")
 
     def _on_page(self, *_):
@@ -779,7 +784,7 @@ class BackupWindow(Adw.ApplicationWindow):
         return self._page(self.phones_group)
 
     def _icloud_phone(self, index):
-        self.stack.set_visible_child_name("working")
+        self._show_working()
         self.icloud.choose(index)
 
     def _page_code(self):
@@ -795,7 +800,7 @@ class BackupWindow(Adw.ApplicationWindow):
             self.code_error.set_label(t("code_body_any"))
             return
         self.working_status.set_title(t("code_working"))
-        self.stack.set_visible_child_name("working")
+        self._show_working()
         self.icloud.code(code)
 
     # --- Samba ----------------------------------------------------------------------
@@ -1257,7 +1262,6 @@ class BackupWindow(Adw.ApplicationWindow):
 
     def _page_working(self):
         self.working_status = Adw.StatusPage(vexpand=True)
-        self.working_status.set_child(Adw.Spinner(width_request=48, height_request=48))
         return self.working_status
 
     def _page_error(self):
@@ -1447,20 +1451,32 @@ class BackupWindow(Adw.ApplicationWindow):
             self.status_rows[key] = row
         now = self._button(t("backup_now"), suggested=True)
         now.connect("clicked", lambda *_: self._backup_now())
-        back = self._button(t("restore_from"))
-        back.connect("clicked", lambda *_: self._restore_from_status())
-        show_key = self._button(t("show_key"))
-        show_key.connect("clicked", lambda *_: self._key_from_status())
-        self.open_files = self._button(t("open_files"))
-        self.open_files.connect("clicked", lambda *_: self._open_in_files())
-        change = self._button(t("change"))
-        change.connect("clicked", lambda *_: self._show("choose"))
-        stop = self._button(t("stop"), destructive=True)
-        stop.connect("clicked", lambda *_: self._stop())
-        buttons = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        for button in (now, self.open_files, back, show_key, change, stop):
-            buttons.append(button)
-        return self._page(group, buttons)
+
+        # What's done often, then what changes the setup, then turning it off
+        actions = Adw.PreferencesGroup()
+        actions.add(self._nav_row(t("restore_from"), "document-revert-symbolic",
+                                  self._restore_from_status))
+        self.open_files = self._nav_row(t("open_files"), "folder-open-symbolic",
+                                        self._open_in_files)
+        actions.add(self.open_files)
+        actions.add(self._nav_row(t("show_key"), "dialog-password-symbolic",
+                                  self._key_from_status))
+        actions.add(self._nav_row(t("change"), "emblem-system-symbolic",
+                                  lambda: self._show("choose")))
+        danger = Adw.PreferencesGroup()
+        stop = Adw.ButtonRow(title=t("stop"))
+        stop.add_css_class("destructive-action")
+        stop.connect("activated", lambda *_: self._stop())
+        danger.add(stop)
+        return self._page(group, now, actions, danger)
+
+    @staticmethod
+    def _nav_row(title, icon, on_activate):
+        row = Adw.ActionRow(title=title, activatable=True)
+        row.add_prefix(Gtk.Image(icon_name=icon))
+        row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+        row.connect("activated", lambda *_: on_activate())
+        return row
 
     def _open_in_files(self):
         current = mount._current()

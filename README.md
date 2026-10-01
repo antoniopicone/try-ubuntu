@@ -62,6 +62,7 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
 ./run-qemu.sh                # boot it in a window (--serial: serial console in the terminal too)
 ./run-qemu.sh --lang de_DE   # boot in German instead of the host's language
 ./run-qemu.sh --no-persist   # RAM only (by default changes and snapshots go to a persistent disk)
+./mount-home.sh              # macOS, VM off: your home on the persistent disk, in the Finder
 ```
 
 `run-qemu.sh` attaches a persistent disk by default (see
@@ -176,6 +177,45 @@ chosen with `boot=btrfslive`) takes these steps:
 
 This means the live session runs on real btrfs, so snapshots,
 `btrfs subvolume`, compression and the rest all work.
+
+### Browsing the persistent disk from macOS
+
+[mount-home.sh](mount-home.sh) opens your home folder, as kept on the
+persistent disk, in the Finder, with the VM switched off. The disk can't be
+mounted on its own: it's a sprout, so it needs the seed of the ISO that
+made it, and macOS can't read btrfs anyway. Like `build.sh`, the script
+works in a privileged container on the podman machine:
+
+1. It loads `nbd`, `isofs` and `btrfs` in the podman machine and builds a
+   small image (`try-ubuntu-mount`: btrfs-progs, qemu-utils, Samba).
+2. It loop-mounts the ISO and its `live/rootfs.btrfs` (the seed), attaches
+   the qcow2 with `qemu-nbd --read-only`, and mounts the `@home` subvolume
+   read-only. If the session didn't shut down cleanly, it skips the btrfs
+   log (`rescue=nologreplay`), so the last few seconds before the crash
+   don't show.
+3. It shares the home folder over SMB on `127.0.0.1` only, with a random
+   password for that run, then mounts it in `dist/home` with `mount_smbfs`
+   and opens it in the Finder.
+4. Ctrl-C unmounts it all: the Mac's mount, Samba, btrfs, the nbd and loop
+   devices, and the container.
+
+It refuses to start while a VM is using the disk (the disk would change
+under the mount), or when `persist.qcow2.iso` says the disk belongs to
+another ISO. Everything is read-only, so it can't damage the disk. Whose
+home: by default, the user the welcome app created (the only folder in
+`/home` other than `ubuntu`), or `ubuntu` if there's none yet.
+
+| Option | |
+|---|---|
+| `--user NAME` | that user's home |
+| `--all` | the whole `/home` |
+| `--iso PATH`, `--persist FILE` | another ISO and disk (default: `dist/ubuntu-live-arm64.iso`, `dist/persist.qcow2`), e.g. a disk moved aside to `persist-<date>.qcow2` with the ISO it belongs to |
+| `--at DIR` | where to mount it on the Mac (default: `dist/home`) |
+| `--port PORT` | local port of the SMB server (default: 44545) |
+
+It runs from a checkout, since install.sh doesn't download it. For the
+files install.sh keeps, pass
+`--iso ~/.local/share/try-ubuntu/dist/ubuntu-live-arm64.iso --persist ~/.local/share/try-ubuntu/dist/persist.qcow2`.
 
 | Kernel parameter | |
 |---|---|
@@ -414,8 +454,11 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
     show it)
   - writes `~/.gitconfig` with `user.name` / `user.email`
   - starts the Backup app at the first login (see below)
-  - retires the live user: no autologin, hidden from GDM, password locked,
-    passwordless sudo removed
+  - retires the live user: no autologin, password locked, out of the admin
+    groups and without passwordless sudo right away; then
+    `live-retire-user.service` deletes it, home included, as soon as its
+    session has logged out (or at the next boot, before GDM). snapper's
+    `ALLOW_USERS` goes to the new user
   
   The session then logs out to GDM, where only the new user is listed.
 - **Cloud Backup** ([live-backup](overlay/usr/local/bin/live-backup)) opens by
@@ -668,7 +711,6 @@ git tag v1.0.0 && git push origin v1.0.0
   - its UI only speaks English and Italian
   - it offers six languages and ten keyboard layouts
   - it has no timezone page
-  - the live user stays on the system, locked and hidden
 - The host's language reaches the guest only under QEMU (`run-qemu.sh`);
   on other hypervisors or hardware the live session starts in English.
 - No sound drivers, and no firmware for real hardware (Wi-Fi, non-virtio
@@ -679,6 +721,7 @@ git tag v1.0.0 && git push origin v1.0.0
   Carlito and Caladea take their place with the same metrics; `sudo apt
   install ttf-mscorefonts-installer` (multiverse) fetches the real ones.
 - The `ubuntu` / `ubuntu` credentials and passwordless sudo are meant for a
-  live system. The welcome app locks them once your user exists. Change
-  them in `build-rootfs.sh` (`LIVE_USER`, `LIVE_PASSWORD`) before
+  live system. Once your user exists, the welcome app locks them and the
+  `ubuntu` user is deleted after the logout. Until then they work, so
+  change them in `build-rootfs.sh` (`LIVE_USER`, `LIVE_PASSWORD`) before
   distributing the ISO.

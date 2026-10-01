@@ -217,6 +217,8 @@ desktop_configure() {
   in_chroot locale-gen >/dev/null
   echo 'LANG=en_US.UTF-8' > "$ROOTFS/etc/default/locale"
   in_chroot systemctl enable live-locale.service
+  # Once the welcome has created the real user, the live one goes
+  in_chroot systemctl enable live-retire-user.service
 
   # The live user logs straight in (no GDM login screen) and gets the welcome
   # app. It creates the real user, turns this off and logs out to GDM.

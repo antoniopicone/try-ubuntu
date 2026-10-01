@@ -19,7 +19,9 @@ be used to create more users. Besides the user it sets:
   - the Cloud Backup app at the first login (live-backup --first-run, which
     removes itself from autostart once the backups are set up or put off)
   - the user's picture (the avatar, when there is one), for GDM and GNOME
-and it hides and locks the live user and turns GDM's autologin off.
+and it takes the live user's admin rights away at once, turns GDM's
+autologin off and has live-retire-user.service delete the live user (with
+its home) as soon as its session logs out.
 """
 import base64
 import binascii
@@ -33,6 +35,8 @@ import tempfile
 from datetime import datetime, timezone
 
 DONE = "/var/lib/live-welcome/done"
+RETIRE = "/var/lib/live-welcome/retire"
+SNAPPER = "/etc/snapper/configs/root"
 GDM_CONF = "/etc/gdm3/custom.conf"
 ACCOUNTS = "/var/lib/AccountsService/users"
 ICONS = "/var/lib/AccountsService/icons"
@@ -213,14 +217,33 @@ region='{c['locale']}'
     if c["email"]:
         os.chown(os.path.join(pw.pw_dir, ".gitconfig"), pw.pw_uid, pw.pw_gid)
 
-    # Retire the live user: no autologin, hidden from GDM, locked, no sudo.
+    # Snapshots: the new user's, not the live user's
+    if os.path.exists(SNAPPER):
+        with open(SNAPPER) as f:
+            snapper = re.sub(r'(?m)^ALLOW_USERS=.*$', f'ALLOW_USERS="{user}"', f.read())
+        with open(SNAPPER, "w") as f:
+            f.write(snapper)
+
+    # Retire the live user. Right away: no autologin, hidden from GDM,
+    # locked, no admin groups (sudo, polkit), no sudoers file. It can't be
+    # deleted while its session runs (this runs in it): live-retire-user
+    # does that after the logout, or at the next boot.
     set_ini(GDM_CONF, "daemon", {"AutomaticLoginEnable": "false"}, mode=0o644)
+    with open(GDM_CONF) as f:
+        gdm = re.sub(r"(?m)^AutomaticLogin=.*\n", "", f.read())
+    with open(GDM_CONF, "w") as f:
+        f.write(gdm)
     if live_user and live_user != "root":
         set_ini(f"{ACCOUNTS}/{live_user}", "User", {"SystemAccount": "true"})
         run("passwd", "-l", live_user)
+        run("usermod", "-G", "", live_user)
         sudoers = "/etc/sudoers.d/live-user"
         if os.path.exists(sudoers):
             os.remove(sudoers)
+        os.makedirs(os.path.dirname(RETIRE), exist_ok=True)
+        with open(RETIRE, "w") as f:
+            f.write(live_user + "\n")
+        subprocess.run(["systemctl", "start", "--no-block", "live-retire-user.service"])
     # accounts-daemon reads its files at start: GDM must see the change.
     subprocess.run(["systemctl", "try-restart", "accounts-daemon.service"])
 

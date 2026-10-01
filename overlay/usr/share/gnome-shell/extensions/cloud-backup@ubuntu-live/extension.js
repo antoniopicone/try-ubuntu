@@ -19,7 +19,7 @@ import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
-import * as Slider from 'resource:///org/gnome/shell/ui/slider.js';
+import * as BarLevel from 'resource:///org/gnome/shell/ui/barLevel.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const HOME = GLib.get_home_dir();
@@ -112,9 +112,8 @@ class CloudBackupIndicator extends PanelMenu.Button {
         // A long message (an error) wraps instead of widening the menu
         this._detail.label.clutter_text.line_wrap = true;
         this._barItem = new PopupMenu.PopupBaseMenuItem({reactive: false});
-        this._bar = new Slider.Slider(0);
-        this._bar.reactive = false;
-        this._bar.add_style_class_name('cloud-backup-bar');
+        // The slider's look, without its handle: a progress bar, not a control
+        this._bar = new BarLevel.BarLevel({style_class: 'slider cloud-backup-bar'});
         this._barItem.add_child(this._bar);
         this._where = new PopupMenu.PopupMenuItem('', {reactive: false});
         this._where.label.add_style_class_name('cloud-backup-detail');
