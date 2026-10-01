@@ -267,7 +267,7 @@ icon-theme='Yaru-blue-dark'
 monospace-font-name='JetBrainsMono Nerd Font Mono 11'
 
 [org.gnome.shell]
-enabled-extensions=['dash-to-dock@micxgx.gmail.com', 'kiwimenu@kemma', 'caffeine@patapon.info', 'Vitals@CoreCoding.com', 'Rounded_Corners@lennart-k']
+enabled-extensions=['dash-to-dock@micxgx.gmail.com', 'kiwimenu@kemma', 'caffeine@patapon.info', 'Vitals@CoreCoding.com', 'Rounded_Corners@lennart-k', 'cloud-backup@ubuntu-live']
 favorite-apps=['org.gnome.Nautilus.desktop', '$browser_desktop', 'com.mitchellh.ghostty.desktop', 'org.gnome.Software.desktop']
 welcome-dialog-last-shown-version='999'
 
@@ -341,6 +341,12 @@ PY
   # live-welcome's state: "done" once the real user exists (the setup
   # helper then refuses to run again).
   install -d -m 755 "$ROOTFS/var/lib/live-welcome"
+
+  # Cloud Backup's top bar indicator (overlay/usr/share/gnome-shell/extensions):
+  # GNOME $GNOME_VERSION must be among the versions it declares.
+  grep -q "\"$GNOME_VERSION\"" \
+    "$ROOTFS/usr/share/gnome-shell/extensions/cloud-backup@ubuntu-live/metadata.json" \
+    || { echo "the Cloud Backup extension doesn't declare GNOME $GNOME_VERSION" >&2; exit 1; }
 
   # The avatar styles live-welcome composes (offline: no network needed).
   local style packages=()

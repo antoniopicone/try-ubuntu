@@ -9,13 +9,16 @@ tokens it renews by itself). For iCloud Drive the destination is the
 icloud-linux mount (~/iCloud), started here if it isn't, and the job waits
 for icloudd to upload what it wrote. The result goes to
 ~/.local/state/live-backup/status.json, read by the Cloud Backup app; a failure
-is also a notification.
+is also a notification. While it runs, its progress is in
+~/.local/state/live-backup/progress.json (restic's status, every second),
+for the top bar's indicator.
 """
 import json
 import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -51,7 +54,12 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def progress(phase, **values):
+    cloud.save_progress({"phase": phase, "time": time.time(), **values})
+
+
 def finish(status, ok, message=""):
+    cloud.clear_progress()
     if not ok and providers.RATE_LIMIT.search(message):
         backend = cloud.remote_options().get("type", "")
         message = providers.rclone_error(message, backend)
@@ -65,19 +73,38 @@ def finish(status, ok, message=""):
     sys.exit(0 if ok else 1)
 
 
-def restic(config, args, env):
-    """(exit code, JSON summary, stderr)."""
-    proc = subprocess.run(cloud.restic_cmd(config, *args), env=env, capture_output=True,
-                          text=True)
-    summary = None
-    for line in proc.stdout.splitlines():
+def restic(config, args, env, on_status=None):
+    """(exit code, JSON summary, stderr). With on_status, restic's status
+    messages (--json) go to it as they come."""
+    proc = subprocess.Popen(cloud.restic_cmd(config, *args), env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    errors = []
+    reader = threading.Thread(target=lambda: errors.append(proc.stderr.read()), daemon=True)
+    reader.start()
+    summary, last = None, 0
+    for line in proc.stdout:
         try:
             message = json.loads(line)
         except ValueError:
             continue
-        if isinstance(message, dict) and message.get("message_type") == "summary":
+        if not isinstance(message, dict):
+            continue
+        if message.get("message_type") == "summary":
             summary = message
-    return proc.returncode, summary, proc.stderr.strip()
+        elif message.get("message_type") == "status" and on_status and time.time() - last >= 1:
+            last = time.time()
+            on_status(message)
+    proc.wait()
+    reader.join()
+    return proc.returncode, summary, "".join(errors).strip()
+
+
+def backup_status(message):
+    progress("backup", percent=message.get("percent_done", 0),
+             files=message.get("files_done", 0), total_files=message.get("total_files", 0),
+             bytes=message.get("bytes_done", 0), total_bytes=message.get("total_bytes", 0),
+             remaining=message.get("seconds_remaining"),
+             current=(message.get("current_files") or [""])[0])
 
 
 def main():
@@ -86,6 +113,7 @@ def main():
         return
     status = cloud.load_status() or {}
     status["started"] = now()
+    progress("preparing")
     if not config.get("vault"):
         finish(status, False, t("old_config"))
     key = cloud.lookup_key(config["repo"])
@@ -111,7 +139,8 @@ def main():
     # --one-file-system: not ~/iCloud and the other mounts in the home folder
     code, summary, err = restic(
         config, ["backup", "--json", "--host", socket.gethostname(), "--tag", TAG, "--one-file-system",
-         "--exclude-caches", "--exclude-file", cloud.EXCLUDES, cloud.HOME], env)
+         "--exclude-caches", "--exclude-file", cloud.EXCLUDES, cloud.HOME], env,
+        on_status=backup_status)
     # 3: some files couldn't be read, the snapshot is there anyway
     if code not in (0, 3):
         finish(status, False, err or f"restic backup: {code}")
@@ -121,6 +150,7 @@ def main():
         status["bytes"] = summary.get("total_bytes_processed")
         status["added"] = summary.get("data_added")
 
+    progress("cleaning")
     prune = time.time() - status.get("pruned", 0) > PRUNE_EVERY
     code, _, err = restic(config, ["forget", "--host", socket.gethostname(), "--tag", TAG, *KEEP]
                           + (["--prune"] if prune else []), env)
@@ -129,6 +159,7 @@ def main():
     if prune:
         status["pruned"] = time.time()
     if config["provider"] == "icloud":
+        progress("uploading")
         # icloudd uploads in the background: done when it has sent it all
         try:
             subprocess.run([providers.ICLOUDCTL, "sync", "--timeout", "3600", "--quiet"],

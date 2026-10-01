@@ -17,6 +17,8 @@ or, for iCloud, a signed-in icloud-linux mount.
     a code by SMS, then the mount in ~/iCloud. `icloudctl auth` reads from
     a terminal, so it runs in a pseudo-terminal (ICloudSignIn).
 """
+import base64
+import html
 import json
 import os
 import pty
@@ -28,6 +30,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from string import Template
 
 import cloud
 
@@ -38,10 +41,68 @@ ICLOUDCTL = "icloudctl"
 
 MESSAGES = {
     "en": {"rate_limit": "{service} is refusing requests for now (too many). Try again in a "
-                         "few minutes."},
+                         "few minutes.",
+           "auth_ok": "Signed in to {service}",
+           "auth_ok_body": "You can close this tab and go back to Cloud Backup: it takes care "
+                           "of the rest.",
+           "auth_failed": "The sign-in didn't work",
+           "auth_failed_body": "Go back to Cloud Backup and try again."},
     "it": {"rate_limit": "{service} sta rifiutando le richieste per ora (troppe). Riprova "
-                         "tra qualche minuto."},
+                         "tra qualche minuto.",
+           "auth_ok": "Accesso a {service} riuscito",
+           "auth_ok_body": "Puoi chiudere questa scheda e tornare a Cloud Backup: al resto "
+                           "pensa lui.",
+           "auth_failed": "L'accesso non è riuscito",
+           "auth_failed_body": "Torna a Cloud Backup e riprova."},
 }
+APP_ICON = "/usr/local/share/icons/hicolor/128x128/apps/org.ubuntu.LiveBackup.png"
+AUTH_PAGE = os.path.join(cloud.HOME, ".cache/live-backup/auth.html")
+# The page the browser shows once the sign-in is done: a Go template for
+# `rclone authorize --template` (.OK, .Name, .Description, .Code), around
+# this app's words ($ placeholders, filled here).
+AUTH_TEMPLATE = Template("""<!DOCTYPE html>
+<html lang="$lang">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloud Backup</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         font-family: "Adwaita Sans", "Ubuntu", system-ui, sans-serif;
+         background: #f6f5f4; color: #2e3436; }
+  main { box-sizing: border-box; width: min(460px, calc(100vw - 32px)); padding: 40px 44px;
+         text-align: center; background: #fff; border-radius: 20px;
+         box-shadow: 0 6px 28px rgba(0, 0, 0, .12); }
+  img { width: 112px; height: 112px; }
+  h1 { font-size: 1.5rem; margin: 18px 0 10px; }
+  p { margin: 0; line-height: 1.5; opacity: .8; }
+  .detail { margin-top: 16px; font-family: monospace; font-size: .85rem; opacity: .6;
+            word-break: break-word; }
+  .ok h1 { color: #26a269; }
+  .failed h1 { color: #c01c28; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1e1e1e; color: #fff; }
+    main { background: #2e2e32; box-shadow: none; }
+    .ok h1 { color: #57e389; }
+    .failed h1 { color: #ff7b63; }
+  }
+</style>
+</head>
+<body>
+{{ if .OK }}<main class="ok">
+<img src="$icon" alt="">
+<h1>$ok_title</h1>
+<p>$ok_body</p>
+</main>{{ else }}<main class="failed">
+<img src="$icon" alt="">
+<h1>$failed_title</h1>
+<p>$failed_body</p>
+<p class="detail">{{ .Name }}{{ if .Description }}: {{ .Description }}{{ end }}{{ if .Code }} ({{ .Code }}){{ end }}</p>
+</main>{{ end }}
+</body>
+</html>
+""")
 RATE_LIMIT = re.compile(r"rateLimitExceeded|userRateLimitExceeded|Quota exceeded|"
                         r"too_many_requests|Error 429|TooManyRequests|activityLimited")
 SERVICES = {"drive": "Google Drive", "onedrive": "OneDrive", "dropbox": "Dropbox"}
@@ -99,12 +160,32 @@ def oauth_client(provider):
     return client if client and client.get("client_id") else None
 
 
+def auth_page(provider):
+    """The callback page, in the session's language, written for rclone."""
+    service = SERVICES.get(OAUTH[provider], provider)
+    try:
+        icon = "data:image/png;base64," + base64.b64encode(open(APP_ICON, "rb").read()).decode()
+    except OSError:
+        icon = ""
+    page = AUTH_TEMPLATE.substitute(
+        lang=os.environ.get("LANG", "en")[:2] or "en", icon=icon,
+        ok_title=html.escape(_t("auth_ok", service=service)),
+        ok_body=html.escape(_t("auth_ok_body")),
+        failed_title=html.escape(_t("auth_failed")),
+        failed_body=html.escape(_t("auth_failed_body")))
+    os.makedirs(os.path.dirname(AUTH_PAGE), exist_ok=True)
+    with open(AUTH_PAGE, "w") as f:
+        f.write(page)
+    return AUTH_PAGE
+
+
 def authorize_cmd(provider):
     """Prints the sign-in URL (stderr), serves the redirect on
-    127.0.0.1:53682 and prints the token (stdout)."""
+    127.0.0.1:53682 (showing auth_page()) and prints the token (stdout)."""
     client = oauth_client(provider)
     own = [client["client_id"], client.get("client_secret", "")] if client else []
-    return ["rclone", "authorize", OAUTH[provider], *own, "--auth-no-open-browser"]
+    return ["rclone", "authorize", OAUTH[provider], *own, "--auth-no-open-browser",
+            "--template", auth_page(provider)]
 
 
 def authorize_url(line):

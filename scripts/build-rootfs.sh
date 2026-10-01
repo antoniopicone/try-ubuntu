@@ -202,6 +202,17 @@ packages=(
   # btrfs snapshots of / (the @ subvolume)
   snapper
 )
+# Chromium and its translations at the same version: the PPA builds
+# chromium-l10n (arch: all) as soon as any architecture is done, so it can
+# be ahead of arm64's chromium, and then the newest one can't be installed.
+chromium_version=$(in_chroot apt-cache policy chromium | awk '/Candidate:/ { print $2 }')
+[[ -n "$chromium_version" && "$chromium_version" != "(none)" ]] \
+  || { echo "no chromium to install" >&2; exit 1; }
+for i in "${!packages[@]}"; do
+  case "${packages[i]}" in
+    chromium|chromium-l10n) packages[i]="${packages[i]}=$chromium_version" ;;
+  esac
+done
 in_chroot apt-get install -y "${packages[@]}" "${DESKTOP_PACKAGES[@]}"
 if in_chroot dpkg -s modemmanager >/dev/null 2>&1; then
   echo "modemmanager got installed" >&2; exit 1

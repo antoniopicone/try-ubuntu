@@ -39,6 +39,7 @@ from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango, PangoCairo  # noq
 
 sys.path.insert(0, "/usr/local/lib/live-backup")
 import cloud  # noqa: E402
+import mount  # noqa: E402
 import providers  # noqa: E402
 import restore  # noqa: E402
 
@@ -182,6 +183,10 @@ STRINGS = {
         "done_body": "The first backup has started; then there will be one every hour. "
                      "Everything is in the Cloud Backup app.",
         "status_title": "Backups",
+        "done_files": "And “{name}” is in Files now, in the sidebar: your cloud's files, "
+                      "fetched when you open them.",
+        "mount_failed": "Your cloud couldn't be added to Files: {reason}",
+        "open_files": "Open in Files",
         "analysing": "Looking into the backup…",
         "restore_title": "Restore Your Data?",
         "restore_body": "There's a backup from {when} (computer “{host}”): {files} files, "
@@ -353,6 +358,10 @@ STRINGS = {
         "done_body": "Il primo backup è partito, poi ne verrà fatto uno ogni ora. Trovi "
                      "tutto nell'app Cloud Backup.",
         "status_title": "Backup",
+        "done_files": "E ora «{name}» è anche in File, nella barra laterale: i file del tuo "
+                      "cloud, scaricati quando li apri.",
+        "mount_failed": "Non è stato possibile aggiungere il tuo cloud a File: {reason}",
+        "open_files": "Apri in File",
         "analysing": "Analisi del backup…",
         "restore_title": "Ripristinare i tuoi dati?",
         "restore_body": "C'è un backup del {when} (computer «{host}»): {files} file, {size}. "
@@ -1277,11 +1286,22 @@ class BackupWindow(Adw.ApplicationWindow):
                 result = systemctl(*args)
                 if result.returncode != 0:
                     raise RuntimeError(result.stderr.strip())
+            # The cloud in Files too; the backups work without it
+            try:
+                return mount.set_up(config), None
+            except Exception as e:  # noqa: BLE001
+                return None, str(e)
 
-        def done(_result, error):
+        def done(result, error):
             if error:
                 self._error(error)
                 return
+            path, problem = result
+            self.done_status.set_description(
+                t("done_body") + ("\n\n" + t("done_files", name=os.path.basename(path))
+                                   if path else ""))
+            if problem:
+                self._toast(t("mount_failed", reason=problem))
             if os.path.exists(AUTOSTART):
                 os.remove(AUTOSTART)
             self.unlock_entry.set_text("")
@@ -1407,8 +1427,9 @@ class BackupWindow(Adw.ApplicationWindow):
         in_thread(work, done)
 
     def _page_done(self):
-        status = Adw.StatusPage(icon_name="object-select-symbolic", title=t("done_title"),
-                                description=t("done_body"), vexpand=True)
+        self.done_status = status = Adw.StatusPage(
+            icon_name="object-select-symbolic", title=t("done_title"),
+            description=t("done_body"), vexpand=True)
         close = self._button(t("close"), suggested=True)
         close.connect("clicked", lambda *_: self.close())
         status.set_child(close)
@@ -1430,14 +1451,21 @@ class BackupWindow(Adw.ApplicationWindow):
         back.connect("clicked", lambda *_: self._restore_from_status())
         show_key = self._button(t("show_key"))
         show_key.connect("clicked", lambda *_: self._key_from_status())
+        self.open_files = self._button(t("open_files"))
+        self.open_files.connect("clicked", lambda *_: self._open_in_files())
         change = self._button(t("change"))
         change.connect("clicked", lambda *_: self._show("choose"))
         stop = self._button(t("stop"), destructive=True)
         stop.connect("clicked", lambda *_: self._stop())
         buttons = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        for button in (now, back, show_key, change, stop):
+        for button in (now, self.open_files, back, show_key, change, stop):
             buttons.append(button)
         return self._page(group, buttons)
+
+    def _open_in_files(self):
+        current = mount._current()
+        if current and current[0]:
+            Gtk.FileLauncher.new(Gio.File.new_for_path(current[0])).launch(self, None, None, None)
 
     def _key_from_status(self):
         config = cloud.load_config()
@@ -1451,6 +1479,7 @@ class BackupWindow(Adw.ApplicationWindow):
         config = cloud.load_config()
         if not config:
             return False
+        self.open_files.set_visible(bool(mount._current()))
         name, identity = cloud.PROVIDERS.get(config["provider"], ""), config.get("identity")
         where = f"{name} ({identity})" if identity else name
         self.status_rows["where"].set_subtitle(GLib.markup_escape_text(where))
@@ -1484,6 +1513,7 @@ class BackupWindow(Adw.ApplicationWindow):
         def response(_dialog, answer):
             if answer == "stop":
                 systemctl("disable", "--now", "live-backup.timer")
+                mount.remove()
                 if os.path.exists(cloud.CONFIG):
                     os.remove(cloud.CONFIG)
                 self.history.clear()

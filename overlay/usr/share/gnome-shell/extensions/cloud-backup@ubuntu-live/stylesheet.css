@@ -1,0 +1,4 @@
+.cloud-backup-title { font-weight: bold; }
+.cloud-backup-detail { font-size: smaller; color: rgba(255, 255, 255, 0.7); max-width: 22em; }
+.cloud-backup-error { color: #ff7b63; }
+.cloud-backup-bar { min-width: 220px; }

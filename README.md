@@ -477,6 +477,28 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
     open the backups. On another computer, or after reinstalling, the app
     recognises the encrypted folders in the chosen folder and opens them
     with the key. Sizes and the times of the backups stay visible.
+  - Its icon is [assets/backup-app.svg](assets/backup-app.svg), installed
+    as PNGs rendered by librsvg (GTK draws the SVG's shadows as a grey
+    square).
+  - **In the top bar**, a GNOME Shell extension
+    ([cloud-backup@ubuntu-live](overlay/usr/share/gnome-shell/extensions/cloud-backup@ubuntu-live/extension.js),
+    on by default) shows the backups' state: the cloud with an arrow going
+    up while one runs, with "!" when the last one failed. Its menu has the
+    backup in progress (percentage, files, size, time left: run-backup
+    writes restic's progress to `~/.local/state/live-backup/progress.json`
+    every second) or the last one, "Back Up Now" and "Open Cloud Backup".
+  - **In Files**: the destination is mounted with rclone in the home
+    folder (`~/Google Drive`, `~/Nextcloud`, `~/SFTP (anna@server)`…) by a
+    systemd user unit at every login
+    ([live-cloud-mount.service](overlay/etc/systemd/user/live-cloud-mount.service),
+    [mount.py](overlay/usr/local/lib/live-backup/mount.py)), with its place
+    in the sidebar. Files are fetched when opened and cached in
+    `~/.cache/rclone`; the backups' encrypted folder is hidden from it, and
+    localsearch is kept out of it (it would download the whole drive).
+    iCloud Drive is icloud-linux's own mount, `~/iCloud`.
+  - The browser page after signing in to Google Drive, OneDrive or Dropbox
+    is the app's (`rclone authorize --template`): its icon, the outcome in
+    the session's language, light or dark.
   - [run-backup](overlay/usr/local/lib/live-backup/run-backup), started
     by a systemd user timer every hour while you're logged in (a missed
     one runs at the next login), backs up your home folder (the `@home`

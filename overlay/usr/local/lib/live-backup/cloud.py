@@ -38,6 +38,8 @@ from gi.repository import Secret  # noqa: E402
 HOME = os.path.expanduser("~")
 CONFIG = os.path.join(HOME, ".config/live-backup/config.json")
 STATUS = os.path.join(HOME, ".local/state/live-backup/status.json")
+# While a backup runs: its progress, rewritten every second (see run-backup)
+PROGRESS = os.path.join(HOME, ".local/state/live-backup/progress.json")
 RCLONE_CONFIG = os.path.join(HOME, ".config/live-backup/rclone.conf")
 KNOWN_HOSTS = os.path.join(HOME, ".config/live-backup/known_hosts")
 EXCLUDES = "/usr/local/share/live-backup/excludes"
@@ -82,6 +84,22 @@ def save_config(config):
 
 def load_status():
     return _load(STATUS)
+
+
+def save_progress(progress):
+    """Atomically: the top bar's indicator reads it whenever it changes."""
+    os.makedirs(os.path.dirname(PROGRESS), exist_ok=True)
+    tmp = PROGRESS + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(progress, f)
+    os.replace(tmp, PROGRESS)
+
+
+def clear_progress():
+    try:
+        os.remove(PROGRESS)
+    except FileNotFoundError:
+        pass
 
 
 def save_status(status):

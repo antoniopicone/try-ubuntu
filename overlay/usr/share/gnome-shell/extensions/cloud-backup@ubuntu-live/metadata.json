@@ -1,0 +1,7 @@
+{
+  "uuid": "cloud-backup@ubuntu-live",
+  "name": "Cloud Backup",
+  "description": "The state of Cloud Backup's backups in the top bar: the backup in progress, or the last one, and the app.",
+  "shell-version": ["50", "51"],
+  "url": "https://github.com/antoniopicone/try-ubuntu"
+}
