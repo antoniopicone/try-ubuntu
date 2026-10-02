@@ -1,0 +1,948 @@
+#!/usr/bin/python3
+"""live-cloud-config: the Cloud Config app. Connects this computer to the
+user's clouds, which then show up in Files and can hold Cloud Backup's
+backups (see /usr/local/lib/live-backup/accounts.py):
+  - Google Drive, OneDrive, Dropbox: sign-in in the browser (rclone's own)
+  - Nextcloud: the server's address, then approval in the browser (Login
+    Flow v2, which gives an app password)
+  - iCloud Drive: Apple ID, password and the code sent by SMS (icloud-linux,
+    which then mounts it in ~/iCloud)
+See providers.py for each. Every account is mounted in the home folder,
+with its place in Files' sidebar (mount.py), unless "Show the clouds in
+Files" is off.
+
+At the first login of the user live-welcome created it starts by itself
+(--first-run, ~/.config/autostart): first the network (the clouds need it:
+a cable, or a Wi-Fi network and its password) when there is none, then
+Tailscale, then the clouds, and "Continue with the Backups" opens Cloud
+Backup (live-backup --first-run).
+"""
+import os
+import re
+import subprocess
+import sys
+import threading
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+
+sys.path.insert(0, "/usr/local/lib/live-backup")
+sys.path.insert(0, "/usr/local/lib/live-common")
+import accounts  # noqa: E402
+import cloud  # noqa: E402
+import livespinner  # noqa: E402
+import mount  # noqa: E402
+import netsetup  # noqa: E402
+import providers  # noqa: E402
+
+APP_ID = "org.ubuntu.LiveCloudConfig"
+AUTOSTART = os.path.expanduser(f"~/.config/autostart/{APP_ID}.desktop")
+# Where a sign-in is checked before it becomes an account
+CHECK_REMOTE = "cfgsetup"
+
+# provider, icon
+CLOUDS = [
+    ("google", "goa-account-google"),
+    ("onedrive", "goa-account-ms365"),
+    ("dropbox", "folder-remote"),
+    ("nextcloud", "goa-account-owncloud"),
+    ("icloud", "weather-overcast-symbolic"),
+]
+
+STRINGS = {
+    "en": {
+        "apple_id": "Apple ID (email or phone number)",
+        "code": "Code",
+        "code_title": "Verification Code",
+        "icloud_body": "Sign in with your Apple ID. A verification code will arrive by text message. The password isn't kept: every few weeks Apple asks to sign in again, and Cloud Backup will tell you. iCloud Drive will also be in the Files sidebar (~/iCloud).",
+        "icloud_title": "iCloud Drive",
+        "nextcloud_body": "The address of your Nextcloud, as you open it in the browser.",
+        "nextcloud_title": "Nextcloud",
+        "password_apple": "Password",
+        "server": "Server address",
+        "added": "{name} is connected",
+        "adding": "Adding {provider}…",
+        "back": "Back",
+        "browser_body": "Sign in to {provider} in the browser that has just opened, and let rclone (the program that sends the backups) in.",
+        "cancel": "Cancel",
+        "clouds_body": "Connect the services you use: they show up in Files like your other folders, and Cloud Backup can keep your backups there.",
+        "clouds_title": "Your Clouds",
+        "code_body": "Type the 6-digit code sent by text message to {phone}.",
+        "code_body_any": "Type the 6-digit code sent to you by text message.",
+        "code_working": "Checking the code…",
+        "code_wrong": "That code wasn't accepted. Attempts left: {left}.",
+        "connect": "Connect",
+        "connected": "Connected",
+        "connecting": "Connecting to {provider}…",
+        "continue": "Continue",
+        "continue_backup": "Continue with the Backups",
+        "continue_hint": "Come back here any time from the app grid: Cloud Config.",
+        "disconnect": "Disconnect",
+        "disconnect_body": "It leaves Files, and this computer forgets its sign-in. Nothing is deleted from the cloud.",
+        "disconnect_busy": "Cloud Backup keeps your backups on {name}: choose another destination in Cloud Backup first.",
+        "disconnect_title": "Disconnect {name}?",
+        "err_sign_in": "The sign-in didn't work.",
+        "error_title": "Something Went Wrong",
+        "icloud_mounting": "Opening iCloud Drive…",
+        "icloud_working": "Signing in to iCloud…",
+        "in_files": "in Files as “{name}”",
+        "more_actions": "More actions",
+        "mount_failed": "Not shown in Files: {reason}",
+        "net_body": "The clouds and the backups go online: connect this computer to the Internet first.",
+        "net_cable": "Plug in a network cable",
+        "net_cable_body": "This computer has a wired network port: it connects by itself",
+        "net_connect": "Connect",
+        "net_connecting": "Connecting to {ssid}…",
+        "net_failed": "Couldn't connect to {ssid}: {error}",
+        "net_none": "No Wi-Fi networks in range",
+        "net_password_body": "The network's password (often on the router).",
+        "net_password_title": "Password for {ssid}",
+        "net_refresh": "Look Again",
+        "net_scanning": "Looking for Wi-Fi networks…",
+        "net_secure": "Protected",
+        "net_skip": "Continue Without Network",
+        "net_title": "Connect to the Internet",
+        "net_wifi": "Wi-Fi networks",
+        "net_wifi_body": "Pick yours",
+        "nextcloud_wait_body": "Log in to Nextcloud in the browser that has just opened, and grant access: it creates an app password just for the backups, which you can revoke in Nextcloud's security settings.",
+        "not_connected": "Not connected",
+        "ok": "OK",
+        "open_browser": "Open the Browser Again",
+        "open_files": "Open in Files",
+        "password_field": "Password",
+        "phones_body": "Apple will send the verification code by text message to this number:",
+        "phones_title": "Where Should the Code Go?",
+        "required": "Fill in the fields above.",
+        "show_files": "Show the clouds in Files",
+        "show_files_body": "In the sidebar; files are downloaded when you open them",
+        "step": "Step {n} of 3",
+        "title": "Cloud Config",
+        "ts_add": "Add to My Tailscale Network",
+        "ts_again": "Open the Browser Again",
+        "ts_body": "Tailscale puts your devices in a private network of their own, encrypted end to end: wherever you are, you reach this computer (SSH, files, apps) as if you were next to it, with no ports to open on the router.\n\nDo you have a Tailscale account, and should this computer join your network?",
+        "ts_cancel": "Cancel",
+        "ts_done": "This computer is on your Tailscale network.",
+        "ts_failed": "Tailscale couldn't add this computer: {error}",
+        "ts_later": "Not Now",
+        "ts_title": "Tailscale",
+        "ts_wait": "Sign in to Tailscale in the browser that just opened, and approve this computer.",
+        "wait_title": "Sign In",
+    },
+    "it": {
+        "apple_id": "ID Apple (email o numero di telefono)",
+        "code": "Codice",
+        "code_title": "Codice di verifica",
+        "icloud_body": "Accedi con il tuo ID Apple. Ti arriverà un codice di verifica via SMS. La password non viene conservata: ogni qualche settimana Apple chiede di accedere di nuovo, e Cloud Backup te lo dirà. iCloud Drive sarà anche nella barra laterale di File (~/iCloud).",
+        "icloud_title": "iCloud Drive",
+        "nextcloud_body": "L'indirizzo del tuo Nextcloud, come lo apri nel browser.",
+        "nextcloud_title": "Nextcloud",
+        "password_apple": "Password",
+        "server": "Indirizzo del server",
+        "added": "{name} è collegato",
+        "adding": "Aggiunta di {provider}…",
+        "back": "Indietro",
+        "browser_body": "Accedi a {provider} nel browser che si è appena aperto e consenti l'accesso a rclone (il programma che invia i backup).",
+        "cancel": "Annulla",
+        "clouds_body": "Collega i servizi che usi: compaiono in File come le altre cartelle, e Cloud Backup può tenerci i tuoi backup.",
+        "clouds_title": "I tuoi cloud",
+        "code_body": "Scrivi il codice di 6 cifre inviato via SMS a {phone}.",
+        "code_body_any": "Scrivi il codice di 6 cifre che ti è arrivato via SMS.",
+        "code_working": "Verifica del codice…",
+        "code_wrong": "Il codice non è stato accettato. Tentativi rimasti: {left}.",
+        "connect": "Collega",
+        "connected": "Collegato",
+        "connecting": "Connessione a {provider}…",
+        "continue": "Continua",
+        "continue_backup": "Continua con i backup",
+        "continue_hint": "Puoi tornare qui quando vuoi dalla griglia delle app: Cloud Config.",
+        "disconnect": "Scollega",
+        "disconnect_body": "Sparisce da File, e questo computer dimentica l'accesso. Nel cloud non si cancella nulla.",
+        "disconnect_busy": "Cloud Backup tiene i tuoi backup su {name}: prima scegli un'altra destinazione in Cloud Backup.",
+        "disconnect_title": "Scollegare {name}?",
+        "err_sign_in": "L'accesso non è riuscito.",
+        "error_title": "Qualcosa è andato storto",
+        "icloud_mounting": "Apertura di iCloud Drive…",
+        "icloud_working": "Accesso a iCloud…",
+        "in_files": "in File come «{name}»",
+        "more_actions": "Altre azioni",
+        "mount_failed": "Non mostrato in File: {reason}",
+        "net_body": "I cloud e i backup vanno online: prima collega questo computer a Internet.",
+        "net_cable": "Collega un cavo di rete",
+        "net_cable_body": "Questo computer ha una porta di rete cablata: si collega da solo",
+        "net_connect": "Connetti",
+        "net_connecting": "Connessione a {ssid}…",
+        "net_failed": "Impossibile connettersi a {ssid}: {error}",
+        "net_none": "Nessuna rete Wi-Fi nelle vicinanze",
+        "net_password_body": "La password della rete (spesso è sul router).",
+        "net_password_title": "Password di {ssid}",
+        "net_refresh": "Cerca di nuovo",
+        "net_scanning": "Ricerca delle reti Wi-Fi…",
+        "net_secure": "Protetta",
+        "net_skip": "Continua senza rete",
+        "net_title": "Connettiti a Internet",
+        "net_wifi": "Reti Wi-Fi",
+        "net_wifi_body": "Scegli la tua",
+        "nextcloud_wait_body": "Accedi a Nextcloud nel browser che si è appena aperto e consenti l'accesso: viene creata una password per le app solo per i backup, che puoi revocare dalle impostazioni di sicurezza di Nextcloud.",
+        "not_connected": "Non collegato",
+        "ok": "OK",
+        "open_browser": "Riapri il browser",
+        "open_files": "Apri in File",
+        "password_field": "Password",
+        "phones_body": "Apple invierà il codice di verifica via SMS a questo numero:",
+        "phones_title": "Dove mandare il codice?",
+        "required": "Compila i campi qui sopra.",
+        "show_files": "Mostra i cloud in File",
+        "show_files_body": "Nella barra laterale; i file si scaricano quando li apri",
+        "step": "Passo {n} di 3",
+        "title": "Cloud Config",
+        "ts_add": "Aggiungi alla mia rete Tailscale",
+        "ts_again": "Apri di nuovo il browser",
+        "ts_body": "Tailscale mette i tuoi dispositivi in una rete privata tutta loro, cifrata da un capo all'altro: ovunque tu sia, raggiungi questo computer (SSH, file, app) come se ci fossi davanti, senza aprire porte sul router.\n\nHai un account Tailscale, e vuoi aggiungere questo computer alla tua rete?",
+        "ts_cancel": "Annulla",
+        "ts_done": "Questo computer è nella tua rete Tailscale.",
+        "ts_failed": "Tailscale non ha potuto aggiungere questo computer: {error}",
+        "ts_later": "Non ora",
+        "ts_title": "Tailscale",
+        "ts_wait": "Accedi a Tailscale nel browser che si è appena aperto, e approva questo computer.",
+        "wait_title": "Accedi",
+    },
+}
+
+
+def t(key, **kw):
+    lang = os.environ.get("LANG", "")[:2]
+    return STRINGS.get(lang, STRINGS["en"]).get(key, STRINGS["en"][key]).format(**kw)
+
+
+def in_thread(work, done):
+    """work() in a thread, then done(result, error) in the main loop."""
+    def run():
+        try:
+            result, error = work(), None
+        except Exception as e:  # shown to the user
+            result, error = None, getattr(e, "message", None) or str(e) or type(e).__name__
+        GLib.idle_add(lambda: done(result, error) and False)
+    threading.Thread(target=run, daemon=True).start()
+
+
+class ConfigWindow(Adw.ApplicationWindow):
+    def __init__(self, app, first_run):
+        super().__init__(application=app, title=t("title"), default_width=760,
+                         default_height=640)
+        self.first_run = first_run
+        self.provider = None
+        self.login = self.login_url = self.icloud = self.ts_proc = None
+        self.waiting = False
+        self.code_message = ""
+        self.history = []
+
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
+                               vexpand=True)
+        for name, page in (("network", self._page_network()),
+                           ("tailscale", self._page_tailscale()),
+                           ("clouds", self._page_clouds()), ("wait", self._page_wait()),
+                           ("nextcloud", self._page_nextcloud()),
+                           ("icloud", self._page_icloud()), ("phones", self._page_phones()),
+                           ("code", self._page_code()), ("working", self._page_working()),
+                           ("error", self._page_error())):
+            self.stack.add_named(page, name)
+        self.back = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text=t("back"))
+        self.back.connect("clicked", lambda *_: self._back())
+        header = Adw.HeaderBar()
+        header.pack_start(self.back)
+        self.window_title = Adw.WindowTitle(title=t("title"))
+        header.set_title_widget(self.window_title)
+        self.toasts = Adw.ToastOverlay(child=self.stack)
+        view = Adw.ToolbarView(content=self.toasts)
+        view.add_top_bar(header)
+        self.set_content(view)
+
+        for name, handler in (("open-account", self._open_account),
+                              ("disconnect", self._ask_disconnect)):
+            action = Gio.SimpleAction.new(name, GLib.VariantType.new("s"))
+            action.connect("activate", lambda _a, param, h=handler: h(param.get_string()))
+            self.add_action(action)
+        self.stack.connect("notify::visible-child-name", self._on_page)
+
+        if first_run:
+            self._onboard()
+        else:
+            self._show_clouds()
+
+    # --- helpers ---------------------------------------------------------------------
+
+    @staticmethod
+    def _page(*children):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        for child in children:
+            box.append(child)
+        clamp = Adw.Clamp(maximum_size=560, child=box, margin_top=24, margin_bottom=24,
+                          margin_start=12, margin_end=12)
+        return Gtk.ScrolledWindow(child=clamp, hscrollbar_policy=Gtk.PolicyType.NEVER)
+
+    @staticmethod
+    def _button(label, suggested=False):
+        button = Gtk.Button(label=label, halign=Gtk.Align.CENTER)
+        button.add_css_class("pill")
+        if suggested:
+            button.add_css_class("suggested-action")
+        return button
+
+    def _form(self, title, body, rows, on_continue):
+        """A page with a group of rows, an error line and Continue.
+        Returns (page, group, error label)."""
+        group = Adw.PreferencesGroup(title=t(title), description=t(body))
+        for row in rows:
+            group.add(row)
+            if isinstance(row, Adw.EntryRow):
+                row.connect("entry-activated", lambda *_: on_continue())
+        error = Gtk.Label(wrap=True, xalign=0, margin_top=12)
+        error.add_css_class("error")
+        group.add(error)
+        button = self._button(t("continue"), suggested=True)
+        button.connect("clicked", lambda *_: on_continue())
+        return self._page(group, button), group, error
+
+    @staticmethod
+    def _entry(key, password=False):
+        return (Adw.PasswordEntryRow if password else Adw.EntryRow)(title=t(key))
+
+    def _show(self, name, remember=True):
+        current = self.stack.get_visible_child_name()
+        if remember and current and current not in ("wait", "working", "error"):
+            self.history.append(current)
+        self.stack.set_visible_child_name(name)
+        self.back.set_visible(bool(self.history) and name != "working")
+
+    def _back(self):
+        self._cancel()
+        if self.history:
+            self.stack.set_visible_child_name(self.history.pop())
+        self.back.set_visible(bool(self.history))
+
+    def _cancel(self):
+        """Stop what's waiting: a browser sign-in, an iCloud sign-in."""
+        self.waiting = False
+        if self.login and self.login.poll() is None:
+            self.login.terminate()
+        if self.icloud:
+            self.icloud.cancel()
+            self.icloud = None
+
+    def _toast(self, message):
+        self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(message), timeout=6))
+
+    def _name(self):
+        return cloud.PROVIDERS.get(self.provider, "")
+
+    def _on_page(self, *_):
+        name = self.stack.get_visible_child_name()
+        steps = {"network": 1, "tailscale": 2, "clouds": 3}
+        self.window_title.set_subtitle(t("step", n=steps[name])
+                                       if self.first_run and name in steps else "")
+        focus = {"nextcloud": self.nc_server, "icloud": self.apple_id, "code": self.code_entry}
+        if name in focus:
+            focus[name].grab_focus()
+
+    def _page_working(self):
+        self.working_status = Adw.StatusPage(vexpand=True)
+        return self.working_status
+
+    def _working(self, title, body=""):
+        self.working_status.set_title(title)
+        self.working_status.set_description(body)
+        self.working_status.set_child(livespinner.Spinner(size=48))
+        self._show("working")
+
+    def _page_error(self):
+        self.error_status = Adw.StatusPage(icon_name="dialog-warning-symbolic", vexpand=True,
+                                           title=t("error_title"))
+        back = self._button(t("back"))
+        back.connect("clicked", lambda *_: self._back())
+        self.error_status.set_child(back)
+        return self.error_status
+
+    def _error(self, message):
+        self.waiting = False
+        self.error_status.set_description(GLib.markup_escape_text(str(message)))
+        self.stack.set_visible_child_name("error")
+        self.back.set_visible(bool(self.history))
+
+    # --- first run: the network, then Tailscale ---------------------------------------
+
+    def _onboard(self):
+        if netsetup.online():
+            self._after_network()
+            return
+        kinds = netsetup.devices()
+        self.net_cable.set_visible("ethernet" in kinds)
+        self.net_wifi.set_visible("wifi" in kinds)
+        self._show("network", remember=False)
+        if "wifi" in kinds:
+            self._scan_wifi()
+        GLib.timeout_add_seconds(3, self._poll_network)
+
+    def _poll_network(self):
+        if self.stack.get_visible_child_name() != "network":
+            return GLib.SOURCE_REMOVE
+        if netsetup.online():
+            self._after_network()
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def _after_network(self):
+        if netsetup.online() and netsetup.tailscale_available() \
+                and not netsetup.tailscale_running():
+            self._show("tailscale", remember=False)
+        else:
+            self._show_clouds()
+
+    def _page_network(self):
+        status = Adw.StatusPage(icon_name="network-offline-symbolic", title=t("net_title"),
+                                description=t("net_body"))
+        self.net_cable = Adw.PreferencesGroup()
+        cable = Adw.ActionRow(title=t("net_cable"), subtitle=t("net_cable_body"))
+        cable.add_prefix(Gtk.Image(icon_name="network-wired-symbolic"))
+        self.net_cable.add(cable)
+        self.net_wifi = Adw.PreferencesGroup(title=t("net_wifi"), description=t("net_wifi_body"))
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text=t("net_refresh"),
+                             valign=Gtk.Align.CENTER)
+        refresh.add_css_class("flat")
+        refresh.connect("clicked", lambda *_: self._scan_wifi())
+        self.net_wifi.set_header_suffix(refresh)
+        self.net_rows = []
+        skip = self._button(t("net_skip"))
+        skip.connect("clicked", lambda *_: self._after_network())
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        for child in (status, self.net_cable, self.net_wifi, skip):
+            box.append(child)
+        return self._page(box)
+
+    def _wifi_rows(self, rows):
+        for row in self.net_rows:
+            self.net_wifi.remove(row)
+        self.net_rows = rows
+        for row in rows:
+            self.net_wifi.add(row)
+
+    def _scan_wifi(self):
+        busy = Adw.ActionRow(title=t("net_scanning"))
+        busy.add_prefix(livespinner.Spinner(size=16))
+        self._wifi_rows([busy])
+
+        def done(networks, error):
+            if error or not networks:
+                self._wifi_rows([Adw.ActionRow(title=t("net_none"))])
+                return
+            rows = []
+            for network in networks:
+                bars = min(4, network["signal"] // 25 + 1)
+                icon = ["none", "weak", "ok", "good", "excellent"][bars] if bars else "none"
+                row = Adw.ActionRow(title=GLib.markup_escape_text(network["ssid"]),
+                                    subtitle=t("net_secure" if network["secure"] else "net_open"),
+                                    activatable=True)
+                row.add_prefix(Gtk.Image(icon_name=f"network-wireless-signal-{icon}-symbolic"))
+                if network["secure"]:
+                    row.add_suffix(Gtk.Image(icon_name="channel-secure-symbolic"))
+                row.connect("activated", lambda _r, n=network: self._wifi_chosen(n))
+                rows.append(row)
+            self._wifi_rows(rows)
+        in_thread(netsetup.wifi_networks, done)
+
+    def _wifi_chosen(self, network):
+        if not network["secure"]:
+            self._wifi_connect(network["ssid"], None)
+            return
+        dialog = Adw.AlertDialog(heading=t("net_password_title", ssid=network["ssid"]),
+                                 body=t("net_password_body"))
+        entry = Adw.PasswordEntryRow(title=t("password_field"), activates_default=True)
+        group = Adw.PreferencesGroup()
+        group.add(entry)
+        dialog.set_extra_child(group)
+        dialog.add_response("cancel", t("cancel"))
+        dialog.add_response("connect", t("net_connect"))
+        dialog.set_response_appearance("connect", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("connect")
+        dialog.connect("response", lambda _d, r: r == "connect"
+                       and self._wifi_connect(network["ssid"], entry.get_text()))
+        dialog.present(self)
+        entry.grab_focus()
+
+    def _wifi_connect(self, ssid, password):
+        self._working(t("net_connecting", ssid=ssid))
+
+        def done(_result, error):
+            if error:
+                self._show("network", remember=False)
+                self._toast(t("net_failed", ssid=ssid, error=error))
+                GLib.timeout_add_seconds(3, self._poll_network)
+                return
+            self._after_network()
+        in_thread(lambda: netsetup.wifi_connect(ssid, password), done)
+
+    def _page_tailscale(self):
+        status = Adw.StatusPage(icon_name="network-vpn-symbolic", title=t("ts_title"),
+                                description=t("ts_body"))
+        self.ts_add = self._button(t("ts_add"), suggested=True)
+        self.ts_add.connect("clicked", lambda *_: self._tailscale_up())
+        self.ts_later = self._button(t("ts_later"))
+        self.ts_later.connect("clicked", lambda *_: self._show_clouds())
+        self.ts_waiting = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                                  visible=False)
+        self.ts_waiting.append(livespinner.Spinner(size=32))
+        self.ts_waiting.append(Gtk.Label(label=t("ts_wait"), wrap=True,
+                                         justify=Gtk.Justification.CENTER))
+        self.ts_again = self._button(t("ts_again"))
+        self.ts_again.connect("clicked", lambda *_: self.ts_url and self._launch(self.ts_url))
+        self.ts_waiting.append(self.ts_again)
+        cancel = self._button(t("ts_cancel"))
+        cancel.connect("clicked", lambda *_: self._tailscale_cancel())
+        self.ts_waiting.append(cancel)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        for child in (self.ts_add, self.ts_later, self.ts_waiting):
+            box.append(child)
+        status.set_child(box)
+        return status
+
+    def _launch(self, url):
+        Gtk.UriLauncher.new(url).launch(self, None, None, None)
+
+    def _tailscale_waiting(self, waiting):
+        self.ts_add.set_visible(not waiting)
+        self.ts_later.set_visible(not waiting)
+        self.ts_waiting.set_visible(waiting)
+
+    def _tailscale_up(self):
+        self.ts_url = None
+        try:
+            proc = self.ts_proc = netsetup.tailscale_up()
+        except OSError as e:
+            self._toast(t("ts_failed", error=str(e)))
+            return
+        self._tailscale_waiting(True)
+        self.ts_again.set_visible(False)
+
+        def run():
+            last = ""
+            for line in proc.stdout:
+                url = netsetup.login_url(line)
+                if url:
+                    GLib.idle_add(self._tailscale_url, url)
+                elif line.strip():
+                    last = line.strip()
+            code = proc.wait()
+            GLib.idle_add(self._tailscale_done, proc, code, last)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _tailscale_url(self, url):
+        self.ts_url = url
+        self.ts_again.set_visible(True)
+        self._launch(url)
+        return GLib.SOURCE_REMOVE
+
+    def _tailscale_done(self, proc, code, last):
+        if proc is not self.ts_proc:
+            return GLib.SOURCE_REMOVE  # cancelled
+        self.ts_proc = None
+        self._tailscale_waiting(False)
+        if code == 0 or netsetup.tailscale_running():
+            self._toast(t("ts_done"))
+            self._show_clouds()
+        else:
+            self._toast(t("ts_failed", error=last or code))
+        return GLib.SOURCE_REMOVE
+
+    def _tailscale_cancel(self):
+        proc, self.ts_proc = self.ts_proc, None
+        if proc and proc.poll() is None:
+            proc.terminate()
+        self._tailscale_waiting(False)
+
+    # --- the clouds --------------------------------------------------------------------
+
+    def _page_clouds(self):
+        self.clouds_group = Adw.PreferencesGroup(title=t("clouds_title"),
+                                                 description=t("clouds_body"))
+        self.cloud_rows = []
+        files = Adw.PreferencesGroup()
+        self.show_files = Adw.SwitchRow(title=t("show_files"), subtitle=t("show_files_body"),
+                                        active=accounts.show_in_files())
+        self.show_files.connect("notify::active", lambda *_: self._set_show_files())
+        files.add(self.show_files)
+        self.continue_backup = self._button(t("continue_backup"), suggested=True)
+        self.continue_backup.connect("clicked", lambda *_: self._continue_backup())
+        self.continue_hint = Gtk.Label(label=t("continue_hint"), wrap=True,
+                                       justify=Gtk.Justification.CENTER)
+        self.continue_hint.add_css_class("dim-label")
+        return self._page(self.clouds_group, files, self.continue_backup, self.continue_hint)
+
+    def _show_clouds(self):
+        self._fill_clouds()
+        self.continue_backup.set_visible(self.first_run)
+        self.continue_hint.set_visible(self.first_run)
+        self.history.clear()
+        self._show("clouds", remember=False)
+
+    def _fill_clouds(self):
+        for row in self.cloud_rows:
+            self.clouds_group.remove(row)
+        self.cloud_rows = []
+        connected = accounts.all_accounts()
+        for provider, icon in CLOUDS:
+            mine = [a for a in connected if a["provider"] == provider]
+            for account in mine:
+                row = Adw.ActionRow(title=cloud.PROVIDERS[provider],
+                                    subtitle=GLib.markup_escape_text(self._account_subtitle(account)))
+                row.add_prefix(Gtk.Image(icon_name=icon, pixel_size=32))
+                status = Gtk.Label(label=t("connected"))
+                status.add_css_class("success")
+                row.add_suffix(status)
+                menu = Gio.Menu()
+                if accounts.show_in_files():
+                    menu.append(t("open_files"), f"win.open-account('{account['id']}')")
+                menu.append(t("disconnect"), f"win.disconnect('{account['id']}')")
+                button = Gtk.MenuButton(icon_name="view-more-symbolic", menu_model=menu,
+                                        valign=Gtk.Align.CENTER,
+                                        tooltip_text=t("more_actions"))
+                button.add_css_class("flat")
+                row.add_suffix(button)
+                self.clouds_group.add(row)
+                self.cloud_rows.append(row)
+            if mine:
+                continue
+            row = Adw.ActionRow(title=cloud.PROVIDERS[provider], subtitle=t("not_connected"))
+            row.add_prefix(Gtk.Image(icon_name=icon, pixel_size=32))
+            button = Gtk.Button(label=t("connect"), valign=Gtk.Align.CENTER)
+            button.connect("clicked", lambda _b, p=provider: self._connect(p))
+            row.add_suffix(button)
+            row.set_activatable_widget(button)
+            self.clouds_group.add(row)
+            self.cloud_rows.append(row)
+
+    def _account_subtitle(self, account):
+        parts = [account["identity"]] if account["identity"] else []
+        if accounts.show_in_files():
+            parts.append(t("in_files", name=account["name"]))
+        return " · ".join(parts) or t("connected")
+
+    def _set_show_files(self):
+        show = self.show_files.get_active()
+        accounts.set_show_in_files(show)
+
+        def work():
+            config = cloud.load_config() or {}
+            for account in accounts.all_accounts():
+                if account["provider"] == "icloud":
+                    continue  # icloud-linux's own mount, always
+                if show:
+                    vault = config.get("repo") if config.get("account") == account["id"] else None
+                    mount.mount_account(account, vault)
+                else:
+                    mount.unmount_account(account)
+        in_thread(work, lambda _r, error: (error and self._toast(t("mount_failed",
+                                                                   reason=error)),
+                                           self._fill_clouds()))
+
+    def _open_account(self, account_id):
+        account = accounts.find(account_id)
+        if account:
+            Gtk.FileLauncher.new(Gio.File.new_for_path(mount.account_path(account))).launch(
+                self, None, None, None)
+
+    def _ask_disconnect(self, account_id):
+        account = accounts.find(account_id)
+        if account is None:
+            return
+        name = cloud.PROVIDERS[account["provider"]]
+        if accounts.backing_up(account_id):
+            dialog = Adw.AlertDialog(heading=t("disconnect_title", name=name),
+                                     body=t("disconnect_busy", name=name))
+            dialog.add_response("ok", t("ok"))
+            dialog.present(self)
+            return
+        dialog = Adw.AlertDialog(heading=t("disconnect_title", name=name),
+                                 body=t("disconnect_body"))
+        dialog.add_response("cancel", t("cancel"))
+        dialog.add_response("disconnect", t("disconnect"))
+        dialog.set_response_appearance("disconnect", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.connect("response", lambda _d, r: r == "disconnect"
+                       and self._disconnect(account))
+        dialog.present(self)
+
+    def _disconnect(self, account):
+        def work():
+            mount.unmount_account(account)
+            accounts.forget(account["id"])
+        in_thread(work, lambda _r, error: error and self._toast(error) or self._fill_clouds())
+
+    def _continue_backup(self):
+        """First run done: the backups next (Cloud Backup's own first run)."""
+        if os.path.exists(AUTOSTART):
+            os.remove(AUTOSTART)
+        try:
+            Gio.Subprocess.new(["live-backup", "--first-run"], Gio.SubprocessFlags.NONE)
+        except GLib.Error as e:
+            self._toast(e.message)
+            return
+        self.close()
+
+    # --- connecting a cloud -------------------------------------------------------------
+
+    def _connect(self, provider):
+        self.provider = provider
+        if provider in providers.OAUTH:
+            self._oauth()
+        else:
+            self._show(provider)
+
+    def _connected(self, provider, identity, options):
+        """Signed in and checked: the account, and its place in Files."""
+        self._working(t("adding", provider=self._name()))
+
+        def work():
+            account = accounts.add(provider, identity, options)
+            problem = None
+            if accounts.show_in_files():
+                try:
+                    mount.mount_account(account)
+                except Exception as e:  # noqa: BLE001 - the account is there anyway
+                    problem = str(e)
+            return account, problem
+
+        def done(result, error):
+            if error:
+                self._error(error)
+                return
+            account, problem = result
+            self._toast(t("mount_failed", reason=problem) if problem
+                        else t("added", name=cloud.PROVIDERS[provider]))
+            self._show_clouds()
+        in_thread(work, done)
+
+    def _checked(self, options):
+        """In a thread: the sign-in works. Returns the options as rclone left
+        them (it may have renewed the token) and the identity."""
+        cloud.set_remote(CHECK_REMOTE, options)
+        try:
+            providers.check_remote(CHECK_REMOTE)
+            who = providers.identity(CHECK_REMOTE)
+            return cloud.remote_options(CHECK_REMOTE), who
+        finally:
+            cloud.remove_remote(CHECK_REMOTE)
+
+    # --- waiting for the browser ----------------------------------------------------
+
+    def _page_wait(self):
+        self.wait_status = Adw.StatusPage(icon_name="web-browser-symbolic", vexpand=True,
+                                          title=t("wait_title"))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        box.append(livespinner.Spinner(size=32))
+        self.wait_again = self._button(t("open_browser"))
+        self.wait_again.connect("clicked", lambda *_: self._open_uri(self.login_url))
+        box.append(self.wait_again)
+        cancel = self._button(t("cancel"))
+        cancel.connect("clicked", lambda *_: self._back())
+        box.append(cancel)
+        self.wait_status.set_child(box)
+        return self.wait_status
+
+    def _wait_browser(self, body):
+        self.wait_status.set_description(body)
+        self.wait_again.set_visible(False)
+        self.login_url = None
+        self.waiting = True
+        self._show("wait")
+
+    def _open_uri(self, url):
+        self.login_url = url
+        self.wait_again.set_visible(True)
+        Gtk.UriLauncher.new(url).launch(self, None, None, None)
+
+    # --- Google Drive, OneDrive, Dropbox: rclone's sign-in ------------------------
+
+    def _oauth(self):
+        self._cancel()
+        self._wait_browser(t("browser_body", provider=self._name()))
+        provider = self.provider
+        login = self.login = subprocess.Popen(providers.authorize_cmd(provider), text=True,
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        def run():
+            errors = []
+            for line in login.stderr:
+                url = providers.authorize_url(line)
+                if url:
+                    GLib.idle_add(lambda u=url: self._open_uri(u) and False)
+                elif "ERROR" in line or "Failed" in line:
+                    errors.append(line.split(":", 3)[-1].strip())
+            token = providers.token_from(login.stdout.read())
+            login.wait()
+            GLib.idle_add(lambda: self._oauth_done(login, provider, token, errors) and False)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _oauth_done(self, login, provider, token, errors):
+        if login is not self.login or not self.waiting:  # cancelled
+            return
+        self.waiting = False
+        if not token:
+            self._error(errors[-1] if errors else t("err_sign_in"))
+            return
+        self._working(t("connecting", provider=self._name()))
+        in_thread(lambda: self._checked(providers.oauth_remote(provider, token)),
+                  lambda result, error: self._error(error) if error
+                  else self._connected(provider, result[1], result[0]))
+
+    # --- Nextcloud: Login Flow v2 ----------------------------------------------------
+
+    def _page_nextcloud(self):
+        self.nc_server = self._entry("server")
+        self.nc_server.set_input_purpose(Gtk.InputPurpose.URL)
+        page, _, self.nc_error = self._form("nextcloud_title", "nextcloud_body",
+                                            [self.nc_server], self._nextcloud)
+        return page
+
+    def _nextcloud(self):
+        try:
+            server = providers.nextcloud_server(self.nc_server.get_text())
+        except providers.SignInError:
+            self.nc_error.set_label(t("required"))
+            return
+        self.nc_error.set_label("")
+        self._working(t("connecting", provider=self._name()))
+
+        def started(flow, error):
+            if error:
+                self._error(error)
+                return
+            self._wait_browser(t("nextcloud_wait_body"))
+            self._open_uri(flow["login"])
+            in_thread(lambda: self._nextcloud_finish(flow), self._nextcloud_done)
+        in_thread(lambda: providers.nextcloud_start(server), started)
+
+    def _nextcloud_finish(self, flow):
+        login = providers.nextcloud_poll(flow, cancelled=lambda: not self.waiting)
+        if login is None:
+            return None
+        options, _ = self._checked(providers.nextcloud_remote(login))
+        host = GLib.Uri.parse(login["server"], GLib.UriFlags.NONE).get_host()
+        return options, f"{login['loginName']}@{host}"
+
+    def _nextcloud_done(self, result, error):
+        if not self.waiting:  # cancelled, or timed out
+            return
+        self.waiting = False
+        if error or result is None:
+            self._error(error or t("err_sign_in"))
+        else:
+            self._connected("nextcloud", result[1], result[0])
+
+    # --- iCloud Drive: icloud-linux ---------------------------------------------------
+
+    def _page_icloud(self):
+        self.apple_id = self._entry("apple_id")
+        self.apple_id.set_input_purpose(Gtk.InputPurpose.EMAIL)
+        self.apple_password = self._entry("password_apple", password=True)
+        page, _, self.icloud_error = self._form("icloud_title", "icloud_body",
+                                                [self.apple_id, self.apple_password],
+                                                self._icloud)
+        return page
+
+    def _icloud(self):
+        apple_id, password = self.apple_id.get_text().strip(), self.apple_password.get_text()
+        if not apple_id or not password:
+            self.icloud_error.set_label(t("required"))
+            return
+        self.icloud_error.set_label("")
+        self._cancel()
+        self._working(t("icloud_working"))
+        self.icloud = providers.ICloudSignIn(
+            apple_id, password, lambda kind, data: GLib.idle_add(
+                lambda: self._icloud_event(kind, data) and False))
+        self.icloud.start()
+
+    def _icloud_event(self, kind, data):
+        if self.icloud is None:  # cancelled
+            return
+        if kind == "phones":
+            for row in self.phone_rows:
+                self.phones_group.remove(row)
+            self.phone_rows.clear()
+            for index, phone in enumerate(data):
+                row = Adw.ActionRow(title=phone, activatable=True)
+                row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+                row.connect("activated", lambda _, i=index: self._icloud_phone(i))
+                self.phones_group.add(row)
+                self.phone_rows.append(row)
+            self.stack.set_visible_child_name("phones")
+            self.back.set_visible(True)
+        elif kind == "wrong_code":
+            # icloudctl asks again right after: shown with that prompt
+            left = re.search(r"\((\d+) attempt", data)
+            self.code_message = t("code_wrong", left=left[1] if left else "?")
+        elif kind == "code":
+            self.code_group.set_description(t("code_body", phone=data) if data
+                                            else t("code_body_any"))
+            self.code_error.set_label(self.code_message)
+            self.code_message = ""
+            self.code_entry.set_text("")
+            self.stack.set_visible_child_name("code")
+            self.back.set_visible(True)
+        elif kind == "done":
+            self.icloud = None
+            self._working(t("icloud_mounting"))
+            # restart: an icloudd already running (an earlier attempt) still
+            # has no session, and would show an empty drive
+            in_thread(lambda: providers.icloud_start(restart=True),
+                      lambda _r, error: self._error(f"{t('icloud_unavailable')}\n\n{error}")
+                      if error else self._connected("icloud", data, None))
+        elif kind == "error":
+            self.icloud = None
+            self._error(data)
+
+    def _page_phones(self):
+        self.phones_group = Adw.PreferencesGroup(title=t("phones_title"),
+                                                 description=t("phones_body"))
+        self.phone_rows = []
+        return self._page(self.phones_group)
+
+    def _icloud_phone(self, index):
+        self._working(t("icloud_working"))
+        self.icloud.choose(index)
+
+    def _page_code(self):
+        self.code_entry = self._entry("code")
+        self.code_entry.set_input_purpose(Gtk.InputPurpose.DIGITS)
+        page, self.code_group, self.code_error = self._form(
+            "code_title", "code_body_any", [self.code_entry], self._icloud_code)
+        return page
+
+    def _icloud_code(self):
+        code = "".join(c for c in self.code_entry.get_text() if c.isdigit())
+        if len(code) != 6 or not self.icloud:
+            self.code_error.set_label(t("code_body_any"))
+            return
+        self._working(t("code_working"))
+        self.icloud.code(code)
+
+
+class ConfigApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID,
+                         flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.first_run = False
+
+    def do_command_line(self, command_line):
+        self.first_run = "--first-run" in command_line.get_arguments()[1:]
+        self.activate()
+        return 0
+
+    def do_activate(self):
+        window = self.get_active_window() or ConfigWindow(self, self.first_run)
+        window.present()
+
+
+if __name__ == "__main__":
+    sys.exit(ConfigApp().run(sys.argv))

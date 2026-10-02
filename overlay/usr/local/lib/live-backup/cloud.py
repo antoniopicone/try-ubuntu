@@ -15,10 +15,11 @@ The key never goes to a file: it's in the GNOME keyring, and crypt's two
 passwords, derived from it, reach rclone through the environment.
 
 Destinations are rclone remotes in ~/.config/live-backup/rclone.conf (only
-the user can read it): "cloud:" is the destination (Google Drive, OneDrive,
-Dropbox with rclone's sign-in, Nextcloud, Samba, SFTP; iCloud Drive as an
-alias of the icloud-linux mount ~/iCloud), "vault:" the encrypted folder in
-it. While the app sets up a destination they're "setup:" and "setupvault:",
+the user can read it): "cloud:" is the destination, "vault:" the encrypted
+folder in it. On a cloud (Google Drive, OneDrive, Dropbox, Nextcloud) it is
+an alias of the account Cloud Config signed in to ("acct-<id>:", see
+accounts.py); iCloud Drive is an alias of the icloud-linux mount ~/iCloud;
+Samba and SFTP are remotes of Cloud Backup's own. While the app sets up a destination they're "setup:" and "setupvault:",
 and they replace the others only once the backups are set up, so backing
 out halfway leaves the current backups alone.
 """
@@ -200,6 +201,26 @@ def _write(config):
 def remote_options(remote=REMOTE):
     config = _remotes()
     return dict(config[remote]) if config.has_section(remote) else {}
+
+
+def set_remote(name, options):
+    """A remote of its own (a cloud account of Cloud Config: "acct-<id>")."""
+    config = _remotes()
+    config[name] = {k: str(v) for k, v in options.items() if v not in (None, "")}
+    _write(config)
+
+
+def remove_remote(name):
+    config = _remotes()
+    if config.remove_section(name):
+        _write(config)
+
+
+def alias(remote):
+    """A remote that is another one under this name: the backups' "cloud:"
+    on a Cloud Config account, so that both use one sign-in (rclone writes a
+    renewed token back to the account's own section)."""
+    return {"type": "alias", "remote": f"{remote}:"}
 
 
 def set_setup_remote(options):

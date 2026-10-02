@@ -186,7 +186,7 @@ last page doesn't log out: it asks to remove the USB stick and offers
 | Filesystem | btrfs with the subvolumes `@` → `/`, `@home` → `/home`, `@var` → `/var`, `@snapshots` → `/.snapshots` (flat layout, `compress=zstd:1`). **snapper** manages `/` (snapshot #1 is the image as built) and `/home` (every hour: *Previous Versions* in Files) |
 | Desktop | a minimal **GNOME 51**: Shell, Settings, the vanilla GNOME session, GDM (see [The desktop](#the-desktop)) |
 | Theme | dark style with GNOME's blue accent, Adwaita Sans, Yaru icons, and **one of Ubuntu's stock wallpapers, picked at random at each build** |
-| Apps | **ghostty** (JetBrains Mono Nerd Font, Catppuccin Mocha; OpenGL in software under QEMU's virgl, which lacks the OpenGL 4.3 it needs), with **Ptyxis** when it can't start, **Nautilus** (with *Open in Ghostty* and *Previous Versions*), **Brave Origin** (in the desktop's language and light/dark style), GNOME Software (with **Flatpak** and Flathub), Calculator, Papers (PDF), Fonts, Text Editor, Disks, Resources, Extensions, **Cloud Backup** (hourly, end-to-end encrypted backups of your home folder with restic, and restore, to Google Drive, OneDrive, Dropbox, Nextcloud, iCloud Drive, Samba or SFTP) |
+| Apps | **ghostty** (JetBrains Mono Nerd Font, Catppuccin Mocha; OpenGL in software under QEMU's virgl, which lacks the OpenGL 4.3 it needs), with **Ptyxis** when it can't start, **Nautilus** (with *Open in Ghostty* and *Previous Versions*), **Brave Origin** (in the desktop's language and light/dark style), GNOME Software (with **Flatpak** and Flathub), Calculator, Papers (PDF), Fonts, Text Editor, Disks, Resources, Extensions, **Cloud Config** (Google Drive, OneDrive, Dropbox, Nextcloud and iCloud Drive in Files), **Cloud Backup** (hourly, end-to-end encrypted backups of your home folder with restic, and restore, to one of those clouds, Samba or SFTP) |
 | Fonts | Adwaita Sans; Liberation, **Carlito** and **Caladea** (metric-compatible with Arial/Times New Roman/Courier New and Calibri/Cambria, so Office documents keep their layout); JetBrains Mono; **JetBrains Mono Nerd Font** (GNOME's monospace font and Ghostty's) and **Hack Nerd Font Mono** |
 | Network | NetworkManager (via netplan, as on Ubuntu Desktop) |
 | QEMU integration | sound (virtio-sound, PipeWire), the clipboard shared with the QEMU window (**spice-vdagent**), the host's shared folder (9p + **bindfs**, see [Running](#running)) |
@@ -607,7 +607,7 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   - installs the picture (AccountsService: GDM, the Shell and Settings
     show it)
   - writes `~/.gitconfig` with `user.name` / `user.email`
-  - starts the Backup app at the first login (see below)
+  - starts Cloud Config at the first login, which then opens Cloud Backup (see below)
   - retires the live user: no autologin, password locked, out of the admin
     groups and without passwordless sudo right away; then
     `live-retire-user.service` deletes it, home included, as soon as its
@@ -615,18 +615,32 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
     `ALLOW_USERS` goes to the new user
   
   The session then logs out to GDM, where only the new user is listed.
-- **Cloud Backup** ([live-backup](overlay/usr/local/bin/live-backup)) opens by
-  itself at the new user's first login
-  ([netsetup.py](overlay/usr/local/lib/live-backup/netsetup.py)). First it
-  checks the network (NetworkManager's connectivity). Without one, it asks
-  to plug in a cable when the computer has a wired port, and lists the
-  Wi-Fi networks when it has Wi-Fi: pick one, type its password, and
-  `nmcli` connects. It goes on by itself once the network is up. Then it
-  explains Tailscale in two lines and offers to add the computer to your
-  tailnet. `pkexec tailscale up --operator=<you>` opens the sign-in page in
-  the browser, and the app waits for it. It skips this when the computer
-  is already on a tailnet. Then it asks where to keep your data,
-  documents and preferences safe, and signs in to it by itself
+- **Cloud Config** ([live-cloud-config](overlay/usr/local/bin/live-cloud-config),
+  icon [assets/cloud-config-app.svg](assets/cloud-config-app.svg)) opens by
+  itself at the new user's first login, in three steps:
+  1. **The network**
+     ([netsetup.py](overlay/usr/local/lib/live-backup/netsetup.py)), when
+     NetworkManager says there's none: plug in a cable when the computer
+     has a wired port, or pick a Wi-Fi network and type its password
+     (`nmcli`). It goes on by itself once the network is up.
+  2. **Tailscale**, explained in two lines, to add the computer to your
+     tailnet: `pkexec tailscale up --operator=<you>` opens the sign-in
+     page in the browser, and the app waits for it. Skipped when the
+     computer is already on a tailnet.
+  3. **Your clouds**: Google Drive, OneDrive, Dropbox, Nextcloud and
+     iCloud Drive, each connected or with a Connect button. A connected one
+     is an account
+     ([accounts.py](overlay/usr/local/lib/live-backup/accounts.py)): an
+     rclone remote of its own, `acct-<id>`, holding its sign-in, listed in
+     `~/.config/live-backup/accounts.json`. It shows up in Files (see
+     below), and Cloud Backup can keep the backups on it. Its menu opens it
+     in Files or disconnects it: it leaves Files and its sign-in is
+     forgotten, nothing is deleted from the cloud. The one that holds the
+     backups can't be disconnected until they go elsewhere. "Show the
+     clouds in Files" turns all the mounts off and on.
+
+  "Continue with the Backups" then opens Cloud Backup. Afterwards, Cloud
+  Config is in the app grid. It signs in to each cloud by itself
   ([providers.py](overlay/usr/local/lib/live-backup/providers.py)), without
   GNOME Online Accounts:
   - **Google Drive, OneDrive, Dropbox**: in the browser, with rclone's own
@@ -652,6 +666,13 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
     mounts iCloud Drive in `~/iCloud` (in the Files sidebar too). The
     password isn't kept: when Apple asks to sign in again, every few
     weeks, a backup fails with a notification.
+- **Cloud Backup** ([live-backup](overlay/usr/local/bin/live-backup)) asks
+  where to keep your data, documents and preferences safe:
+  - **one of your clouds**, those Cloud Config connected. The backups use
+    that account's sign-in: their rclone remote (`cloud:`) is an alias of
+    the account's (`acct-<id>:`), so there's one token, which rclone
+    renews in the account's own section. With no cloud connected, a button
+    opens Cloud Config.
   - **Samba**: server, share (or picked from the list), user and password,
     or none for a guest share.
   - **SFTP**: server, port, user, and a password or a key file (with its
@@ -693,15 +714,18 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
     backup in progress (percentage, files, size, time left: run-backup
     writes restic's progress to `~/.local/state/live-backup/progress.json`
     every second) or the last one, "Back Up Now" and "Open Cloud Backup".
-  - **In Files**: the destination is mounted with rclone in the home
-    folder (`~/Google Drive`, `~/Nextcloud`, `~/SFTP (anna@server)`…) by a
-    systemd user unit at every login
-    ([live-cloud-mount.service](overlay/etc/systemd/user/live-cloud-mount.service),
+  - **In Files**: every cloud of Cloud Config is mounted with rclone in
+    the home folder (`~/Google Drive`, `~/Nextcloud`…) by a systemd user
+    unit at every login
+    ([live-cloud@.service](overlay/etc/systemd/user/live-cloud@.service),
     [mount.py](overlay/usr/local/lib/live-backup/mount.py)), with its place
-    in the sidebar. Files are fetched when opened and cached in
-    `~/.cache/rclone`; the backups' encrypted folder is hidden from it, and
-    localsearch is kept out of it (it would download the whole drive).
-    iCloud Drive is icloud-linux's own mount, `~/iCloud`.
+    in the sidebar (Files lists a mount in the home folder by itself). So is Cloud Backup's own Samba or SFTP destination
+    (`~/SFTP (anna@server)`,
+    [live-cloud-mount.service](overlay/etc/systemd/user/live-cloud-mount.service)).
+    Files are fetched when opened and cached in `~/.cache/rclone`. The
+    backups' encrypted folder is hidden from the mount it's on, and
+    localsearch is kept out of every mount (it would download the whole
+    drive). iCloud Drive is icloud-linux's own mount, `~/iCloud`.
   - The browser page after signing in to Google Drive, OneDrive or Dropbox
     is the app's (`rclone authorize --template`): its icon, the outcome in
     the session's language, light or dark.

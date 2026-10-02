@@ -1,13 +1,16 @@
-"""mount: the backups' cloud in Files (Nautilus), for the Cloud Backup app.
+"""mount: the clouds in Files (Nautilus).
 
-The destination ("cloud:", see cloud.py) is mounted with rclone in the home
-folder (~/Google Drive, ~/Nextcloud, ~/SFTP (anna@server)...) by a systemd
-user unit, live-cloud-mount.service, at every login, and gets a place in
-Files' sidebar (a GTK bookmark). Files are fetched when opened, and cached
-in ~/.cache/rclone (not backed up). The backups' encrypted folder is hidden
-from it, so it can't be deleted there by mistake, and the search indexer
-(localsearch) is kept out of it, so it doesn't download the whole drive.
-iCloud Drive has its own mount already (icloud-linux, ~/iCloud).
+Cloud Config's accounts (accounts.py) are each mounted with rclone in the
+home folder (~/Google Drive, ~/Nextcloud...) by a systemd user unit,
+live-cloud@<id>.service, at every login, and Files lists each in its
+sidebar (as it does any mount in the home folder). Cloud Backup's own network destinations (Samba, SFTP:
+"cloud:", see cloud.py) are mounted the same way by live-cloud-mount.service
+(~/SFTP (anna@server)...). Files are fetched when opened, and cached in
+~/.cache/rclone (not backed up). The backups' encrypted folder is hidden
+from the mount it is on, so it can't be deleted there by mistake, and the
+search indexer (localsearch) is kept out of every mount, so it doesn't
+download the whole drive. iCloud Drive has its own mount already
+(icloud-linux, ~/iCloud).
 """
 import os
 import subprocess
@@ -19,6 +22,10 @@ import cloud
 
 UNIT = "live-cloud-mount.service"
 ENV = os.path.join(cloud.HOME, ".config/live-backup/mount.env")
+ACCOUNT_UNIT = "live-cloud@{}.service"
+ACCOUNT_ENVS = os.path.join(cloud.HOME, ".config/live-backup/mounts")
+# rclone mount's --exclude for a mount with no backups in it
+NO_VAULT = "/.no-backups-here/**"
 BOOKMARKS = os.path.join(cloud.HOME, ".config/gtk-3.0/bookmarks")
 INDEXER = "org.freedesktop.Tracker3.Miner.Files"
 
@@ -87,7 +94,10 @@ def set_up(config):
         f.write(f"MOUNT_DIR={path}\nMOUNT_NAME={name}\n"
                 f"VAULT_EXCLUDE=/{config['repo'].strip('/')}/**\n")
     _set_indexed(path, False)
-    _set_bookmark(path, name, True)
+    # No bookmark: Files lists a mount in the home folder on its own (with
+    # an eject button); a bookmark would show it twice. One left by an
+    # older version goes.
+    _set_bookmark(path, name, False)
     for args in (("daemon-reload",), ("enable", UNIT), ("restart", UNIT)):
         result = _systemctl(*args)
         if result.returncode != 0:
@@ -112,3 +122,70 @@ def remove():
         os.remove(ENV)
     except FileNotFoundError:
         pass
+
+
+# --- Cloud Config's accounts ---------------------------------------------------------
+
+def account_path(account):
+    if account["provider"] == "icloud":
+        return cloud.ICLOUD_MOUNT
+    return os.path.join(cloud.HOME, account["name"])
+
+
+def _account_env(account):
+    return os.path.join(ACCOUNT_ENVS, f"{account['id']}.env")
+
+
+def account_mounted(account):
+    if account["provider"] == "icloud":
+        return os.path.ismount(cloud.ICLOUD_MOUNT)
+    return os.path.exists(_account_env(account))
+
+
+def mount_account(account, vault=None):
+    """In Files: the account at ~/<name>, its backups' folder (vault, a path
+    in it) hidden. iCloud Drive mounts itself (icloud-linux)."""
+    if account["provider"] == "icloud":
+        return cloud.ICLOUD_MOUNT
+    path, name = account_path(account), account["name"]
+    os.makedirs(path, exist_ok=True)
+    os.makedirs(ACCOUNT_ENVS, exist_ok=True)
+    with open(_account_env(account), "w") as f:
+        f.write(f"MOUNT_DIR={path}\nMOUNT_NAME={name}\n"
+                f"VAULT_EXCLUDE={'/' + vault.strip('/') + '/**' if vault else NO_VAULT}\n")
+    _set_indexed(path, False)
+    # No bookmark: Files lists a mount in the home folder on its own (with
+    # an eject button); a bookmark would show it twice. One left by an
+    # older version goes.
+    _set_bookmark(path, name, False)
+    unit = ACCOUNT_UNIT.format(account["id"])
+    for args in (("daemon-reload",), ("enable", unit), ("restart", unit)):
+        result = _systemctl(*args)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"systemctl {' '.join(args)}")
+    return path
+
+
+def unmount_account(account):
+    if account["provider"] == "icloud":
+        subprocess.run(["icloudctl", "stop"], capture_output=True)
+        return
+    _systemctl("disable", "--now", ACCOUNT_UNIT.format(account["id"]))
+    path = account_path(account)
+    _set_bookmark(path, account["name"], False)
+    _set_indexed(path, True)
+    try:
+        os.rmdir(path)  # only if empty, i.e. unmounted
+    except OSError:
+        pass
+    try:
+        os.remove(_account_env(account))
+    except FileNotFoundError:
+        pass
+
+
+def set_vault(account, vault):
+    """The backups' folder on the account (None: there's none any more),
+    hidden from its mount: remounted if it is mounted."""
+    if account["provider"] != "icloud" and account_mounted(account):
+        mount_account(account, vault)

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Cloud Config
+Comment=Connect your clouds and see them in Files
+Comment[it]=Collega i tuoi cloud e vedili in File
+Exec=live-cloud-config
+Icon=org.ubuntu.LiveCloudConfig
+Categories=GTK;GNOME;Settings;Network;
+Keywords=cloud;google drive;onedrive;dropbox;nextcloud;icloud;tailscale;
+Keywords[it]=cloud;google drive;onedrive;dropbox;nextcloud;icloud;tailscale;
+StartupNotify=true

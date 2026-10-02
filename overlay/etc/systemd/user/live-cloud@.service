@@ -1,0 +1,18 @@
+[Unit]
+Description=A cloud of Cloud Config in Files (rclone mount, see /usr/local/lib/live-backup/mount.py)
+ConditionPathExists=%h/.config/live-backup/mounts/%i.env
+
+[Service]
+Type=notify
+EnvironmentFile=%h/.config/live-backup/mounts/%i.env
+ExecStartPre=-/usr/bin/fusermount3 -uz "${MOUNT_DIR}"
+ExecStart=/usr/local/bin/rclone mount acct-%i: "${MOUNT_DIR}" \
+  --config=%h/.config/live-backup/rclone.conf \
+  --exclude="${VAULT_EXCLUDE}" --volname="${MOUNT_NAME}" \
+  --vfs-cache-mode=full --vfs-cache-max-size=5G --dir-cache-time=1m --poll-interval=1m
+ExecStop=/usr/bin/fusermount3 -uz "${MOUNT_DIR}"
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

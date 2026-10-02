@@ -17,8 +17,9 @@ be used to create more users. Besides the user it sets:
   - the user's GNOME settings (style, accent, Yaru variant, input source,
     region) in their dconf database, so the first login is already themed
   - git's user.name / user.email
-  - the Cloud Backup app at the first login (live-backup --first-run, which
-    removes itself from autostart once the backups are set up or put off)
+  - Cloud Config at the first login (live-cloud-config --first-run: the
+    network, Tailscale, the clouds; it removes itself from autostart and
+    opens Cloud Backup, live-backup --first-run, for the backups)
   - the user's picture (the avatar, when there is one), for GDM and GNOME
 and it takes the live user's admin rights away at once, turns GDM's
 autologin off and has live-retire-user.service delete the live user (with
@@ -211,12 +212,13 @@ region='{c['locale']}'
             f.write(keyfile)
         run("dconf", "compile", os.path.join(dconf_dir, "user"), tmp)
 
-    # The Cloud Backup app at the first login: where the encrypted backups go
+    # Cloud Config at the first login: the network, Tailscale, the clouds,
+    # then Cloud Backup (where the encrypted backups go)
     autostart = os.path.join(pw.pw_dir, ".config", "autostart")
     os.makedirs(autostart, exist_ok=True)
-    with open(os.path.join(autostart, "org.ubuntu.LiveBackup.desktop"), "w") as f:
-        f.write("[Desktop Entry]\nType=Application\nName=Cloud Backup\n"
-                "Exec=live-backup --first-run\nIcon=org.ubuntu.LiveBackup\n"
+    with open(os.path.join(autostart, "org.ubuntu.LiveCloudConfig.desktop"), "w") as f:
+        f.write("[Desktop Entry]\nType=Application\nName=Cloud Config\n"
+                "Exec=live-cloud-config --first-run\nIcon=org.ubuntu.LiveCloudConfig\n"
                 "X-GNOME-Autostart-Delay=3\nNoDisplay=true\n")
 
     # git
