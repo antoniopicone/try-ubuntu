@@ -2,7 +2,7 @@
 # and info pages, or translations but those of the languages the image
 # offers (LANGPACKS in desktop-gnome.sh). Ubuntu's language packs only carry
 # what Ubuntu itself builds in main: the universe apps (GNOME Software...)
-# and the GNOME 51 backport keep theirs in their own packages.
+# keep theirs in their own packages.
 path-exclude=/usr/share/doc/*
 path-include=/usr/share/doc/*/copyright
 path-exclude=/usr/share/man/*

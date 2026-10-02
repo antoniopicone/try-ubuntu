@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Builds a minimal live Ubuntu ISO, dist/ubuntu-live-<arch>[-hardware].iso:
-# Ubuntu 26.04 LTS with a minimal GNOME 51 (backported from 26.10, compiled
-# once) and GDM, EFI boot and a btrfs root with the subvolumes @, @home,
+# Ubuntu 26.04 LTS with a minimal GNOME 50 (26.04's own) and GDM, EFI boot and a btrfs root with the subvolumes @, @home,
 # @var and @snapshots.
 #
 # Two flavours: for QEMU (the default: the "virtual" kernel cut down to what
@@ -12,7 +11,7 @@
 # Runs on macOS (Apple Silicon) through podman: the build happens inside a
 # privileged Ubuntu container of the ISO's architecture. arm64 is native on
 # Apple Silicon; amd64 (--arch x86) runs emulated in the podman machine
-# (qemu-user), which is slow: the first GNOME build takes hours. Also works
+# (qemu-user), which is slow. Also works
 # on a Linux host with podman, natively for its own architecture.
 set -euo pipefail
 
@@ -31,8 +30,8 @@ Usage: ./build.sh [--arch arm|x86] [--hardware] [--xkb LAYOUT] [--oauth-clients 
                   "onedrive": {...}, "dropbox": {...}} (any of them).
                  Without one, Google Drive, OneDrive and Dropbox use
                  rclone's, which Google often rate-limits
-  --clean        drop the build cache of that architecture (GNOME backport,
-                 rootfs)
+  --clean        drop the build cache of that architecture (rebuilt GNOME
+                 packages, rootfs)
 EOF
 }
 
@@ -65,11 +64,12 @@ while (($#)); do
   esac
 done
 
-# Per architecture: the builder image and the cache (the GNOME backport's
-# .debs are arm64 or amd64). The arm64 ones keep their old names.
+# Per architecture: the builder image and the cache (the rebuilt GNOME
+# .debs are arm64 or amd64). The arm64 ones keep their old names. The cache
+# is GNOME 50's own: the GNOME 51 builds (branch main) keep theirs.
 builder_image() { [[ $1 == arm64 ]] && echo try-ubuntu-builder || echo "try-ubuntu-builder-$1"; }
 image=$(builder_image "$arch")
-cache_volume=try-ubuntu-cache
+cache_volume=try-ubuntu-gnome50-cache
 if [[ $arch == amd64 ]]; then
   cache_volume+=-amd64
 fi

@@ -1,7 +1,7 @@
 # Builder image for the live ISO. Runs natively on arm64 (Apple Silicon
 # podman machine), so debootstrap/chroot need no emulation. It also builds
-# the GNOME 51 backport (Debian source packages; build-gnome.sh installs
-# their build dependencies).
+# the GNOME packages with local fixes (Debian source packages;
+# build-gnome.sh installs their build dependencies).
 FROM docker.io/library/ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
