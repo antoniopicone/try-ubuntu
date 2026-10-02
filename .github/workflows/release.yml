@@ -16,6 +16,9 @@ jobs:
   iso:
     name: ISO (${{ matrix.arch }})
     strategy:
+      # One architecture failing doesn't cancel the other's build (hours, and
+      # its GNOME backport cache)
+      fail-fast: false
       matrix:
         include:
           - arch: arm64

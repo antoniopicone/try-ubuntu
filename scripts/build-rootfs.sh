@@ -309,16 +309,21 @@ in_chroot update-alternatives --set default.plymouth "$spinner"
 # Tailscale manages its own interface. ufw only writes its rule files here.
 # ufw asks iptables for its version first: iptables-nft can't answer under
 # qemu-user (an emulated build, e.g. amd64 on Apple Silicon, has no
-# netfilter netlink), iptables-legacy can. The rule files are the same
-# either way; nft is back right after.
-in_chroot update-alternatives --quiet --set iptables /usr/sbin/iptables-legacy
-in_chroot update-alternatives --quiet --set ip6tables /usr/sbin/ip6tables-legacy
+# netfilter netlink), iptables-legacy can. Only there: legacy wants the
+# host kernel's ip6_tables module, which a CI runner's kernel lacks. The
+# rule files are the same either way; nft is back right after.
+if ((EMULATED)); then
+  in_chroot update-alternatives --quiet --set iptables /usr/sbin/iptables-legacy
+  in_chroot update-alternatives --quiet --set ip6tables /usr/sbin/ip6tables-legacy
+fi
 in_chroot ufw --force default deny incoming >/dev/null
 in_chroot ufw --force default allow outgoing >/dev/null
 in_chroot ufw allow 22/tcp comment ssh >/dev/null
 in_chroot ufw allow 5353/udp comment mdns >/dev/null
-in_chroot update-alternatives --quiet --set iptables /usr/sbin/iptables-nft
-in_chroot update-alternatives --quiet --set ip6tables /usr/sbin/ip6tables-nft
+if ((EMULATED)); then
+  in_chroot update-alternatives --quiet --set iptables /usr/sbin/iptables-nft
+  in_chroot update-alternatives --quiet --set ip6tables /usr/sbin/ip6tables-nft
+fi
 sed -i 's/^ENABLED=.*/ENABLED=yes/' "$ROOTFS/etc/ufw/ufw.conf"
 
 # Rootless podman: subordinate ids for the live user.
