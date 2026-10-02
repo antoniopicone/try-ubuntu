@@ -1,0 +1,69 @@
+From: Live ISO builder <live@localhost>
+Subject: A cloud in the sidebar for the clouds' FUSE mounts
+
+gvfs gives every mount without a volume, as FUSE mounts in the home folder
+are, the symbolic icon of a removable drive. The clouds that Cloud Config
+mounts with rclone (device "live-cloud:<id>") and icloud-linux's iCloud
+Drive (fuse.icloud) get live-cloud-symbolic instead, rclone's other mounts
+(Samba, SFTP) folder-remote-symbolic.
+---
+--- a/src/nautilus-sidebar.c
++++ b/src/nautilus-sidebar.c
+@@ -18,6 +18,7 @@
+ #include "nautilus-enum-types.h"
+ 
+ #include <gio/gio.h>
++#include <gio/gunixmounts.h>
+ #ifdef HAVE_CLOUDPROVIDERS
+ #include <cloudproviders.h>
+ #endif
+@@ -349,7 +350,40 @@
+     {
+         separator = gtk_separator_new (GTK_ORIENTATION_HORIZONTAL);
+         gtk_list_box_row_set_header (row, separator);
++    }
++}
++
++/* The FUSE mounts of the clouds (rclone's with the device "live-cloud:<id>",
++ * and icloud-linux's) get a cloud: gvfs gives every mount without a volume a
++ * removable drive. rclone's other mounts (Samba, SFTP) get a network folder. */
++static GIcon *
++get_mount_symbolic_icon (GMount *mount,
++                         GFile  *root)
++{
++    g_autofree char *path = g_file_get_path (root);
++    g_autoptr (GUnixMountEntry) entry = NULL;
++    const char *fs_type;
++
++    if (path != NULL)
++    {
++        entry = g_unix_mount_entry_at (path, NULL);
++    }
++    if (entry != NULL)
++    {
++        fs_type = g_unix_mount_entry_get_fs_type (entry);
++        if (g_strcmp0 (fs_type, "fuse.icloud") == 0 ||
++            (g_strcmp0 (fs_type, "fuse.rclone") == 0 &&
++             g_str_has_prefix (g_unix_mount_entry_get_device_path (entry), "live-cloud:")))
++        {
++            return g_themed_icon_new ("live-cloud-symbolic");
++        }
++        if (g_strcmp0 (fs_type, "fuse.rclone") == 0)
++        {
++            return g_themed_icon_new ("folder-remote-symbolic");
++        }
+     }
++
++    return g_mount_get_symbolic_icon (mount);
+ }
+ 
+ static GtkWidget *
+@@ -995,7 +1029,7 @@
+             continue;
+         }
+ 
+-        start_icon = g_mount_get_symbolic_icon (mount);
++        start_icon = get_mount_symbolic_icon (mount, root);
+         mount_uri = g_file_get_uri (root);
+         name = g_mount_get_name (mount);
+         tooltip = g_file_get_parse_name (root);

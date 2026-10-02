@@ -719,9 +719,11 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
     unit at every login
     ([live-cloud@.service](overlay/etc/systemd/user/live-cloud@.service),
     [mount.py](overlay/usr/local/lib/live-backup/mount.py)), with its place
-    in the sidebar (Files lists a mount in the home folder by itself). So is Cloud Backup's own Samba or SFTP destination
-    (`~/SFTP (anna@server)`,
-    [live-cloud-mount.service](overlay/etc/systemd/user/live-cloud-mount.service)).
+    in the sidebar (Files lists a mount in the home folder by itself),
+    with a cloud for icon (see the Nautilus patch below). So is Cloud
+    Backup's own Samba or SFTP destination (`~/SFTP (anna@server)`,
+    [live-cloud-mount.service](overlay/etc/systemd/user/live-cloud-mount.service)),
+    with a network folder.
     Files are fetched when opened and cached in `~/.cache/rclone`. The
     backups' encrypted folder is hidden from the mount it's on, and
     localsearch is kept out of every mount (it would download the whole
@@ -854,12 +856,20 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
     apt repository (`/cache/gnome-repo` in the podman volume), and the next
     ones build against it.
   - Local fixes in [patches/gnome/](patches/gnome/)`<source>/` go on top
-    of the package's own patches. Right now there's one:
-    [gdm3](patches/gnome/gdm3/fix-fallback-session-double-free.patch).
-    Ubuntu's `prefer_ubuntu_session_fallback.patch` frees the fallback
-    session name twice when there is no `ubuntu` session, so without the fix
-    gdm aborts as soon as someone starts to log in on an image that only has
-    the vanilla GNOME session.
+    of the package's own patches:
+    - [gdm3](patches/gnome/gdm3/fix-fallback-session-double-free.patch):
+      Ubuntu's `prefer_ubuntu_session_fallback.patch` frees the fallback
+      session name twice when there is no `ubuntu` session, so without the
+      fix gdm aborts as soon as someone starts to log in on an image that
+      only has the vanilla GNOME session.
+    - [nautilus](patches/gnome/nautilus/cloud-mount-icon.patch): gvfs gives
+      every FUSE mount in the home folder a removable drive for icon. The
+      sidebar shows a cloud
+      ([live-cloud-symbolic](overlay/usr/local/share/icons/hicolor/scalable/apps/live-cloud-symbolic.svg),
+      as in the mockups) for the clouds' mounts instead: rclone's with the
+      device `live-cloud:<id>` (`--devname`), and icloud-linux's
+      (`fuse.icloud`). rclone's
+      other mounts (Samba, SFTP) get a network folder.
   - The rootfs installs from that repository, which is mounted only for the
     build, and the build fails unless the core is at version 51.
   - It takes ~1–2 hours the first time. After that, it's skipped for as long

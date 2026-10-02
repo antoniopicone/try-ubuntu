@@ -91,7 +91,7 @@ STRINGS = {
 }
 
 
-def t(key, **kw):
+def t(key, /, **kw):
     lang = os.environ.get("LANG", "")[:2]
     return STRINGS.get(lang, STRINGS["en"]).get(key, STRINGS["en"][key]).format(**kw)
 

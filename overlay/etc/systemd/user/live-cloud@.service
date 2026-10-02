@@ -6,7 +6,9 @@ ConditionPathExists=%h/.config/live-backup/mounts/%i.env
 Type=notify
 EnvironmentFile=%h/.config/live-backup/mounts/%i.env
 ExecStartPre=-/usr/bin/fusermount3 -uz "${MOUNT_DIR}"
-ExecStart=/usr/local/bin/rclone mount acct-%i: "${MOUNT_DIR}" \
+# The device name tells Files it's a cloud: it shows a cloud for it
+# (patches/gnome/nautilus).
+ExecStart=/usr/local/bin/rclone mount acct-%i: "${MOUNT_DIR}" --devname=live-cloud:%i \
   --config=%h/.config/live-backup/rclone.conf \
   --exclude="${VAULT_EXCLUDE}" --volname="${MOUNT_NAME}" \
   --vfs-cache-mode=full --vfs-cache-max-size=5G --dir-cache-time=1m --poll-interval=1m
