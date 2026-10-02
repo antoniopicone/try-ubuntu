@@ -5,6 +5,7 @@ Run as root through pkexec (org.ubuntu.live-welcome.setup-user), with the
 choices as JSON on stdin:
 
   {"fullname": "...", "username": "...", "password": "...", "email": "...",
+   "hostname": "ubuntu-laptop-anna",
    "locale": "it_IT.UTF-8", "layout": "it" | "us:intl",
    "color_scheme": "default" | "prefer-dark", "accent": "blue" | ...,
    "avatar": "<base64 PNG>" | ""}
@@ -65,8 +66,8 @@ def run(*cmd, stdin=None):
 
 
 def validate(c):
-    for key in ("fullname", "username", "password", "email", "locale", "layout",
-                "color_scheme", "accent"):
+    for key in ("fullname", "username", "password", "email", "hostname", "locale",
+                "layout", "color_scheme", "accent"):
         if not isinstance(c.get(key), str):
             fail(f"missing {key}")
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", c["username"]):
@@ -82,6 +83,8 @@ def validate(c):
         fail("invalid password")
     if c["email"] and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", c["email"]):
         fail("invalid email")
+    if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", c["hostname"]):
+        fail("invalid computer name")
     if c["locale"] not in LOCALES:
         fail("unsupported language")
     if not re.fullmatch(r"[a-z]{2,3}(:[a-z0-9_]+)?", c["layout"]):
@@ -155,6 +158,14 @@ def main():
                 f.write(f"{user}:{next_subid(path)}:65536\n")
     pw = pwd.getpwnam(user)
 
+    # The computer's name, and the loopback name it resolves to
+    run("hostnamectl", "set-hostname", c["hostname"])
+    hosts = open("/etc/hosts").read().splitlines() if os.path.exists("/etc/hosts") else []
+    hosts = [l for l in hosts if not l.startswith("127.0.1.1")]
+    hosts.insert(1 if hosts else 0, f"127.0.1.1\t{c['hostname']}")
+    with open("/etc/hosts", "w") as f:
+        f.write("\n".join(hosts) + "\n")
+
     # Language and keyboard, system-wide (GDM, consoles) and for the user
     layout, _, variant = c["layout"].partition(":")
     run("localectl", "set-locale", f"LANG={c['locale']}")
@@ -213,6 +224,11 @@ region='{c['locale']}'
         with open(os.path.join(pw.pw_dir, ".gitconfig"), "w") as f:
             f.write(f"[user]\n\tname = {c['fullname'].strip()}\n\temail = {c['email']}\n"
                     "[init]\n\tdefaultBranch = main\n")
+    # The default apps, the system's (/etc/xdg/mimeapps.list: Brave Origin,
+    # Files), set as the user's own too, as GNOME Settings writes them: what
+    # Brave checks before asking to become the default browser.
+    with open(os.path.join(pw.pw_dir, ".config", "mimeapps.list"), "w") as f:
+        f.write(open("/etc/xdg/mimeapps.list").read())
     run("chown", "-R", f"{pw.pw_uid}:{pw.pw_gid}", os.path.join(pw.pw_dir, ".config"))
     if c["email"]:
         os.chown(os.path.join(pw.pw_dir, ".gitconfig"), pw.pw_uid, pw.pw_gid)

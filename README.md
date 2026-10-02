@@ -155,7 +155,8 @@ theme) all come along, and the live medium is no longer needed: its
 loops are detached and it's unmounted. Then:
 
 - `/etc/fstab` mounts `@`, `@home`, `@var` and `@snapshots` from the
-  partition, and the EFI system partition on `/boot/efi`.
+  partition, and the EFI system partition on `/boot/efi`. The btrfs
+  filesystem (and its GPT partition) is named `Ubuntu-root`.
 - The kernel the ISO booted goes back in `/boot` (the ISO keeps it as
   `live/vmlinuz`), with an initramfs for booting from disk
   (`update-initramfs`).
@@ -230,8 +231,11 @@ The ISO would be much larger without these measures:
 
 - The package set is chosen by hand (see Base above), with no
   recommends.
-- dpkg path-excludes skip docs, man pages, info pages, translations and
-  Qt translations ([overlay/etc/dpkg/dpkg.cfg.d](overlay/etc/dpkg/dpkg.cfg.d/01-live-excludes)).
+- dpkg path-excludes skip docs, man pages, info pages, Qt translations and
+  every translation except those of the image's languages
+  ([overlay/etc/dpkg/dpkg.cfg.d](overlay/etc/dpkg/dpkg.cfg.d/01-live-excludes)).
+  Ubuntu's language packs only cover what Ubuntu builds in main: universe
+  apps (GNOME Software...) and the GNOME 51 backport ship their own.
 - Kernel modules are cut down to filesystems, networking, crypto, virtio,
   USB/HID/SCSI/NVMe, the virtio-gpu DRM driver and virtio-sound. Other
   sound cards, other GPUs, wireless/ethernet NICs and media drivers are
@@ -573,7 +577,11 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   2. **Keyboard layout**, with a test field. The live session switches to
      it as you pick.
   3. **Account**: full name, username (suggested from the name), password
-     twice, and email, with validation.
+     twice, email and the computer's name, with validation. The name is
+     suggested as `ubuntu-<vm|laptop|desktop>-<username>`
+     (`systemd-detect-virt`, then the DMI chassis type), e.g.
+     `ubuntu-laptop-anna`, and setup-user sets it (`hostnamectl`,
+     `/etc/hosts`).
   4. **Picture**: an avatar in one of DiceBear's CC0 styles (Open Peeps,
      Lorelei, Notionists, Pixel Art, Thumbs), random at first. Arrows change
      each part (hair, eyes, beard…) and swatches its colors. Or you can
@@ -608,7 +616,16 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   
   The session then logs out to GDM, where only the new user is listed.
 - **Cloud Backup** ([live-backup](overlay/usr/local/bin/live-backup)) opens by
-  itself at the new user's first login. It asks where to keep your data,
+  itself at the new user's first login
+  ([netsetup.py](overlay/usr/local/lib/live-backup/netsetup.py)). First it
+  checks the network (NetworkManager's connectivity). Without one, it asks
+  to plug in a cable when the computer has a wired port, and lists the
+  Wi-Fi networks when it has Wi-Fi: pick one, type its password, and
+  `nmcli` connects. It goes on by itself once the network is up. Then it
+  explains Tailscale in two lines and offers to add the computer to your
+  tailnet. `pkexec tailscale up --operator=<you>` opens the sign-in page in
+  the browser, and the app waits for it. It skips this when the computer
+  is already on a tailnet. Then it asks where to keep your data,
   documents and preferences safe, and signs in to it by itself
   ([providers.py](overlay/usr/local/lib/live-backup/providers.py)), without
   GNOME Online Accounts:
@@ -671,8 +688,8 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
     square).
   - **In the top bar**, a GNOME Shell extension
     ([cloud-backup@ubuntu-live](overlay/usr/share/gnome-shell/extensions/cloud-backup@ubuntu-live/extension.js),
-    on by default) shows the backups' state: the cloud with an arrow going
-    up while one runs, with "!" when the last one failed. Its menu has the
+    on by default) shows the backups' state: a plain cloud, the cloud with
+    an arrow going up while one runs, with "!" when the last one failed. Its menu has the
     backup in progress (percentage, files, size, time left: run-backup
     writes restic's progress to `~/.local/state/live-backup/progress.json`
     every second) or the last one, "Back Up Now" and "Open Cloud Backup".
@@ -829,11 +846,29 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   - the wallpaper
   - the Yaru icons
   - the enabled extensions
-  - the dash favorites (Nautilus, Brave Origin, Ghostty, Software)
+  - the dash favorites (Nautilus, Brave Origin, Ghostty, Software, Resources)
+  - traditional scrolling (not "natural"), for mice and touchpads
   - the extensions' settings
   - no welcome tour
 
   AccountsService preselects the `gnome` session.
+- **GNOME Software's catalogue**: the image ships without apt's package
+  lists, so without the app catalogue (DEP-11, read by `appstream`) that
+  comes with them. At every boot, once the network is up,
+  [live-software-refresh](overlay/usr/local/sbin/live-software-refresh)
+  runs `apt-get update` and `flatpak update --appstream`. Without the
+  network, it tries again every minute.
+- **Spinners**: when the desktop renders in software (a VM without GPU
+  acceleration), GNOME Shell turns animations off, and libadwaita 1.9's
+  `Adw.Spinner` stays frozen on its first frame even with animations
+  forced back on in the app. The live system's apps (welcome, Cloud
+  Backup, Previous Versions) use
+  [livespinner](overlay/usr/local/lib/live-common/livespinner.py) instead,
+  which draws itself on every frame tick.
+- **Default browser**: setup-user writes the system's default apps (Brave
+  Origin) into the new user's `~/.config/mimeapps.list`. A restore drops
+  the lines of the backup's `mimeapps.list` that name apps not installed
+  here, such as an older image's browser, so the system's defaults apply.
 - **Network**: NetworkManager manages every device through
   [overlay/etc/netplan](overlay/etc/netplan/01-network-manager-all.yaml),
   as on Ubuntu Desktop, so the network menu and Settings work.

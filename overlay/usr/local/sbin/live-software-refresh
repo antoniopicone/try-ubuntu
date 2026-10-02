@@ -1,0 +1,12 @@
+#!/bin/sh
+# live-software-refresh: GNOME Software's catalogue at every boot, once the
+# network is up (live-software-refresh.service). The image ships without
+# apt's package lists (removed at build time) and so without the app
+# catalogue appstream reads from them (DEP-11): GNOME Software would say
+# "No App Data Found". apt-get update brings both; Flathub's metadata comes
+# with flatpak update --appstream. Without the network it fails, and the
+# unit tries again a minute later.
+set -u
+apt-get update -q || exit 1
+appstreamcli refresh-cache --force >/dev/null 2>&1 || true
+flatpak update --appstream --noninteractive >/dev/null 2>&1 || true

@@ -29,6 +29,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
+sys.path.insert(0, "/usr/local/lib/live-common")
+import livespinner  # noqa: E402
+
 APP_ID = "org.ubuntu.LiveFileVersions"
 HOME_ROOT = "/home"
 SNAPSHOTS = "/home/.snapshots"
@@ -167,8 +170,7 @@ class VersionsWindow(Adw.ApplicationWindow):
         self.view.set_content(Adw.StatusPage(icon_name=icon, title=title, description=body))
 
     def _load(self):
-        self.view.set_content(Adw.Spinner(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER,
-                                          width_request=32, height_request=32))
+        self.view.set_content(livespinner.Spinner(size=32))
         is_dir = os.path.isdir(self.path)
 
         def work():

@@ -35,7 +35,9 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 sys.path.insert(0, "/usr/local/lib/live-welcome")
+sys.path.insert(0, "/usr/local/lib/live-common")
 import avatars  # noqa: E402
+import livespinner  # noqa: E402
 
 APP_ID = "org.ubuntu.LiveWelcome"
 SETUP_HELPER = "/usr/local/lib/live-welcome/setup-user"
@@ -93,6 +95,9 @@ STRINGS = {
         "password": "Password",
         "password2": "Confirm password",
         "email": "Email (used by git and other services)",
+        "hostname": "Computer name",
+        "err_hostname": "Computer name: lowercase letters, digits and '-', up to 63 characters.",
+        "row_hostname": "Computer name",
         "err_fullname": "Enter your full name.",
         "err_username": "Username: lowercase letters, digits, '-' and '_', starting with a letter.",
         "err_username_taken": "This username is already taken.",
@@ -195,6 +200,9 @@ STRINGS = {
         "password": "Password",
         "password2": "Conferma la password",
         "email": "Email (per git e altri servizi)",
+        "hostname": "Nome del computer",
+        "err_hostname": "Nome del computer: lettere minuscole, cifre e '-', fino a 63 caratteri.",
+        "row_hostname": "Nome del computer",
         "err_fullname": "Inserisci nome e cognome.",
         "err_username": "Nome utente: lettere minuscole, cifre, '-' e '_', a partire da una lettera.",
         "err_username_taken": "Questo nome utente è già in uso.",
@@ -295,6 +303,23 @@ def username_from(fullname):
     return name if re.match(r"[a-z]", name or "") else ""
 
 
+def machine_kind():
+    """vm, laptop or desktop: for the suggested computer name."""
+    if subprocess.run(["systemd-detect-virt", "--quiet"]).returncode == 0:
+        return "vm"
+    try:
+        chassis = int(open("/sys/class/dmi/id/chassis_type").read().strip())
+    except (OSError, ValueError):
+        return "desktop"
+    # SMBIOS chassis types: portable, laptop, notebook, hand held, sub
+    # notebook, tablet, convertible, detachable
+    return "laptop" if chassis in (8, 9, 10, 11, 14, 30, 31, 32) else "desktop"
+
+
+def hostname_for(username):
+    return f"ubuntu-{machine_kind()}-{username}" if username else ""
+
+
 def user_exists(name):
     try:
         import pwd
@@ -317,6 +342,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
         self.accent = self.interface.get_string("accent-color")
         self._translatable = []  # (setter, key)
         self._username_edited = False
+        self._hostname_edited = False
         self.styles = avatars.load_styles()
         # Installing: the disks it can go on (None until listed, [] for none),
         # the chosen one, and whether it's done (then the live medium is gone)
@@ -556,14 +582,16 @@ class WelcomeWindow(Adw.ApplicationWindow):
         self.password = Adw.PasswordEntryRow()
         self.password2 = Adw.PasswordEntryRow()
         self.email = Adw.EntryRow(input_purpose=Gtk.InputPurpose.EMAIL)
+        self.hostname = Adw.EntryRow()
         for row, key in ((self.fullname, "fullname"), (self.username, "username"),
                          (self.password, "password"), (self.password2, "password2"),
-                         (self.email, "email")):
+                         (self.email, "email"), (self.hostname, "hostname")):
             self._tr(row.set_title, key)
             row.set_activates_default(True)
             group.add(row)
             row.connect("changed", self._on_account_changed)
         self.username.connect("changed", self._on_username_edited)
+        self.hostname.connect("changed", self._on_hostname_edited)
         self.account_error = Gtk.Label(wrap=True, xalign=0, margin_top=12)
         self.account_error.add_css_class("error")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -622,8 +650,8 @@ class WelcomeWindow(Adw.ApplicationWindow):
     def _page_summary(self):
         group = self._group("summary_title", "summary_body")
         self.summary_rows = {}
-        keys = ["row_name", "row_username", "row_email", "row_language", "row_keyboard",
-                "row_theme"]
+        keys = ["row_name", "row_username", "row_email", "row_hostname", "row_language",
+                "row_keyboard", "row_theme"]
         if self.styles:
             keys.insert(3, "row_picture")
         for key in keys:
@@ -644,7 +672,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
 
     def _page_finish(self):
         self.finish_status = Adw.StatusPage(vexpand=True)
-        self.spinner = Adw.Spinner(width_request=48, height_request=48)
+        self.spinner = livespinner.Spinner(size=48)
         self.retry = Gtk.Button(halign=Gtk.Align.CENTER, visible=False)
         self.retry.add_css_class("pill")
         self._tr(self.retry.set_label, "retry")
@@ -829,11 +857,19 @@ class WelcomeWindow(Adw.ApplicationWindow):
         if row.get_text() != username_from(self.fullname.get_text()):
             self._username_edited = True
 
+    def _on_hostname_edited(self, row):
+        if row.get_text() != hostname_for(self.username.get_text()):
+            self._hostname_edited = True
+
     def _on_account_changed(self, row):
         if row is self.fullname and not self._username_edited:
             self.username.handler_block_by_func(self._on_username_edited)
             self.username.set_text(username_from(row.get_text()))
             self.username.handler_unblock_by_func(self._on_username_edited)
+        if row in (self.fullname, self.username) and not self._hostname_edited:
+            self.hostname.handler_block_by_func(self._on_hostname_edited)
+            self.hostname.set_text(hostname_for(self.username.get_text()))
+            self.hostname.handler_unblock_by_func(self._on_hostname_edited)
         self._update()
 
     def _account_error(self, show_all=True):
@@ -843,6 +879,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
         username = self.username.get_text()
         password, password2 = self.password.get_text(), self.password2.get_text()
         email = self.email.get_text().strip()
+        hostname = self.hostname.get_text().strip()
         checks = [
             (fullname, not fullname or re.search(r"[:,]", fullname), "err_fullname"),
             (username, not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", username), "err_username"),
@@ -850,6 +887,8 @@ class WelcomeWindow(Adw.ApplicationWindow):
             (password, len(password) < 6, "err_password"),
             (password2, password != password2, "err_password2"),
             (email, not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email), "err_email"),
+            (hostname, not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", hostname),
+             "err_hostname"),
         ]
         for value, bad, key in checks:
             if bad and (show_all or value):
@@ -862,6 +901,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
             "username": self.username.get_text(),
             "password": self.password.get_text(),
             "email": self.email.get_text().strip(),
+            "hostname": self.hostname.get_text().strip(),
             "locale": dict((l[0], l[2]) for l in LANGUAGES)[self.lang],
             "layout": self.layout,
             "color_scheme": self.color_scheme,
@@ -878,6 +918,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
             "row_name": c["fullname"],
             "row_username": c["username"],
             "row_email": c["email"],
+            "row_hostname": c["hostname"],
             "row_picture": self.avatar_editor.title if self._avatar_png() else self.t("initials"),
             "row_language": dict((l[0], l[1]) for l in LANGUAGES)[self.lang],
             "row_keyboard": dict(LAYOUTS)[self.layout],

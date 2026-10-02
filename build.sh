@@ -73,7 +73,10 @@ cache_volume=try-ubuntu-cache
 if [[ $arch == amd64 ]]; then
   cache_volume+=-amd64
 fi
-iso_name=ubuntu-live-$arch$( ((hardware)) && echo -hardware).iso
+iso_name=ubuntu-live-$arch.iso
+if ((hardware)); then
+  iso_name=ubuntu-live-$arch-hardware.iso
+fi
 case $arch in
   arm64) mirror=http://ports.ubuntu.com/ubuntu-ports ;;
   amd64) mirror=http://archive.ubuntu.com/ubuntu ;;

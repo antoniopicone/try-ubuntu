@@ -47,6 +47,7 @@ MARKER = "/etc/try-ubuntu/installed"
 ESP_MOUNT = "/boot/efi"
 LIMINE_UPDATE = "/usr/local/sbin/live-limine-update"
 ESP_TYPE = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+ROOT_LABEL = "Ubuntu-root"
 
 
 def out(**message):
@@ -161,7 +162,7 @@ def partition(disk, mode):
     esp_sectors = ESP_BYTES // sector
     if mode == "disk":
         run("wipefs", "-a", "-f", disk)
-        script = f'size={esp_sectors}, type=U, name="EFI"\ntype=L, name="Ubuntu"\n'
+        script = f'size={esp_sectors}, type=U, name="EFI"\ntype=L, name="Ubuntu-root"\n'
         run("sfdisk", "--wipe", "always", "--wipe-partitions", "always", "--label", "gpt", disk,
             input=script)
         parts = json.loads(run("sfdisk", "-J", disk))["partitiontable"]["partitions"]
@@ -174,7 +175,7 @@ def partition(disk, mode):
         if root_sectors * sector < MIN_BYTES - ESP_BYTES:
             raise RuntimeError("not enough free space")
         script = (f'start={esp_start}, size={esp_sectors}, type=U, name="EFI"\n'
-                  f'start={root_start}, size={root_sectors}, type=L, name="Ubuntu"\n')
+                  f'start={root_start}, size={root_sectors}, type=L, name="Ubuntu-root"\n')
         # The kernel may not reread a table in use (Windows' disk): partx
         # adds the new partitions anyway.
         subprocess.run(["sfdisk", "--append", "--no-reread", "--wipe-partitions", "always",
@@ -206,6 +207,8 @@ def move_system(root_part):
     finally:
         stop.set()
     out(step="copy", fraction=1.0)
+    # The live image's label (ubuntu-live-root) no longer fits
+    run("btrfs", "filesystem", "label", "/", ROOT_LABEL)
 
 
 def _read_only(device):

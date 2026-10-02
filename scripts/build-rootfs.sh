@@ -557,7 +557,9 @@ done
 find "$ROOTFS/usr/share/doc" -type f ! -name copyright -delete
 find "$ROOTFS/usr/share/doc" -type l -delete
 rm -rf "$ROOTFS"/usr/share/{man,info,lintian,linda}/* "$ROOTFS/usr/share/qt6/translations"
-find "$ROOTFS/usr/share/locale" -mindepth 1 -maxdepth 1 ! -name locale.alias -exec rm -rf {} +
+# What debootstrap unpacked before the excludes: the image's languages stay
+find "$ROOTFS/usr/share/locale" -mindepth 1 -maxdepth 1 ! -name locale.alias \
+  ! -name it ! -name es ! -name fr ! -name de ! -name pt ! -name pt_BR -exec rm -rf {} +
 find "$ROOTFS/usr" -name __pycache__ -type d -prune -exec rm -rf {} +
 
 # Nothing outside /home may belong to a regular user (see the overlay copy).

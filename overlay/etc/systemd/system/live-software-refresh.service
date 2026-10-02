@@ -1,0 +1,17 @@
+[Unit]
+Description=GNOME Software's catalogue: apt's lists and Flathub's metadata
+Documentation=file:/usr/local/sbin/live-software-refresh
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/live-software-refresh
+Restart=on-failure
+RestartSec=60
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

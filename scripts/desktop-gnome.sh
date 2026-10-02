@@ -83,8 +83,10 @@ DESKTOP_PACKAGES=(
   # the keyring (org.freedesktop.secrets: the backups' password, apps'
   # secrets), unlocked by the login password through GDM's PAM stack
   gnome-keyring libpam-gnome-keyring
-  # Flatpak apps (Flathub) in GNOME Software
-  gnome-software-plugin-flatpak
+  # Flatpak apps (Flathub) in GNOME Software, and the catalogue of the
+  # archive's apps it shows (appstream: DEP-11, fetched by apt-get update,
+  # see live-software-refresh)
+  gnome-software-plugin-flatpak appstream
   # Ubuntu's Yaru icons (every accent variant)
   yaru-theme-icon
   # GNOME's network menu and Settings talk to NetworkManager (through
@@ -127,6 +129,7 @@ desktop_install() {
            /usr/share/applications/org.gnome.Papers.desktop \
            /usr/share/applications/org.gnome.font-viewer.desktop \
            /usr/share/applications/org.gnome.TextEditor.desktop \
+           /usr/share/applications/net.nokyan.Resources.desktop \
            /usr/share/nautilus-python/extensions/ghostty.py \
            /usr/share/applications/org.gnome.Software.desktop \
            /usr/share/icons/Yaru-blue-dark/index.theme; do
@@ -234,6 +237,8 @@ desktop_configure() {
   in_chroot systemctl enable live-retire-user.service
   # The host's folder (run-qemu.sh --shared-folder) in /media, so in Files
   in_chroot systemctl enable live-shared-folder.service
+  # GNOME Software's catalogue, once the network is up
+  in_chroot systemctl enable live-software-refresh.service
 
   # The live user logs straight in (no GDM login screen) and gets the welcome
   # app. It creates the real user, turns this off and logs out to GDM.
@@ -285,8 +290,15 @@ monospace-font-name='JetBrainsMono Nerd Font Mono 11'
 
 [org.gnome.shell]
 enabled-extensions=['dash-to-dock@micxgx.gmail.com', 'kiwimenu@kemma', 'caffeine@patapon.info', 'Vitals@CoreCoding.com', 'Rounded_Corners@lennart-k', 'cloud-backup@ubuntu-live']
-favorite-apps=['org.gnome.Nautilus.desktop', '$browser_desktop', 'com.mitchellh.ghostty.desktop', 'org.gnome.Software.desktop']
+favorite-apps=['org.gnome.Nautilus.desktop', '$browser_desktop', 'com.mitchellh.ghostty.desktop', 'org.gnome.Software.desktop', 'net.nokyan.Resources.desktop']
 welcome-dialog-last-shown-version='999'
+
+# Traditional scrolling (content follows the scroll bar), mouse and touchpad
+[org.gnome.desktop.peripherals.mouse]
+natural-scroll=false
+
+[org.gnome.desktop.peripherals.touchpad]
+natural-scroll=false
 
 # Ubuntu's dash: a full-height panel on the left, "Show Apps" at the bottom,
 # no overview at login.

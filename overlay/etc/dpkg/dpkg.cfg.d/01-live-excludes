@@ -1,5 +1,8 @@
 # Keep the live image small: no documentation (copyright notices stay), man
-# and info pages, or translations.
+# and info pages, or translations but those of the languages the image
+# offers (LANGPACKS in desktop-gnome.sh). Ubuntu's language packs only carry
+# what Ubuntu itself builds in main: the universe apps (GNOME Software...)
+# and the GNOME 51 backport keep theirs in their own packages.
 path-exclude=/usr/share/doc/*
 path-include=/usr/share/doc/*/copyright
 path-exclude=/usr/share/man/*
@@ -7,4 +10,10 @@ path-exclude=/usr/share/info/*
 path-exclude=/usr/share/lintian/*
 path-exclude=/usr/share/locale/*
 path-include=/usr/share/locale/locale.alias
+path-include=/usr/share/locale/it/*
+path-include=/usr/share/locale/es/*
+path-include=/usr/share/locale/fr/*
+path-include=/usr/share/locale/de/*
+path-include=/usr/share/locale/pt/*
+path-include=/usr/share/locale/pt_BR/*
 path-exclude=/usr/share/qt6/translations/*

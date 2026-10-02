@@ -175,6 +175,7 @@ def restore(config, env, snapshot, on_progress=lambda fraction: None, remote=clo
     err = proc.stderr.read()
     if proc.wait() != 0:
         raise RuntimeError(err.strip() or "restic restore")
+    _drop_missing_defaults(home)
     problems = []
     for kind, step in (("gnome", _restore_dconf), ("picture", _restore_face)):
         try:
@@ -183,6 +184,35 @@ def restore(config, env, snapshot, on_progress=lambda fraction: None, remote=clo
             problems.append(kind)
     on_progress(1.0)
     return problems
+
+
+def _drop_missing_defaults(home):
+    """The backup's default apps (~/.config/mimeapps.list) may name apps that
+    aren't installed here (an older image's browser): those lines go, so the
+    system's defaults (Brave Origin...) apply instead of whatever GNOME
+    would pick."""
+    path = os.path.join(home, ".config", "mimeapps.list")
+    try:
+        lines = open(path).read().splitlines()
+    except OSError:
+        return
+    dirs = [os.path.join(home, ".local/share/applications"), "/usr/share/applications",
+            "/usr/local/share/applications", "/var/lib/flatpak/exports/share/applications",
+            os.path.join(home, ".local/share/flatpak/exports/share/applications")]
+
+    def installed(desktop_id):
+        return any(os.path.exists(os.path.join(d, desktop_id)) for d in dirs)
+    kept = []
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep and not line.startswith(("[", "#")):
+            ids = [i for i in value.split(";") if i and installed(i)]
+            if not ids:
+                continue
+            line = f"{key}={';'.join(ids)};" if value.endswith(";") else f"{key}={';'.join(ids)}"
+        kept.append(line)
+    with open(path, "w") as f:
+        f.write("\n".join(kept) + "\n")
 
 
 def _restore_dconf(config, env, snapshot, remote, home):

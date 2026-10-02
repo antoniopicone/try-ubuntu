@@ -38,8 +38,11 @@ gi.require_version("PangoCairo", "1.0")
 from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango, PangoCairo  # noqa: E402
 
 sys.path.insert(0, "/usr/local/lib/live-backup")
+sys.path.insert(0, "/usr/local/lib/live-common")
 import apps  # noqa: E402
 import cloud  # noqa: E402
+import livespinner  # noqa: E402
+import netsetup  # noqa: E402
 import mount  # noqa: E402
 import providers  # noqa: E402
 import restore  # noqa: E402
@@ -61,6 +64,32 @@ DESTINATIONS = [
 STRINGS = {
     "en": {
         "title": "Cloud Backup",
+        "net_title": "Connect to the Internet",
+        "net_body": "The backups go online: connect this computer to the Internet first.",
+        "net_cable": "Plug in a network cable",
+        "net_cable_body": "This computer has a wired network port: it connects by itself",
+        "net_wifi": "Wi-Fi networks",
+        "net_wifi_body": "Pick yours",
+        "net_scanning": "Looking for Wi-Fi networks…",
+        "net_none": "No Wi-Fi networks in range",
+        "net_refresh": "Look Again",
+        "net_skip": "Continue Without Network",
+        "net_password_title": "Password for {ssid}",
+        "net_password_body": "The network's password (often on the router).",
+        "net_connect": "Connect",
+        "net_connecting": "Connecting to {ssid}…",
+        "net_failed": "Couldn't connect to {ssid}: {error}",
+        "net_secure": "Protected",
+        "net_open": "Open",
+        "ts_title": "Tailscale",
+        "ts_body": "Tailscale puts your devices in a private network of their own, encrypted end to end: wherever you are, you reach this computer (SSH, files, apps) as if you were next to it, with no ports to open on the router.\n\nDo you have a Tailscale account, and should this computer join your network?",
+        "ts_add": "Add to My Tailscale Network",
+        "ts_later": "Not Now",
+        "ts_wait": "Sign in to Tailscale in the browser that just opened, and approve this computer.",
+        "ts_again": "Open the Browser Again",
+        "ts_cancel": "Cancel",
+        "ts_done": "This computer is on your Tailscale network.",
+        "ts_failed": "Tailscale couldn't add this computer: {error}",
         "choose_title": "Keep Your Data Safe",
         "choose_body": "Now let's choose a place where to keep your data, documents and "
                        "preferences safe:",
@@ -167,6 +196,7 @@ STRINGS = {
         "key_saved": "I've kept the key somewhere safe",
         "copied": "Copied: paste it somewhere safe, then clear the clipboard.",
         "saved_to": "Saved to {path}: keep it away from this computer.",
+        "save_failed": "Couldn't save the key: {error}",
         "key_file_name": "Cloud Backup recovery key.txt",
         "key_document": "Cloud Backup — recovery key\n\n{key}\n\nMade on {date}, for the "
                         "backups on {where}.\n\nIt restores your data on another computer, or "
@@ -239,6 +269,32 @@ STRINGS = {
     },
     "it": {
         "title": "Cloud Backup",
+        "net_title": "Connettiti a Internet",
+        "net_body": "I backup vanno online: prima collega questo computer a Internet.",
+        "net_cable": "Collega un cavo di rete",
+        "net_cable_body": "Questo computer ha una porta di rete cablata: si collega da solo",
+        "net_wifi": "Reti Wi-Fi",
+        "net_wifi_body": "Scegli la tua",
+        "net_scanning": "Ricerca delle reti Wi-Fi…",
+        "net_none": "Nessuna rete Wi-Fi nelle vicinanze",
+        "net_refresh": "Cerca di nuovo",
+        "net_skip": "Continua senza rete",
+        "net_password_title": "Password di {ssid}",
+        "net_password_body": "La password della rete (spesso è sul router).",
+        "net_connect": "Connetti",
+        "net_connecting": "Connessione a {ssid}…",
+        "net_failed": "Impossibile connettersi a {ssid}: {error}",
+        "net_secure": "Protetta",
+        "net_open": "Aperta",
+        "ts_title": "Tailscale",
+        "ts_body": "Tailscale mette i tuoi dispositivi in una rete privata tutta loro, cifrata da un capo all'altro: ovunque tu sia, raggiungi questo computer (SSH, file, app) come se ci fossi davanti, senza aprire porte sul router.\n\nHai un account Tailscale, e vuoi aggiungere questo computer alla tua rete?",
+        "ts_add": "Aggiungi alla mia rete Tailscale",
+        "ts_later": "Non ora",
+        "ts_wait": "Accedi a Tailscale nel browser che si è appena aperto, e approva questo computer.",
+        "ts_again": "Apri di nuovo il browser",
+        "ts_cancel": "Annulla",
+        "ts_done": "Questo computer è nella tua rete Tailscale.",
+        "ts_failed": "Tailscale non ha potuto aggiungere questo computer: {error}",
         "choose_title": "Metti al sicuro i tuoi dati",
         "choose_body": "Ora scegliamo un posto dove mettere al sicuro i tuoi dati, documenti "
                        "e preferenze:",
@@ -346,6 +402,7 @@ STRINGS = {
         "key_saved": "Ho messo la chiave in un posto sicuro",
         "copied": "Copiata: incollala in un posto sicuro, poi svuota gli appunti.",
         "saved_to": "Salvata in {path}: tienila lontano da questo computer.",
+        "save_failed": "Impossibile salvare la chiave: {error}",
         "key_file_name": "Chiave di recupero Cloud Backup.txt",
         "key_document": "Cloud Backup — chiave di recupero\n\n{key}\n\nCreata il {date}, per "
                         "i backup su {where}.\n\nServe per ripristinare i tuoi dati su un altro "
@@ -470,7 +527,9 @@ class BackupWindow(Adw.ApplicationWindow):
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
                                vexpand=True)
-        for name, page in (("choose", self._page_choose()), ("wait", self._page_wait()),
+        self.ts_proc = None
+        for name, page in (("network", self._page_network()), ("tailscale", self._page_tailscale()),
+                           ("choose", self._page_choose()), ("wait", self._page_wait()),
                            ("nextcloud", self._page_nextcloud()), ("icloud", self._page_icloud()),
                            ("phones", self._page_phones()), ("code", self._page_code()),
                            ("samba", self._page_samba()), ("sftp", self._page_sftp()),
@@ -493,9 +552,14 @@ class BackupWindow(Adw.ApplicationWindow):
         self.set_content(view)
 
         configured = cloud.load_config() and not first_run
-        self._show("status" if configured else "choose", remember=False)
         if configured:
+            self._show("status", remember=False)
             self._refresh_status()
+        elif first_run:
+            # First the network (the backups need it), then Tailscale
+            self._onboard()
+        else:
+            self._show("choose", remember=False)
 
     # --- helpers -----------------------------------------------------------------
 
@@ -573,8 +637,7 @@ class BackupWindow(Adw.ApplicationWindow):
         self._show_working()
 
     def _show_working(self):
-        # A new spinner each time: a reused one can stay on its first frame
-        self.working_status.set_child(Adw.Spinner(width_request=48, height_request=48))
+        self.working_status.set_child(livespinner.Spinner(size=48))
         self._show("working")
 
     def _on_page(self, *_):
@@ -586,6 +649,196 @@ class BackupWindow(Adw.ApplicationWindow):
             focus[name].grab_focus()
 
     # --- choose: where the backups go ------------------------------------------
+
+    # --- first run: the network, then Tailscale --------------------------------
+
+    def _onboard(self):
+        if netsetup.online():
+            self._after_network()
+            return
+        kinds = netsetup.devices()
+        self.net_cable.set_visible("ethernet" in kinds)
+        self.net_wifi.set_visible("wifi" in kinds)
+        self._show("network", remember=False)
+        if "wifi" in kinds:
+            self._scan_wifi()
+        GLib.timeout_add_seconds(3, self._poll_network)
+
+    def _poll_network(self):
+        if self.stack.get_visible_child_name() != "network":
+            return GLib.SOURCE_REMOVE
+        if netsetup.online():
+            self._after_network()
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def _after_network(self):
+        if netsetup.online() and netsetup.tailscale_available() \
+                and not netsetup.tailscale_running():
+            self._show("tailscale", remember=False)
+        else:
+            self._show("choose", remember=False)
+
+    def _page_network(self):
+        status = Adw.StatusPage(icon_name="network-offline-symbolic", title=t("net_title"),
+                                description=t("net_body"))
+        self.net_cable = Adw.PreferencesGroup()
+        cable = Adw.ActionRow(title=t("net_cable"), subtitle=t("net_cable_body"))
+        cable.add_prefix(Gtk.Image(icon_name="network-wired-symbolic"))
+        self.net_cable.add(cable)
+        self.net_wifi = Adw.PreferencesGroup(title=t("net_wifi"), description=t("net_wifi_body"))
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text=t("net_refresh"),
+                             valign=Gtk.Align.CENTER)
+        refresh.add_css_class("flat")
+        refresh.connect("clicked", lambda *_: self._scan_wifi())
+        self.net_wifi.set_header_suffix(refresh)
+        self.net_rows = []
+        skip = self._button(t("net_skip"))
+        skip.connect("clicked", lambda *_: self._show("choose", remember=False))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        for child in (status, self.net_cable, self.net_wifi, skip):
+            box.append(child)
+        return self._page(box)
+
+    def _wifi_rows(self, rows):
+        for row in self.net_rows:
+            self.net_wifi.remove(row)
+        self.net_rows = rows
+        for row in rows:
+            self.net_wifi.add(row)
+
+    def _scan_wifi(self):
+        busy = Adw.ActionRow(title=t("net_scanning"))
+        busy.add_prefix(livespinner.Spinner(size=16))
+        self._wifi_rows([busy])
+
+        def done(networks, error):
+            if error or not networks:
+                self._wifi_rows([Adw.ActionRow(title=t("net_none"))])
+                return
+            rows = []
+            for network in networks:
+                bars = min(4, network["signal"] // 25 + 1)
+                icon = ["none", "weak", "ok", "good", "excellent"][bars] if bars else "none"
+                row = Adw.ActionRow(title=GLib.markup_escape_text(network["ssid"]),
+                                    subtitle=t("net_secure" if network["secure"] else "net_open"),
+                                    activatable=True)
+                row.add_prefix(Gtk.Image(icon_name=f"network-wireless-signal-{icon}-symbolic"))
+                if network["secure"]:
+                    row.add_suffix(Gtk.Image(icon_name="channel-secure-symbolic"))
+                row.connect("activated", lambda _r, n=network: self._wifi_chosen(n))
+                rows.append(row)
+            self._wifi_rows(rows)
+        in_thread(netsetup.wifi_networks, done)
+
+    def _wifi_chosen(self, network):
+        if not network["secure"]:
+            self._wifi_connect(network["ssid"], None)
+            return
+        dialog = Adw.AlertDialog(heading=t("net_password_title", ssid=network["ssid"]),
+                                 body=t("net_password_body"))
+        entry = Adw.PasswordEntryRow(title=t("password_field"), activates_default=True)
+        group = Adw.PreferencesGroup()
+        group.add(entry)
+        dialog.set_extra_child(group)
+        dialog.add_response("cancel", t("cancel"))
+        dialog.add_response("connect", t("net_connect"))
+        dialog.set_response_appearance("connect", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("connect")
+        dialog.connect("response", lambda _d, r: r == "connect"
+                       and self._wifi_connect(network["ssid"], entry.get_text()))
+        dialog.present(self)
+        entry.grab_focus()
+
+    def _wifi_connect(self, ssid, password):
+        self._working(t("net_connecting", ssid=ssid))
+
+        def done(_result, error):
+            if error:
+                self._show("network", remember=False)
+                self._toast(t("net_failed", ssid=ssid, error=error))
+                GLib.timeout_add_seconds(3, self._poll_network)
+                return
+            self._after_network()
+        in_thread(lambda: netsetup.wifi_connect(ssid, password), done)
+
+    def _page_tailscale(self):
+        status = Adw.StatusPage(icon_name="network-vpn-symbolic", title=t("ts_title"),
+                                description=t("ts_body"))
+        self.ts_add = self._button(t("ts_add"), suggested=True)
+        self.ts_add.connect("clicked", lambda *_: self._tailscale_up())
+        self.ts_later = self._button(t("ts_later"))
+        self.ts_later.connect("clicked", lambda *_: self._show("choose", remember=False))
+        self.ts_waiting = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                                  visible=False)
+        self.ts_waiting.append(livespinner.Spinner(size=32))
+        wait_label = Gtk.Label(label=t("ts_wait"), wrap=True, justify=Gtk.Justification.CENTER)
+        self.ts_waiting.append(wait_label)
+        self.ts_again = self._button(t("ts_again"))
+        self.ts_again.connect("clicked", lambda *_: self.ts_url and self._launch(self.ts_url))
+        self.ts_waiting.append(self.ts_again)
+        cancel = self._button(t("ts_cancel"))
+        cancel.connect("clicked", lambda *_: self._tailscale_cancel())
+        self.ts_waiting.append(cancel)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        for child in (self.ts_add, self.ts_later, self.ts_waiting):
+            box.append(child)
+        status.set_child(box)
+        return status
+
+    def _launch(self, url):
+        Gtk.UriLauncher.new(url).launch(self, None, None, None)
+
+    def _tailscale_waiting(self, waiting):
+        self.ts_add.set_visible(not waiting)
+        self.ts_later.set_visible(not waiting)
+        self.ts_waiting.set_visible(waiting)
+
+    def _tailscale_up(self):
+        self.ts_url = None
+        try:
+            proc = self.ts_proc = netsetup.tailscale_up()
+        except OSError as e:
+            self._toast(t("ts_failed", error=str(e)))
+            return
+        self._tailscale_waiting(True)
+        self.ts_again.set_visible(False)
+
+        def run():
+            last = ""
+            for line in proc.stdout:
+                url = netsetup.login_url(line)
+                if url:
+                    GLib.idle_add(self._tailscale_url, url)
+                elif line.strip():
+                    last = line.strip()
+            code = proc.wait()
+            GLib.idle_add(self._tailscale_done, proc, code, last)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _tailscale_url(self, url):
+        self.ts_url = url
+        self.ts_again.set_visible(True)
+        self._launch(url)
+        return GLib.SOURCE_REMOVE
+
+    def _tailscale_done(self, proc, code, last):
+        if proc is not self.ts_proc:
+            return GLib.SOURCE_REMOVE  # cancelled
+        self.ts_proc = None
+        self._tailscale_waiting(False)
+        if code == 0 or netsetup.tailscale_running():
+            self._toast(t("ts_done"))
+            self._show("choose", remember=False)
+        else:
+            self._toast(t("ts_failed", error=last or code))
+        return GLib.SOURCE_REMOVE
+
+    def _tailscale_cancel(self):
+        proc, self.ts_proc = self.ts_proc, None
+        if proc and proc.poll() is None:
+            proc.terminate()
+        self._tailscale_waiting(False)
 
     def _page_choose(self):
         group = Adw.PreferencesGroup(title=t("choose_title"), description=t("choose_body"))
@@ -622,7 +875,7 @@ class BackupWindow(Adw.ApplicationWindow):
         self.wait_status = Adw.StatusPage(icon_name="web-browser-symbolic", vexpand=True,
                                           title=t("wait_title"))
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-        box.append(Adw.Spinner(width_request=32, height_request=32))
+        box.append(livespinner.Spinner(size=32))
         self.wait_again = self._button(t("open_browser"))
         self.wait_again.connect("clicked", lambda *_: self._open_uri(self.login_url))
         box.append(self.wait_again)
@@ -1233,13 +1486,22 @@ class BackupWindow(Adw.ApplicationWindow):
 
         def saved(dialog, result):
             try:
-                path = dialog.save_finish(result).get_path()
+                gfile = dialog.save_finish(result)
             except GLib.Error:
+                return  # cancelled
+            # Through the GFile the dialog returns, not its path: that may be
+            # the document portal's or a FUSE mount's (the cloud drive in the
+            # home folder), where writing to a truncated path could leave the
+            # file empty. replace_contents writes it whole, then puts it in
+            # place, readable only by the user.
+            try:
+                gfile.replace_contents(self._key_text().encode(), None, False,
+                                       Gio.FileCreateFlags.PRIVATE
+                                       | Gio.FileCreateFlags.REPLACE_DESTINATION, None)
+            except GLib.Error as e:
+                self._toast(t("save_failed", error=e.message))
                 return
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                f.write(self._key_text())
-            self._toast(t("saved_to", path=path))
+            self._toast(t("saved_to", path=gfile.get_path() or gfile.get_uri()))
         dialog.save(self, None, saved)
 
     def _print_key(self):
