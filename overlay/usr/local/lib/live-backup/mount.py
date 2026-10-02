@@ -3,7 +3,9 @@
 Cloud Config's accounts (accounts.py) are each mounted with rclone in the
 home folder (~/Google Drive, ~/Nextcloud...) by a systemd user unit,
 live-cloud@<id>.service, at every login, and Files lists each in its
-sidebar (as it does any mount in the home folder). Cloud Backup's own network destinations (Samba, SFTP:
+sidebar (as it does any mount in the home folder), with a cloud for icon
+(patches/gnome/nautilus: the mount's device, live-cloud:<id>, tells it's a cloud).
+Cloud Backup's own network destinations (Samba, SFTP:
 "cloud:", see cloud.py) are mounted the same way by live-cloud-mount.service
 (~/SFTP (anna@server)...). Files are fetched when opened, and cached in
 ~/.cache/rclone (not backed up). The backups' encrypted folder is hidden

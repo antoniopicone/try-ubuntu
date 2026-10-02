@@ -719,9 +719,11 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
     unit at every login
     ([live-cloud@.service](overlay/etc/systemd/user/live-cloud@.service),
     [mount.py](overlay/usr/local/lib/live-backup/mount.py)), with its place
-    in the sidebar (Files lists a mount in the home folder by itself). So is Cloud Backup's own Samba or SFTP destination
-    (`~/SFTP (anna@server)`,
-    [live-cloud-mount.service](overlay/etc/systemd/user/live-cloud-mount.service)).
+    in the sidebar (Files lists a mount in the home folder by itself),
+    with a cloud for icon (see the Nautilus patch below). So is Cloud
+    Backup's own Samba or SFTP destination (`~/SFTP (anna@server)`,
+    [live-cloud-mount.service](overlay/etc/systemd/user/live-cloud-mount.service)),
+    with a network folder.
     Files are fetched when opened and cached in `~/.cache/rclone`. The
     backups' encrypted folder is hidden from the mount it's on, and
     localsearch is kept out of every mount (it would download the whole
@@ -840,9 +842,17 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
   - It builds without tests, docs or LTO, into a local apt repository
     (`/cache/gnome-repo` in the podman volume).
   - Local fixes go in [patches/gnome/](patches/gnome/)`<source>/`, on top
-    of the package's own patches. Right now there are none: `main`'s gdm3
-    fix (a double free in 26.10's `prefer_ubuntu_session_fallback.patch`)
-    isn't needed, since 26.04's gdm 50.1 doesn't have the bug.
+    of the package's own patches (`main`'s gdm3 fix, a double free in
+    26.10's `prefer_ubuntu_session_fallback.patch`, isn't needed: 26.04's
+    gdm 50.1 doesn't have the bug):
+    - [nautilus](patches/gnome/nautilus/cloud-mount-icon.patch): gvfs gives
+      every FUSE mount in the home folder a removable drive for icon. The
+      sidebar shows a cloud
+      ([live-cloud-symbolic](overlay/usr/local/share/icons/hicolor/scalable/apps/live-cloud-symbolic.svg),
+      as in the mockups) for the clouds' mounts instead: rclone's with the
+      device `live-cloud:<id>` (`--devname`), and icloud-linux's
+      (`fuse.icloud`). rclone's other mounts (Samba, SFTP) get a network
+      folder.
   - The rootfs installs from that repository, which is mounted only for the
     build, and the build fails unless the core is at version 50.
   - A package is rebuilt again only when 26.04's source version or its
