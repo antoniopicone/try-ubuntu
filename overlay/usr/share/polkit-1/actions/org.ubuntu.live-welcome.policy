@@ -15,4 +15,17 @@
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/local/lib/live-welcome/setup-user</annotate>
   </action>
+  <!-- Installing the live system on a disk (install-system): only on a live
+       system whose welcome app isn't done, which install-system checks, so
+       this can't be used to erase disks on an installed system. -->
+  <action id="org.ubuntu.live-welcome.install-system">
+    <description>Install this system on a disk</description>
+    <message>Authentication is required to install the system on a disk</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/lib/live-install/install-system</annotate>
+  </action>
 </policyconfig>

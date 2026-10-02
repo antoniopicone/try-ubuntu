@@ -1,0 +1,92 @@
+#!/bin/sh
+# live-limine-update: on a system installed from the live ISO
+# (install-system), puts the kernels of /boot and their initramfs on the EFI
+# system partition and writes Limine's menu there. Limine reads only FAT,
+# so it boots copies: this keeps them in step. Run by install-system, and by
+# the kernel's and initramfs-tools' hooks (/etc/kernel/postinst.d,
+# postrm.d, /etc/initramfs/post-update.d) after every kernel or initramfs
+# change. On the live system (no /etc/try-ubuntu/installed) it does nothing.
+#
+# The two newest kernels are in the menu. On arm64 Limine needs the raw
+# Image inside Ubuntu's EFI zboot vmlinuz (unzboot.py, as the ISO build does).
+set -eu
+
+marker=/etc/try-ubuntu/installed
+esp=/boot/efi
+[ -f "$marker" ] || exit 0
+mountpoint -q "$esp" || { echo "live-limine-update: $esp isn't mounted" >&2; exit 1; }
+
+uuid=$(findmnt -no UUID /)
+arch=$(dpkg --print-architecture)
+dir="$esp/ubuntu"
+mkdir -p "$dir" "$esp/boot/limine"
+
+kernels=""
+for v in $(ls /boot/vmlinuz-* 2>/dev/null | sed 's|^/boot/vmlinuz-||' | sort -Vr); do
+  [ -f "/boot/initrd.img-$v" ] || continue
+  kernels="$kernels $v"
+  [ "$(echo $kernels | wc -w)" -ge 2 ] && break
+done
+[ -n "$kernels" ] || { echo "live-limine-update: no kernel with an initramfs in /boot" >&2; exit 1; }
+
+keep=""
+for v in $kernels; do
+  if [ "$arch" = arm64 ]; then
+    image="Image-$v"
+    [ "/boot/vmlinuz-$v" -ot "$dir/$image" ] ||
+      python3 /usr/local/lib/live-install/unzboot.py "/boot/vmlinuz-$v" "$dir/$image"
+  else
+    image="vmlinuz-$v"
+    cp "/boot/vmlinuz-$v" "$dir/$image"
+  fi
+  cp "/boot/initrd.img-$v" "$dir/initrd.img-$v"
+  keep="$keep $image initrd.img-$v"
+done
+# The kernels that went
+for f in "$dir"/*; do
+  case " $keep " in *" ${f##*/} "*) ;; *) rm -f "$f" ;; esac
+done
+
+wallpaper=$(cd "$esp/boot/limine" && ls wallpaper.* 2>/dev/null | head -1 || true)
+cmdline="root=UUID=$uuid rootflags=subvol=@ rw"
+tmp="$esp/boot/limine/limine.conf.new"
+{
+  echo "# Written by live-limine-update: don't edit, it's rewritten at every kernel update."
+  echo "timeout: 3"
+  echo "interface_branding: Ubuntu"
+  echo "interface_branding_colour: 7"
+  if [ -n "$wallpaper" ]; then
+    echo "wallpaper: boot():/boot/limine/$wallpaper"
+    echo "wallpaper_style: stretched"
+    echo "term_background: 40000000"
+  fi
+  echo
+  first=1
+  for v in $kernels; do
+    image=$([ "$arch" = arm64 ] && echo "Image-$v" || echo "vmlinuz-$v")
+    if [ "$first" = 1 ]; then
+      echo "/Ubuntu"
+      echo "    comment: Linux $v"
+      echo "    protocol: linux"
+      echo "    path: boot():/ubuntu/$image"
+      echo "    module_path: boot():/ubuntu/initrd.img-$v"
+      echo "    cmdline: $cmdline quiet splash"
+      echo
+      echo "/Advanced options"
+      first=0
+    fi
+    echo
+    echo "//Linux $v"
+    echo "    protocol: linux"
+    echo "    path: boot():/ubuntu/$image"
+    echo "    module_path: boot():/ubuntu/initrd.img-$v"
+    echo "    cmdline: $cmdline quiet splash"
+    echo
+    echo "//Linux $v (verbose, text console)"
+    echo "    protocol: linux"
+    echo "    path: boot():/ubuntu/$image"
+    echo "    module_path: boot():/ubuntu/initrd.img-$v"
+    echo "    cmdline: $cmdline systemd.unit=multi-user.target"
+  done
+} > "$tmp"
+mv "$tmp" "$esp/boot/limine/limine.conf"

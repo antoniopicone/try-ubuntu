@@ -35,7 +35,10 @@ EXTENSIONS=(
 # `serve restic` hangs reading from SFTP (restores never finish); 1.75 is
 # fine. Its own static build, checked by sha256.
 RCLONE_VERSION=1.75.1
-RCLONE_SHA256=03f2504174034b6d004152ed7369251c9a9ec1f7e0836eda420f5c7a5ec0dff9
+case ${ARCH:-arm64} in
+  arm64) RCLONE_SHA256=03f2504174034b6d004152ed7369251c9a9ec1f7e0836eda420f5c7a5ec0dff9 ;;
+  amd64) RCLONE_SHA256=982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab ;;
+esac
 
 # The welcome app's avatars: DiceBear's styles whose drawings are CC0 and
 # made of parts one can pick (not the abstract ones), turned into JSON by
@@ -369,7 +372,7 @@ EOF
   rm -rf "$tmp"
 
   # rclone (see RCLONE_VERSION)
-  fetch "https://downloads.rclone.org/v$RCLONE_VERSION/rclone-v$RCLONE_VERSION-linux-arm64.zip" \
+  fetch "https://downloads.rclone.org/v$RCLONE_VERSION/rclone-v$RCLONE_VERSION-linux-${ARCH:-arm64}.zip" \
     "$RCLONE_SHA256" "$WORK/downloads/rclone.zip"
   python3 - "$WORK/downloads/rclone.zip" "$ROOTFS/usr/local/bin/rclone" <<'PY'
 import shutil, sys, zipfile
@@ -379,8 +382,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
         shutil.copyfileobj(src, dst)
 PY
   chmod 755 "$ROOTFS/usr/local/bin/rclone"
-  in_chroot rclone version | grep -q "^rclone v$RCLONE_VERSION\$" \
-    || { echo "rclone $RCLONE_VERSION isn't working" >&2; exit 1; }
+  check_runs "rclone $RCLONE_VERSION" sh -c "rclone version | grep -q '^rclone v$RCLONE_VERSION\$'"
 
   # The Backup app's own OAuth clients (build.sh --oauth-clients), for
   # Google Drive, OneDrive and Dropbox instead of rclone's shared ones. A

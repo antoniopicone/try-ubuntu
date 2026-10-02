@@ -2,13 +2,14 @@
 # Consumes $ROOTFS (it is moved into the subvolume layout) and turns it into
 # a btrfs seed image with the subvolumes @, @home, @var and @snapshots (plus
 # snapper snapshot #1, "the image as shipped"), then wraps it with the
-# kernel, initramfs and the Limine bootloader (arm64 UEFI) into a hybrid
-# ISO: bootable as a CD-ROM (El Torito EFI) and, written raw to a USB stick,
-# through its appended EFI system partition.
+# kernel, initramfs and the Limine bootloader (UEFI, arm64 or x86_64) into
+# a hybrid ISO: bootable as a CD-ROM (El Torito EFI) and, written raw to a
+# USB stick, through its appended EFI system partition.
 set -euo pipefail
 
 : "${ROOTFS:?}" "${WORK:?}" "${ISO_OUT:?}" "${ISO_LABEL:?}"
 : "${BTRFS_COMPRESS:=zstd:15}"
+: "${ARCH:=arm64}"
 
 # Limine, pinned: the files are checked individually (the release archive is
 # generated on the fly by the forge, its own hash is not stable).
@@ -18,7 +19,15 @@ LIMINE_URLS=(
   "https://codeberg.org/Limine/Limine/archive/v$LIMINE_VERSION-binary.tar.gz"
   "https://github.com/limine-bootloader/limine/archive/refs/tags/v$LIMINE_VERSION-binary.tar.gz"
 )
-LIMINE_BOOTAA64_SHA256=d06b255a8affd87f16bc7bdfce30a0a0ba3b883b8b0dae8146c81d6a56ed649d
+case $ARCH in
+  arm64) LIMINE_EFI=BOOTAA64.EFI
+         LIMINE_EFI_SHA256=d06b255a8affd87f16bc7bdfce30a0a0ba3b883b8b0dae8146c81d6a56ed649d
+         SERIAL_CONSOLE=ttyAMA0 ;;
+  amd64) LIMINE_EFI=BOOTX64.EFI
+         LIMINE_EFI_SHA256=698013c27ce2102766d399451fc3520c12662e84ebecc504f09f77417a5103d1
+         SERIAL_CONSOLE=ttyS0 ;;
+  *) echo "unsupported ARCH: $ARCH" >&2; exit 1 ;;
+esac
 
 layout="$WORK/btrfs-layout"
 iso_tree="$WORK/iso"
@@ -28,13 +37,23 @@ mkdir -p "$layout" "$iso_tree/live" "$iso_tree/boot/limine" "$mnt"
 
 kernel=$(ls "$ROOTFS"/boot/vmlinuz-* | sort -V | tail -1)
 initrd="$ROOTFS/boot/initrd.img-${kernel##*/vmlinuz-}"
-# Ubuntu's arm64 vmlinuz is an EFI zboot image (a PE wrapping a compressed
-# kernel); Limine's Linux protocol needs the raw arm64 Image inside it.
-python3 "$(dirname "$0")/unzboot.py" "$kernel" "$iso_tree/live/Image"
+# The kernel as shipped, live/vmlinuz: what install-system puts back in
+# /boot on an installed system. x86's (a bzImage) is also what Limine
+# boots; Ubuntu's arm64 vmlinuz is an EFI zboot image (a PE wrapping a
+# compressed kernel), and Limine's Linux protocol needs the raw arm64 Image
+# inside it.
+cp "$kernel" "$iso_tree/live/vmlinuz"
+if [[ $ARCH == arm64 ]]; then
+  python3 "$(dirname "$0")/unzboot.py" "$kernel" "$iso_tree/live/Image"
+  kernel_path=live/Image
+else
+  kernel_path=live/vmlinuz
+fi
 cp "$initrd" "$iso_tree/live/initrd"
 # Limine boots them from the ISO: the copies in the root filesystem would
-# only double their size in the image.
-rm -f "$ROOTFS"/boot/{vmlinuz,initrd.img,System.map,config}-* "$ROOTFS"/boot/{vmlinuz,initrd.img}{,.old}
+# only double their size in the image. The kernel's config stays, for
+# update-initramfs on an installed system.
+rm -f "$ROOTFS"/boot/{vmlinuz,initrd.img,System.map}-* "$ROOTFS"/boot/{vmlinuz,initrd.img}{,.old}
 # The desktop's wallpaper (picked by build-rootfs.sh), dark variant.
 limine_wallpaper=$(ls "$WORK"/limine-wallpaper.*)
 limine_wallpaper_name=wallpaper.${limine_wallpaper##*.}
@@ -93,7 +112,7 @@ btrfstune -S 1 "$img"
 btrfs inspect-internal dump-super "$img" | grep -E '^(label|flags|total_bytes)'
 btrfs inspect-internal dump-tree -t root "$img" | grep -oE 'ref .* name [@a-z]+' | grep -oE '[@a-z]+$' | sort -u | xargs echo "subvolumes:"
 
-echo "==> Limine $LIMINE_VERSION (arm64 UEFI)"
+echo "==> Limine $LIMINE_VERSION ($ARCH UEFI)"
 limine_dir="$WORK/limine"
 limine_tgz="$WORK/limine.tar.gz"
 for url in "${LIMINE_URLS[@]}"; do
@@ -106,7 +125,10 @@ rm -rf "$limine_dir"
 mkdir -p "$limine_dir"
 tar xzf "$limine_tgz" -C "$limine_dir" --strip-components=1
 rm -f "$limine_tgz"
-echo "$LIMINE_BOOTAA64_SHA256  $limine_dir/BOOTAA64.EFI" | sha256sum -c --quiet
+echo "$LIMINE_EFI_SHA256  $limine_dir/$LIMINE_EFI" | sha256sum -c --quiet
+# A copy on the ISO 9660 volume too: install-system puts it on the EFI
+# system partition of an installed system.
+cp "$limine_dir/$LIMINE_EFI" "$iso_tree/boot/limine/$LIMINE_EFI"
 
 # Limine reads /boot/limine/limine.conf from the ISO 9660 volume, where the
 # kernel and initramfs are too.
@@ -127,13 +149,13 @@ term_margin: 64
 # With a serial console on the command line Plymouth falls back to text
 # unless told to ignore it; console=tty0 last keeps systemd's output on the
 # screen (behind the splash), kernel messages still reach the serial port.
-\${LIVE}=boot=btrfslive console=ttyAMA0 console=tty0
+\${LIVE}=boot=btrfslive console=$SERIAL_CONSOLE console=tty0
 \${SPLASH}=quiet splash loglevel=3 plymouth.ignore-serial-consoles
 
 /$menu_title
     comment: Live session on btrfs. Changes go to RAM, or to the persistent disk if one is attached.
     protocol: linux
-    path: boot():/live/Image
+    path: boot():/$kernel_path
     module_path: boot():/live/initrd
     cmdline: \${LIVE} \${SPLASH}
 
@@ -143,13 +165,13 @@ term_margin: 64
 //Choose at boot (every snapshot, persistent disk included)
     comment: Lists the snapshots on the console and asks for a number.
     protocol: linux
-    path: boot():/live/Image
+    path: boot():/$kernel_path
     module_path: boot():/live/initrd
     cmdline: \${LIVE} btrfslive.snapshot=ask
 
 //#1  Live image as built  ($build_date UTC)
     protocol: linux
-    path: boot():/live/Image
+    path: boot():/$kernel_path
     module_path: boot():/live/initrd
     cmdline: \${LIVE} \${SPLASH} btrfslive.snapshot=1
 
@@ -157,19 +179,19 @@ term_margin: 64
 
 //Verbose boot
     protocol: linux
-    path: boot():/live/Image
+    path: boot():/$kernel_path
     module_path: boot():/live/initrd
     cmdline: \${LIVE}
 
 //Text console only
     protocol: linux
-    path: boot():/live/Image
+    path: boot():/$kernel_path
     module_path: boot():/live/initrd
     cmdline: \${LIVE} systemd.unit=multi-user.target
 
 //RAM only (ignore the persistent disk)
     protocol: linux
-    path: boot():/live/Image
+    path: boot():/$kernel_path
     module_path: boot():/live/initrd
     cmdline: \${LIVE} \${SPLASH} btrfslive.persist=no
 EOF
@@ -178,7 +200,7 @@ efi_img="$WORK/efi.img"
 rm -f "$efi_img"
 mkfs.vfat -C -n "${ISO_LABEL%_LIVE}_EFI" "$efi_img" 4096 >/dev/null
 mmd -i "$efi_img" ::/EFI ::/EFI/BOOT
-mcopy -i "$efi_img" "$limine_dir/BOOTAA64.EFI" ::/EFI/BOOT/BOOTAA64.EFI
+mcopy -i "$efi_img" "$limine_dir/$LIMINE_EFI" "::/EFI/BOOT/$LIMINE_EFI"
 
 echo "==> Writing $ISO_OUT"
 mkdir -p "$(dirname "$ISO_OUT")"

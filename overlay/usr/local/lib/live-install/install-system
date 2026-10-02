@@ -1,0 +1,320 @@
+#!/usr/bin/python3
+"""install-system: installs the running live system on a disk, for the
+welcome app (through pkexec).
+
+    install-system list
+        The disks it can go on, as JSON: [{"disk", "model", "size", "mode",
+        "bytes"}]. mode "disk": the whole disk, erased; mode "free": the
+        largest stretch of unpartitioned space of a GPT disk, next to what
+        is there (Windows, say), "bytes" long. At least 20 GB either way.
+
+    install-system install DISK MODE
+        Partitions DISK (an EFI system partition and a btrfs one) and moves
+        the running system onto it. Progress as JSON lines
+        ({"step", "fraction"}), then {"ok": true} or {"ok": false, "error"}.
+
+How the system gets there: the live root is a btrfs filesystem made of the
+ISO's read-only seed and a writable sprout (RAM, or the persistent disk).
+The new partition is added to it, then the sprout and the seed are removed:
+btrfs moves everything they hold onto the partition, while the system keeps
+running. What the session already changed (language, keyboard...) comes
+along, the user is then created on the installed system, and the live
+medium is no longer needed. The installed system boots with Limine from the
+new EFI system partition (live-limine-update), straight from the btrfs
+partition (root=UUID, subvol=@): no live boot any more.
+
+Only on a live system, before the welcome app is done: once the system is
+installed (or the first user exists) it refuses, so the polkit rule that
+lets the live session run it without a password can't erase disks later.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+
+MIN_BYTES = 20 * 1000 ** 3
+ESP_BYTES = 512 * 1024 ** 2
+ALIGN_BYTES = 1024 ** 2
+LIVE = "/run/btrfslive"
+MEDIUM = "/run/btrfslive/medium"
+DONE = "/var/lib/live-welcome/done"
+MARKER = "/etc/try-ubuntu/installed"
+ESP_MOUNT = "/boot/efi"
+LIMINE_UPDATE = "/usr/local/sbin/live-limine-update"
+ESP_TYPE = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+
+
+def out(**message):
+    print(json.dumps(message), flush=True)
+
+
+def fail(message):
+    out(ok=False, error=message)
+    sys.exit(1)
+
+
+def run(*cmd, **kw):
+    result = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    if result.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd[:3])}: {result.stderr.strip() or result.returncode}")
+    return result.stdout
+
+
+def btrfs_devices():
+    """The devices of the root filesystem: [(path, used bytes)]."""
+    devices = []
+    for line in run("btrfs", "filesystem", "show", "--raw", "/").splitlines():
+        m = re.search(r"devid\s+\d+\s+size\s+(\d+)\s+used\s+(\d+)\s+path\s+(\S+)", line)
+        if m:
+            devices.append((m[3], int(m[2])))
+    return devices
+
+
+def disk_of(device):
+    """The whole disk a device is on (itself for a disk), or None."""
+    try:
+        parent = run("lsblk", "-ndo", "PKNAME", device).strip()
+    except RuntimeError:
+        return None
+    return "/dev/" + parent if parent else device
+
+
+def in_use():
+    """The disks the live system stands on: the medium and the root's devices
+    (the persistent disk; the seed's and RAM's loops are on no disk)."""
+    used = set()
+    try:
+        medium = run("findmnt", "-no", "SOURCE", MEDIUM).strip()
+        used.add(disk_of(medium))
+    except RuntimeError:
+        pass
+    for path, _ in btrfs_devices():
+        if not path.startswith("/dev/loop"):
+            used.add(disk_of(path))
+    return used
+
+
+def free_space(disk, sector):
+    """The largest unpartitioned stretch of a GPT disk: (start, sectors), or None."""
+    try:
+        table = json.loads(run("sfdisk", "-J", disk))["partitiontable"]
+    except (RuntimeError, ValueError, KeyError):
+        return None  # no partition table at all: only the whole disk
+    if table.get("label") != "gpt":
+        return None
+    best = None
+    for line in run("sfdisk", "-F", disk).splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and all(f.isdigit() for f in fields[:3]):
+            start, end = int(fields[0]), int(fields[1])
+            if best is None or end - start > best[1]:
+                best = (start, end - start + 1)
+    return best
+
+
+def candidates():
+    data = json.loads(run("lsblk", "-J", "-b", "-o",
+                          "NAME,PATH,TYPE,SIZE,MODEL,RO,MOUNTPOINTS"))["blockdevices"]
+    used = in_use()
+    found = []
+    for dev in data:
+        path = dev["path"]
+        if dev["type"] != "disk" or dev.get("ro") or path in used \
+                or re.match(r"/dev/(loop|zram|sr|ram)", path):
+            continue
+        model = (dev.get("model") or os.path.basename(path)).strip()
+        size = int(dev["size"])
+        mounted = any(m for child in [dev, *dev.get("children", [])]
+                      for m in (child.get("mountpoints") or []) if m)
+        if size >= MIN_BYTES and not mounted:
+            found.append({"disk": path, "model": model, "size": size, "mode": "disk",
+                          "bytes": size})
+        sector = int(run("blockdev", "--getss", path))
+        free = free_space(path, sector)
+        if free and free[1] * sector >= MIN_BYTES:
+            found.append({"disk": path, "model": model, "size": size, "mode": "free",
+                          "bytes": free[1] * sector})
+    return found
+
+
+def partitions_at(disk, starts):
+    """The partitions of `disk` starting at these sectors, in order."""
+    for _ in range(50):
+        subprocess.run(["udevadm", "settle"], capture_output=True)
+        parts = json.loads(run("sfdisk", "-J", disk))["partitiontable"].get("partitions", [])
+        nodes = [next((p["node"] for p in parts if p["start"] == s), None) for s in starts]
+        if all(nodes) and all(os.path.exists(n) for n in nodes):
+            return nodes
+        time.sleep(0.2)
+    raise RuntimeError("the new partitions didn't show up")
+
+
+def partition(disk, mode):
+    """Makes the EFI system partition and the btrfs one: (esp, root)."""
+    sector = int(run("blockdev", "--getss", disk))
+    align = ALIGN_BYTES // sector
+    esp_sectors = ESP_BYTES // sector
+    if mode == "disk":
+        run("wipefs", "-a", "-f", disk)
+        script = f'size={esp_sectors}, type=U, name="EFI"\ntype=L, name="Ubuntu"\n'
+        run("sfdisk", "--wipe", "always", "--wipe-partitions", "always", "--label", "gpt", disk,
+            input=script)
+        parts = json.loads(run("sfdisk", "-J", disk))["partitiontable"]["partitions"]
+        starts = [parts[0]["start"], parts[1]["start"]]
+    else:
+        start, sectors = free_space(disk, sector)
+        esp_start = -(-start // align) * align
+        root_start = esp_start + esp_sectors
+        root_sectors = (start + sectors - root_start) // align * align
+        if root_sectors * sector < MIN_BYTES - ESP_BYTES:
+            raise RuntimeError("not enough free space")
+        script = (f'start={esp_start}, size={esp_sectors}, type=U, name="EFI"\n'
+                  f'start={root_start}, size={root_sectors}, type=L, name="Ubuntu"\n')
+        # The kernel may not reread a table in use (Windows' disk): partx
+        # adds the new partitions anyway.
+        subprocess.run(["sfdisk", "--append", "--no-reread", "--wipe-partitions", "always",
+                        disk], input=script, capture_output=True, text=True, check=True)
+        subprocess.run(["partx", "-a", disk], capture_output=True)
+        starts = [esp_start, root_start]
+    return partitions_at(disk, starts)
+
+
+def move_system(root_part):
+    """Adds `root_part` to the running root filesystem and removes the
+    others (sprouts first, then the read-only seed): btrfs relocates
+    everything onto it."""
+    before = btrfs_devices()
+    total = sum(used for _, used in before) or 1
+    # -K: no full-device TRIM (minutes on a big disk)
+    run("btrfs", "device", "add", "-f", "-K", root_part, "/")
+    stop = threading.Event()
+
+    def report():
+        while not stop.wait(2):
+            moved = dict(btrfs_devices()).get(root_part, 0)
+            out(step="copy", fraction=min(moved / total, 0.99))
+    threading.Thread(target=report, daemon=True).start()
+    seeds = [p for p, _ in before if _read_only(p)]
+    try:
+        for path in [p for p, _ in before if p not in seeds] + seeds:
+            run("btrfs", "device", "remove", path, "/")
+    finally:
+        stop.set()
+    out(step="copy", fraction=1.0)
+
+
+def _read_only(device):
+    try:
+        return run("blockdev", "--getro", device).strip() == "1"
+    except RuntimeError:
+        return False
+
+
+def set_up_boot(disk, esp, root_part):
+    """fstab, the kernel and its initramfs in /boot, Limine on the ESP, and
+    the firmware's boot entry."""
+    uuid = run("blkid", "-s", "UUID", "-o", "value", root_part).strip()
+    esp_uuid = run("blkid", "-s", "UUID", "-o", "value", esp).strip()
+    opts = "noatime,compress=zstd:1"
+    with open("/etc/fstab", "w") as f:
+        f.write("# Written by install-system: the btrfs partition's subvolumes and the\n"
+                "# EFI system partition (Limine, the kernels it boots).\n")
+        for sub, where in (("@", "/"), ("@home", "/home"), ("@var", "/var"),
+                           ("@snapshots", "/.snapshots")):
+            f.write(f"UUID={uuid} {where} btrfs subvol={sub},{opts} 0 0\n")
+        f.write(f"UUID={esp_uuid} {ESP_MOUNT} vfat umask=0077 0 1\n")
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    os.makedirs(ESP_MOUNT, exist_ok=True)
+    run("mount", ESP_MOUNT)
+
+    arch = run("dpkg", "--print-architecture").strip()
+    efi_name = {"amd64": "BOOTX64.EFI", "arm64": "BOOTAA64.EFI"}[arch]
+    os.makedirs(os.path.join(ESP_MOUNT, "EFI/BOOT"), exist_ok=True)
+    shutil.copy(os.path.join(MEDIUM, "boot/limine", efi_name),
+                os.path.join(ESP_MOUNT, "EFI/BOOT", efi_name))
+    os.makedirs(os.path.join(ESP_MOUNT, "boot/limine"), exist_ok=True)
+    for name in os.listdir(os.path.join(MEDIUM, "boot/limine")):
+        if name.startswith("wallpaper."):
+            shutil.copy(os.path.join(MEDIUM, "boot/limine", name),
+                        os.path.join(ESP_MOUNT, "boot/limine", name))
+
+    os.makedirs(os.path.dirname(MARKER), exist_ok=True)
+    with open(MARKER, "w") as f:
+        json.dump({"disk": disk, "root": uuid, "esp": esp_uuid,
+                   "date": datetime.now(timezone.utc).isoformat()}, f)
+        f.write("\n")
+    # The kernel the ISO booted, back in /boot (the image ships without it),
+    # and an initramfs for booting from the partition. update-initramfs runs
+    # live-limine-update (/etc/initramfs/post-update.d), which puts both on
+    # the ESP with Limine's menu.
+    version = os.uname().release
+    shutil.copy(os.path.join(MEDIUM, "live/vmlinuz"), f"/boot/vmlinuz-{version}")
+    os.chmod(f"/boot/vmlinuz-{version}", 0o600)
+    run("update-initramfs", "-c", "-k", version)
+    run(LIMINE_UPDATE)
+
+    number = re.search(r"(\d+)$", esp)[1]
+    label = "Ubuntu (try-ubuntu)"
+    # An entry from an earlier install on this disk would point nowhere
+    for line in subprocess.run(["efibootmgr"], capture_output=True, text=True).stdout.splitlines():
+        m = re.match(r"Boot([0-9A-F]{4})\*? " + re.escape(label), line)
+        if m:
+            subprocess.run(["efibootmgr", "-q", "-b", m[1], "-B"], capture_output=True)
+    made = subprocess.run(["efibootmgr", "-q", "-c", "-d", disk, "-p", number, "-L", label,
+                           "-l", "\\EFI\\BOOT\\" + efi_name], capture_output=True, text=True)
+    return made.returncode == 0
+
+
+def release_medium():
+    """The live medium isn't needed any more: its loops and its mount go."""
+    out_ = subprocess.run(["losetup", "-nO", "NAME,BACK-FILE"], capture_output=True, text=True)
+    for line in out_.stdout.splitlines():
+        name, _, back = line.partition(" ")
+        if back.strip().startswith(MEDIUM) or back.strip().startswith(LIVE + "/ram"):
+            subprocess.run(["losetup", "-d", name], capture_output=True)
+    for mount in (MEDIUM, LIVE + "/ram"):
+        subprocess.run(["umount", mount], capture_output=True)
+    with open(os.path.join(LIVE, "storage"), "w") as f:
+        f.write("installed\n")
+
+
+def install(disk, mode):
+    choice = next((c for c in candidates() if c["disk"] == disk and c["mode"] == mode), None)
+    if not choice:
+        fail(f"{disk} can't take the system ({mode})")
+    if os.path.exists(os.path.join(LIVE, "booted-snapshot")):
+        fail("booted from a snapshot: restart into the live system to install it")
+    out(step="partition", fraction=0)
+    esp, root_part = partition(disk, mode)
+    run("mkfs.vfat", "-F", "32", "-n", "UBUNTU_EFI", esp)
+    out(step="copy", fraction=0)
+    move_system(root_part)
+    out(step="boot", fraction=0)
+    entry = set_up_boot(disk, esp, root_part)
+    release_medium()
+    out(ok=True, boot_entry=entry)
+
+
+def main():
+    if os.geteuid() != 0:
+        fail("must run as root (pkexec)")
+    if not os.path.isdir(LIVE) or os.path.exists(MARKER) or os.path.exists(DONE):
+        fail("only a live system that isn't set up yet can be installed")
+    try:
+        if sys.argv[1:] == ["list"]:
+            print(json.dumps(candidates()))
+        elif len(sys.argv) == 4 and sys.argv[1] == "install" and sys.argv[3] in ("disk", "free"):
+            install(sys.argv[2], sys.argv[3])
+        else:
+            fail("usage: install-system list | install DISK disk|free")
+    except (RuntimeError, OSError, subprocess.CalledProcessError, ValueError, KeyError) as e:
+        fail(str(e))
+
+
+if __name__ == "__main__":
+    main()

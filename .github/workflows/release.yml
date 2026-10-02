@@ -1,4 +1,5 @@
-# On a version tag (v*), builds the live ISO on a native arm64 runner and
+# On a version tag (v*), builds the live ISOs (QEMU flavour) on native arm64
+# and x86 runners and
 # QEMU for Apple Silicon (qemu/build.sh) on a macOS one, and publishes them,
 # with their SHA256SUMS, as a GitHub release. install.sh downloads from the
 # latest release.
@@ -18,13 +19,20 @@ jobs:
       matrix:
         include:
           - arch: arm64
+            build_arch: arm
             runner: ubuntu-24.04-arm
+            cache_volume: try-ubuntu-cache
+          - arch: amd64
+            build_arch: x86
+            runner: ubuntu-24.04
+            cache_volume: try-ubuntu-cache-amd64
     runs-on: ${{ matrix.runner }}
     # The GNOME 51 backport takes hours when the cache below misses.
     timeout-minutes: 360
     env:
       ISO: ubuntu-live-${{ matrix.arch }}.iso
-      CACHE_VOLUME: try-ubuntu-cache
+      # build.sh's, per architecture
+      CACHE_VOLUME: ${{ matrix.cache_volume }}
     steps:
       - uses: actions/checkout@v5
 
@@ -65,7 +73,7 @@ jobs:
 
       # Rootful podman: the ISO step needs loop devices.
       - name: Build
-        run: sudo ./build.sh --xkb us
+        run: sudo ./build.sh --xkb us --arch ${{ matrix.build_arch }}
 
       - name: Collect the GNOME 51 backport
         id: gnome-collect

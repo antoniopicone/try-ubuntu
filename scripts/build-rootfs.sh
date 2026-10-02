@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the live root filesystem in $ROOTFS: a hand-picked minimal Ubuntu
-# (arm64) via debootstrap, the arm64 "virtual" kernel pruned to what a VM
-# needs, Plymouth, Nautilus, Brave Origin, Tailscale, podman, Python (pip, uv),
+# ($ARCH: arm64 or amd64) via debootstrap; for QEMU the "virtual" kernel
+# pruned to what a VM needs, for real computers ($HARDWARE=1) the generic
+# kernel with all of linux-firmware; Plymouth, Nautilus, Brave Origin, Tailscale, podman, Python (pip, uv),
 # zsh with the pure prompt and eza, snapper, Flatpak with Flathub, fonts,
 # apfs-fuse (built by build-apfs-fuse.sh), and the btrfslive initramfs boot
 # script from overlay/. The desktop (GNOME with GDM) comes from
@@ -12,6 +13,7 @@ set -euo pipefail
 : "${ISO_LABEL:?}" "${PERSIST_SERIAL:?}"
 : "${LIVE_USER:=ubuntu}" "${LIVE_PASSWORD:=ubuntu}" "${LIVE_HOSTNAME:=ubuntu-live}"
 : "${XKB_LAYOUT:=us}"
+: "${ARCH:=arm64}" "${HARDWARE:=0}" "${EMULATED:=0}"
 
 # Brave's package repository (Brave Origin, the browser). Its keyring holds
 # three signing keys.
@@ -27,8 +29,14 @@ FLATHUB_KEY_FPR=6E5C05D979C76DAF93C081354184DD4D907A7CAE
 
 # Tools that are not in the Ubuntu archive, pinned and checked.
 UV_VERSION=0.12.21
-UV_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-aarch64-unknown-linux-gnu.tar.gz"
-UV_SHA256=030b69227b40af8c1981b7301793dc66e71ed3c796ea8688209dd268bd91ec51
+case $ARCH in
+  arm64) UV_TARGET=aarch64-unknown-linux-gnu
+         UV_SHA256=030b69227b40af8c1981b7301793dc66e71ed3c796ea8688209dd268bd91ec51 ;;
+  amd64) UV_TARGET=x86_64-unknown-linux-gnu
+         UV_SHA256=23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0 ;;
+  *) echo "unsupported ARCH: $ARCH" >&2; exit 1 ;;
+esac
+UV_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz"
 PURE_VERSION=1.28.3
 PURE_URL="https://github.com/sindresorhus/pure/archive/refs/tags/v$PURE_VERSION.tar.gz"
 PURE_SHA256=738b523c59823083de490b3eb6c1116fc45c342e6b32a7d3cf05fdd0f8aa75a8
@@ -43,7 +51,8 @@ JETBRAINS_NERD_SHA256=04d5e8f903693f9dd13e16f867e994834e681eb3c72c0d337a770dcda0
 
 # fetch URL SHA256 DEST: download and verify.
 fetch() {
-  curl -fsSL "$1" -o "$3"
+  # A server that doesn't answer for a moment shouldn't cost a whole build
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 --connect-timeout 30 "$1" -o "$3"
   echo "$2  $3" | sha256sum -c --quiet
 }
 
@@ -56,6 +65,20 @@ cleanup() {
 trap cleanup EXIT
 
 bind() { mount --bind "$1" "$2"; chroot_mounts+=("$2"); }
+# check_runs DESCRIPTION CMD...: CMD (in the chroot) must succeed. In an
+# emulated build (EMULATED=1: amd64 under qemu-user on an arm64 host) some
+# downloaded binaries can't run at all (uv: a segfault in the emulator),
+# though they're fine on the CPU they're for and checked by sha256 anyway:
+# there it's only a warning. Native builds of the same files check them.
+check_runs() {
+  local what=$1; shift
+  if in_chroot "$@" >/dev/null 2>&1; then return; fi
+  if ((EMULATED)); then
+    echo "    warning: $what can't be checked in an emulated build"
+  else
+    echo "$what isn't working" >&2; exit 1
+  fi
+}
 in_chroot() { chroot "$ROOTFS" /usr/bin/env -i \
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C.UTF-8 \
   DEBIAN_FRONTEND=noninteractive "$@"; }
@@ -72,7 +95,7 @@ echo "==> debootstrap $SUITE (minbase)"
 # Ubuntu suite uses the same script (gutsy).
 debootstrap_script=/usr/share/debootstrap/scripts/$SUITE
 [[ -e "$debootstrap_script" ]] || debootstrap_script=/usr/share/debootstrap/scripts/gutsy
-debootstrap --variant=minbase --arch=arm64 --components=main,universe \
+debootstrap --variant=minbase --arch="$ARCH" --components=main,universe \
   "$SUITE" "$ROOTFS" "$MIRROR" "$debootstrap_script"
 
 cat > "$ROOTFS/etc/apt/sources.list.d/ubuntu.sources" <<EOF
@@ -141,7 +164,7 @@ Types: deb
 URIs: https://brave-browser-apt-release.s3.brave.com
 Suites: stable
 Components: main
-Architectures: arm64
+Architectures: $ARCH
 Signed-By: /usr/share/keyrings/brave-browser-archive-keyring.gpg
 EOF
 # brave-origin's maintainer scripts come from Chrome's: unless told not to,
@@ -186,7 +209,9 @@ packages=(
   # minimal server base
   systemd-sysv systemd-resolved systemd-timesyncd udev kmod dbus procps
   iproute2 iputils-ping netbase openssh-server sudo less nano
-  linux-image-virtual
+  # installing on a disk (install-system): partitions, the EFI system
+  # partition, the firmware's boot entry
+  fdisk dosfstools efibootmgr
   # boot splash (spinner: the theme GNOME/Fedora use)
   plymouth plymouth-theme-spinner
   # system services the desktops integrate with
@@ -219,6 +244,20 @@ packages=(
   # and the host's shared folder (9p, shown to the user through bindfs)
   spice-vdagent bindfs
 )
+if ((HARDWARE)); then
+  # Real computers: the generic kernel and all of linux-firmware (a
+  # metapackage of every vendor's), Intel's sound DSP firmware and ALSA's
+  # device profiles, Wi-Fi (wpa_supplicant, the regulatory database), the
+  # Vulkan drivers, and on x86 the CPUs' microcode.
+  packages+=(linux-image-generic linux-firmware firmware-sof-signed alsa-ucm-conf
+             wpasupplicant wireless-regdb mesa-vulkan-drivers)
+  if [[ $ARCH == amd64 ]]; then
+    packages+=(intel-microcode amd64-microcode)
+  fi
+else
+  # QEMU: the "virtual" kernel, pruned below to what a VM needs
+  packages+=(linux-image-virtual)
+fi
 in_chroot apt-get install -y "${packages[@]}" "${DESKTOP_PACKAGES[@]}"
 if in_chroot dpkg -s modemmanager >/dev/null 2>&1; then
   echo "modemmanager got installed" >&2; exit 1
@@ -235,6 +274,9 @@ fi
 # checkout's owner on /, /etc and /usr, sudo refuses to run and systemd's
 # sandboxed services (localed) can't write to /etc.
 cp -a --no-preserve=ownership "$OVERLAY/." "$ROOTFS/"
+# For live-limine-update on an installed arm64 system: Limine boots the raw
+# Image inside Ubuntu's EFI zboot vmlinuz, as on the ISO.
+install -Dm755 "$(dirname "$0")/unzboot.py" "$ROOTFS/usr/local/lib/live-install/unzboot.py"
 
 desktop_install
 
@@ -265,10 +307,18 @@ in_chroot update-alternatives --set default.plymouth "$spinner"
 
 # Firewall on at boot: incoming traffic denied except SSH and mDNS (avahi);
 # Tailscale manages its own interface. ufw only writes its rule files here.
+# ufw asks iptables for its version first: iptables-nft can't answer under
+# qemu-user (an emulated build, e.g. amd64 on Apple Silicon, has no
+# netfilter netlink), iptables-legacy can. The rule files are the same
+# either way; nft is back right after.
+in_chroot update-alternatives --quiet --set iptables /usr/sbin/iptables-legacy
+in_chroot update-alternatives --quiet --set ip6tables /usr/sbin/ip6tables-legacy
 in_chroot ufw --force default deny incoming >/dev/null
 in_chroot ufw --force default allow outgoing >/dev/null
 in_chroot ufw allow 22/tcp comment ssh >/dev/null
 in_chroot ufw allow 5353/udp comment mdns >/dev/null
+in_chroot update-alternatives --quiet --set iptables /usr/sbin/iptables-nft
+in_chroot update-alternatives --quiet --set ip6tables /usr/sbin/ip6tables-nft
 sed -i 's/^ENABLED=.*/ENABLED=yes/' "$ROOTFS/etc/ufw/ufw.conf"
 
 # Rootless podman: subordinate ids for the live user.
@@ -296,7 +346,7 @@ mkdir -p "$dl"
 fetch "$UV_URL" "$UV_SHA256" "$dl/uv.tar.gz"
 tar xzf "$dl/uv.tar.gz" -C "$ROOTFS/usr/local/bin" --strip-components=1 --no-same-owner
 chmod 755 "$ROOTFS/usr/local/bin/uv" "$ROOTFS/usr/local/bin/uvx"
-in_chroot uv --version
+check_runs "uv $UV_VERSION" uv --version
 # pure: its two functions go on zsh's fpath, the prompt is enabled for every
 # user in /etc/zsh/zshrc.
 fetch "$PURE_URL" "$PURE_SHA256" "$dl/pure.tar.gz"
@@ -345,8 +395,8 @@ for family in "${nerd_families[@]}"; do
     || { echo "$family is not installed" >&2; exit 1; }
 done
 # Ghostty's settings for every user (JetBrains Mono Nerd Font, Catppuccin Mocha).
-in_chroot runuser -u "$LIVE_USER" -- env HOME="/home/$LIVE_USER" ghostty +validate-config \
-  || { echo "/etc/skel/.config/ghostty/config is not valid" >&2; exit 1; }
+check_runs "Ghostty's config (/etc/skel/.config/ghostty/config)" \
+  runuser -u "$LIVE_USER" -- env HOME="/home/$LIVE_USER" ghostty +validate-config
 
 echo "==> apfs-fuse"
 # Read-only by design (upstream's choice). /usr/sbin/mount.apfs (overlay)
@@ -479,17 +529,19 @@ in_chroot apt-mark showmanual > "$ROOTFS/usr/local/share/live-backup/image-packa
 
 echo "==> Slimming down"
 kver=$(ls "$ROOTFS/usr/lib/modules")
-# Kernel modules: keep filesystems, networking, crypto and the drivers a VM
-# (QEMU virt, virtio) or a plain USB/NVMe/SCSI setup needs. GPU drivers
-# other than virtio-gpu, wireless/ethernet NICs, sound cards other than
-# virtio-sound, media, etc. go.
-keep_modules='^(fs|crypto|lib|arch|block|kernel|mm|virt|security|net/(?!wireless/|mac80211/)[^ ]*|drivers/(virtio|block|cdrom|char|input|hid|tty|rtc|nvme|bluetooth|firmware|acpi|pci|dma|iommu|platform|base|clk|video|md)/|drivers/net/[^/]+\.ko|drivers/gpu/drm/([^/]+\.ko|virtio/|display/|tiny/|ttm/|clients/)|drivers/scsi/[^/]+\.ko|drivers/usb/(core|host|storage|common|class)/|sound/(core|virtio)/)'
-(cd "$ROOTFS/usr/lib/modules/$kver/kernel" && find . -name '*.ko*' -printf '%P\n' \
-  | grep -vP "$keep_modules" | xargs -r rm -f)
-find "$ROOTFS/usr/lib/modules/$kver/kernel" -type d -empty -delete
-# Firmware for real hardware: nothing to load in a VM.
-rm -rf "$ROOTFS/usr/lib/firmware/$kver"
-in_chroot depmod -a "$kver"
+if ((!HARDWARE)); then
+  # Kernel modules: keep filesystems, networking, crypto and the drivers a VM
+  # (QEMU virt, virtio) or a plain USB/NVMe/SCSI setup needs. GPU drivers
+  # other than virtio-gpu, wireless/ethernet NICs, sound cards other than
+  # virtio-sound, media, etc. go.
+  keep_modules='^(fs|crypto|lib|arch|block|kernel|mm|virt|security|net/(?!wireless/|mac80211/)[^ ]*|drivers/(virtio|block|cdrom|char|input|hid|tty|rtc|nvme|bluetooth|firmware|acpi|pci|dma|iommu|platform|base|clk|video|md)/|drivers/net/[^/]+\.ko|drivers/gpu/drm/([^/]+\.ko|virtio/|display/|tiny/|ttm/|clients/)|drivers/scsi/[^/]+\.ko|drivers/usb/(core|host|storage|common|class)/|sound/(core|virtio)/)'
+  (cd "$ROOTFS/usr/lib/modules/$kver/kernel" && find . -name '*.ko*' -printf '%P\n' \
+    | grep -vP "$keep_modules" | xargs -r rm -f)
+  find "$ROOTFS/usr/lib/modules/$kver/kernel" -type d -empty -delete
+  # Firmware for real hardware: nothing to load in a VM.
+  rm -rf "$ROOTFS/usr/lib/firmware/$kver"
+  in_chroot depmod -a "$kver"
+fi
 for m in btrfs isofs loop virtio_gpu virtio_net virtio_scsi virtio_blk sr_mod \
          usbhid hid_generic xhci_pci btusb tun veth bridge overlay nf_tables \
          virtio_snd 9p 9pnet_virtio; do

@@ -2,13 +2,19 @@
 """live-welcome: the first-run welcome app of the GNOME live system (draft).
 
 Starts in the live user's session (autologin) and walks through language,
-keyboard layout, the account (full name, username, password, email), its
-picture (an avatar in one of DiceBear's CC0 styles, or the initials) and
-the appearance
-(light/dark, accent color). The summary's "Start using Ubuntu"
+keyboard layout, installing on a disk (when the computer has one with room
+for it), the account (full name, username, password, email), its picture
+(an avatar in one of DiceBear's CC0 styles, or the initials) and the
+appearance (light/dark, accent color). The summary's "Start using Ubuntu"
 button hands the choices to /usr/local/lib/live-welcome/setup-user (through
 pkexec), which creates the user; then the live session logs out to GDM,
 where the new user logs in with everything already applied.
+
+Installing (/usr/local/lib/live-install/install-system, through pkexec)
+moves the running system onto the chosen disk: the whole disk, erased, or
+its free space, next to what is there. The user is then created on the
+installed system, and instead of logging out the app asks to remove the
+USB stick and restarts into the installed system.
 
 Keyboard layout and appearance are previewed live in the running session.
 The UI speaks English and Italian (switching as soon as a language is
@@ -18,7 +24,9 @@ import base64
 import json
 import os
 import re
+import subprocess
 import sys
+import threading
 
 import gi
 
@@ -31,6 +39,8 @@ import avatars  # noqa: E402
 
 APP_ID = "org.ubuntu.LiveWelcome"
 SETUP_HELPER = "/usr/local/lib/live-welcome/setup-user"
+INSTALL_HELPER = "/usr/local/lib/live-install/install-system"
+LIVE = "/run/btrfslive"
 DONE = "/var/lib/live-welcome/done"
 STORAGE = "/run/btrfslive/storage"
 
@@ -135,6 +145,33 @@ STRINGS = {
         "done_body": "Logging out: log in as {user} with your new password, then choose where to keep your backups.",
         "error_title": "Something Went Wrong",
         "retry": "Try Again",
+        "install_title": "Install Ubuntu",
+        "install_body": "Ubuntu is running from the USB stick. Install it on this computer, "
+                        "or keep trying it: nothing on the disks changes then.",
+        "install_live": "Keep trying it",
+        "install_live_body": "From the USB stick, without installing",
+        "mode_disk": "Erase the whole disk and install Ubuntu on it",
+        "mode_free": "Install in its {free} of free space, next to what is there",
+        "confirm_disk_title": "Erase {model}?",
+        "confirm_disk_body": "Everything on {disk} ({size}) will be lost: Ubuntu takes the "
+                             "whole disk. This can't be undone.",
+        "confirm_free_title": "Install on {model}?",
+        "confirm_free_body": "Ubuntu goes in the {free} of free space of {disk}: what is "
+                             "already there stays. Back up what matters first, all the same.",
+        "erase": "Erase and Install",
+        "install": "Install",
+        "cancel": "Cancel",
+        "installing_title": "Installing Ubuntu",
+        "step_partition": "Preparing the disk…",
+        "step_copy": "Copying the system to the disk…",
+        "step_boot": "Setting up the startup…",
+        "install_back": "Back",
+        "installed_title": "Ubuntu Is Installed",
+        "done_installed_body": "Remove the USB stick, then restart: Ubuntu starts from the disk. "
+                               "Log in as {user} with your new password.",
+        "no_boot_entry": "The firmware didn't take a boot entry: if the computer doesn't start "
+                         "Ubuntu by itself, pick the disk in its boot menu.",
+        "restart": "Restart",
         "blue": "Blue", "teal": "Teal", "green": "Green", "yellow": "Yellow",
         "orange": "Orange", "red": "Red", "pink": "Pink", "purple": "Purple",
         "slate": "Slate",
@@ -210,6 +247,33 @@ STRINGS = {
         "done_body": "Uscita in corso: accedi come {user} con la nuova password, poi scegli dove tenere i tuoi backup.",
         "error_title": "Qualcosa è andato storto",
         "retry": "Riprova",
+        "install_title": "Installa Ubuntu",
+        "install_body": "Ubuntu sta funzionando dalla chiavetta USB. Installalo su questo "
+                        "computer, o continua a provarlo: i dischi restano come sono.",
+        "install_live": "Continua a provarlo",
+        "install_live_body": "Dalla chiavetta, senza installare",
+        "mode_disk": "Cancella tutto il disco e installa Ubuntu",
+        "mode_free": "Installa nei {free} di spazio libero, accanto a quello che c'è",
+        "confirm_disk_title": "Cancellare {model}?",
+        "confirm_disk_body": "Tutto quello che c'è su {disk} ({size}) andrà perso: Ubuntu "
+                             "occupa l'intero disco. Non si può annullare.",
+        "confirm_free_title": "Installare su {model}?",
+        "confirm_free_body": "Ubuntu va nei {free} di spazio libero di {disk}: quello che c'è "
+                             "già resta. Fai comunque prima un backup di ciò che conta.",
+        "erase": "Cancella e installa",
+        "install": "Installa",
+        "cancel": "Annulla",
+        "installing_title": "Installazione di Ubuntu",
+        "step_partition": "Preparazione del disco…",
+        "step_copy": "Copia del sistema sul disco…",
+        "step_boot": "Configurazione dell'avvio…",
+        "install_back": "Indietro",
+        "installed_title": "Ubuntu è installato",
+        "done_installed_body": "Togli la chiavetta USB, poi riavvia: Ubuntu parte dal disco. "
+                               "Accedi come {user} con la nuova password.",
+        "no_boot_entry": "Il firmware non ha accettato una voce di avvio: se il computer non "
+                         "avvia Ubuntu da solo, scegli il disco dal suo menu di avvio.",
+        "restart": "Riavvia",
         "blue": "Blu", "teal": "Verde acqua", "green": "Verde", "yellow": "Giallo",
         "orange": "Arancione", "red": "Rosso", "pink": "Rosa", "purple": "Viola",
         "slate": "Ardesia",
@@ -254,6 +318,12 @@ class WelcomeWindow(Adw.ApplicationWindow):
         self._translatable = []  # (setter, key)
         self._username_edited = False
         self.styles = avatars.load_styles()
+        # Installing: the disks it can go on (None until listed, [] for none),
+        # the chosen one, and whether it's done (then the live medium is gone)
+        self.targets = None
+        self.target = None
+        self.installed = False
+        self.boot_entry = True
 
         provider = Gtk.CssProvider()
         provider.load_from_string(CSS)
@@ -266,6 +336,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
             ("welcome", self._page_welcome()),
             ("language", self._page_language()),
             ("keyboard", self._page_keyboard()),
+            ("install", self._page_install()),
             ("account", self._page_account()),
             *([("avatar", self._page_avatar())] if self.styles else []),
             ("appearance", self._page_appearance()),
@@ -274,6 +345,9 @@ class WelcomeWindow(Adw.ApplicationWindow):
         ]
         for name, widget in self.pages:
             self.stack.add_named(widget, name)
+        # Not a step of its own: shown while installing, between "install"
+        # and "account"
+        self.stack.add_named(self._page_installing(), "installing")
 
         self.back = Gtk.Button(icon_name="go-previous-symbolic")
         self.back.connect("clicked", lambda *_: self._go(-1))
@@ -291,6 +365,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
 
         banner = Adw.Banner(revealed=self._storage() == "ram")
         self._tr(banner.set_title, "no_persist")
+        self.banner = banner
 
         view = Adw.ToolbarView()
         view.add_top_bar(header)
@@ -304,6 +379,7 @@ class WelcomeWindow(Adw.ApplicationWindow):
         self._retranslate()
         self._update()
         GLib.idle_add(self.next.grab_focus)
+        self._list_targets()
 
     # --- helpers -------------------------------------------------------------
 
@@ -339,6 +415,8 @@ class WelcomeWindow(Adw.ApplicationWindow):
             setter(self.t(key))
         if self.styles:
             self.avatar_editor.retranslate()
+        if hasattr(self, "install_group"):
+            self._fill_install()
         self.set_title(self.t("title"))
         self._update()
 
@@ -395,6 +473,81 @@ class WelcomeWindow(Adw.ApplicationWindow):
         box.append(test)
         box.append(group)
         return self._page(box)
+
+    def _page_install(self):
+        self.install_group = self._group("install_title", "install_body")
+        self.install_rows = []
+        return self._page(self.install_group)
+
+    def _fill_install(self):
+        """The choices: keep trying it, or each disk it can go on."""
+        for row in self.install_rows:
+            self.install_group.remove(row)
+        self.install_rows = []
+        items = [(None, self.t("install_live"), self.t("install_live_body"))]
+        for target in self.targets or []:
+            size = GLib.format_size(target["size"])
+            body = (self.t("mode_disk") if target["mode"] == "disk"
+                    else self.t("mode_free").format(free=GLib.format_size(target["bytes"])))
+            items.append((target, f"{target['model']} · {size} · {target['disk']}", body))
+        first = None
+        for target, title, subtitle in items:
+            check = Gtk.CheckButton(active=target is self.target)
+            if first:
+                check.set_group(first)
+            first = first or check
+            row = Adw.ActionRow(title=GLib.markup_escape_text(title),
+                                subtitle=GLib.markup_escape_text(subtitle),
+                                activatable_widget=check)
+            row.add_prefix(check)
+            icon = "media-removable-symbolic" if target is None else (
+                "drive-harddisk-symbolic" if target["mode"] == "free" else "edit-clear-all-symbolic")
+            row.add_suffix(Gtk.Image(icon_name=icon))
+            check.connect("toggled", lambda c, t=target: c.get_active() and self._on_target(t))
+            self.install_group.add(row)
+            self.install_rows.append(row)
+
+    def _list_targets(self):
+        """In the background: the disks install-system can use. Only on the
+        live system, and the welcome app shows the page only when there are
+        some."""
+        if not os.path.isdir(LIVE):
+            self.targets = []
+            return
+
+        def work():
+            try:
+                out = subprocess.run(["pkexec", INSTALL_HELPER, "list"], capture_output=True,
+                                     text=True, timeout=60).stdout
+                targets = json.loads(out.strip().splitlines()[-1])
+                if not isinstance(targets, list):
+                    targets = []
+            except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+                targets = []
+            GLib.idle_add(self._targets_listed, targets)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _targets_listed(self, targets):
+        self.targets = targets
+        self._fill_install()
+        return GLib.SOURCE_REMOVE
+
+    def _on_target(self, target):
+        self.target = target
+        self._update()
+
+    def _page_installing(self):
+        self.installing_status = Adw.StatusPage(vexpand=True, icon_name="drive-harddisk-symbolic")
+        self.install_progress = Gtk.ProgressBar(width_request=320, halign=Gtk.Align.CENTER)
+        self.install_back = Gtk.Button(halign=Gtk.Align.CENTER, visible=False)
+        self.install_back.add_css_class("pill")
+        self._tr(self.install_back.set_label, "install_back")
+        self.install_back.connect("clicked", lambda *_: self._back_to_install())
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        box.append(self.install_progress)
+        box.append(self.install_back)
+        self.installing_status.set_child(box)
+        return self.installing_status
 
     def _page_account(self):
         group = self._group("account_title", "account_body")
@@ -496,9 +649,15 @@ class WelcomeWindow(Adw.ApplicationWindow):
         self.retry.add_css_class("pill")
         self._tr(self.retry.set_label, "retry")
         self.retry.connect("clicked", lambda *_: self._show("summary"))
+        self.restart = Gtk.Button(halign=Gtk.Align.CENTER, visible=False)
+        self.restart.add_css_class("pill")
+        self.restart.add_css_class("suggested-action")
+        self._tr(self.restart.set_label, "restart")
+        self.restart.connect("clicked", lambda *_: self._reboot())
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         box.append(self.spinner)
         box.append(self.retry)
+        box.append(self.restart)
         self.finish_status.set_child(box)
         return self.finish_status
 
@@ -516,6 +675,8 @@ class WelcomeWindow(Adw.ApplicationWindow):
 
     def _go(self, step):
         index = min(max(self._index() + step, 0), len(self.pages) - 2)
+        if self.pages[index][0] == "install" and (self.installed or not self.targets):
+            index = min(max(index + step, 0), len(self.pages) - 2)
         self._show(self.pages[index][0])
 
     def _update(self):
@@ -523,11 +684,16 @@ class WelcomeWindow(Adw.ApplicationWindow):
         titles = {"welcome": "title", "language": "language_title",
                   "keyboard": "keyboard_title", "account": "account_title",
                   "avatar": "avatar_title", "appearance": "appearance_title", "summary": "summary_title",
-                  "finish": "working_title"}
+                  "finish": "working_title", "install": "install_title",
+                  "installing": "installing_title"}
         self.window_title.set_title(self.t(titles[name]))
-        self.back.set_visible(name not in ("welcome", "finish"))
-        self.next.set_visible(name != "finish")
-        self.next.set_label(self.t({"welcome": "start", "summary": "finish"}.get(name, "continue")))
+        self.back.set_visible(name not in ("welcome", "finish", "installing")
+                              and not (self.installed and name == "account"))
+        self.next.set_visible(name not in ("finish", "installing"))
+        next_key = {"welcome": "start", "summary": "finish"}.get(name, "continue")
+        if name == "install" and self.target:
+            next_key = "erase" if self.target["mode"] == "disk" else "install"
+        self.next.set_label(self.t(next_key))
         self.next.set_sensitive(name != "account" or self._account_error() is None)
         if name == "account":
             error = self._account_error(show_all=False)
@@ -538,10 +704,99 @@ class WelcomeWindow(Adw.ApplicationWindow):
             self._fill_summary()
 
     def _on_next(self, *_):
-        if self.stack.get_visible_child_name() == "summary":
+        name = self.stack.get_visible_child_name()
+        if name == "summary":
             self._finish()
+        elif name == "install" and self.target:
+            self._confirm_install()
         else:
             self._go(1)
+
+    # --- installing ----------------------------------------------------------
+
+    def _confirm_install(self):
+        target = self.target
+        values = {"model": target["model"], "disk": target["disk"],
+                  "size": GLib.format_size(target["size"]),
+                  "free": GLib.format_size(target["bytes"])}
+        kind = "disk" if target["mode"] == "disk" else "free"
+        dialog = Adw.AlertDialog(heading=self.t(f"confirm_{kind}_title").format(**values),
+                                 body=self.t(f"confirm_{kind}_body").format(**values))
+        dialog.add_response("cancel", self.t("cancel"))
+        dialog.add_response("install", self.t("erase" if kind == "disk" else "install"))
+        dialog.set_response_appearance(
+            "install", Adw.ResponseAppearance.DESTRUCTIVE if kind == "disk"
+            else Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        dialog.connect("response", lambda _d, r: r == "install" and self._install(target))
+        dialog.present(self)
+
+    def _install(self, target):
+        self.stack.set_visible_child_name("installing")
+        self.installing_status.set_icon_name("drive-harddisk-symbolic")
+        self.installing_status.set_title(self.t("installing_title"))
+        self.installing_status.set_description(self.t("step_partition"))
+        self.install_progress.set_visible(True)
+        self.install_progress.set_fraction(0)
+        self.install_back.set_visible(False)
+        self._update()
+
+        def work():
+            reply = {"ok": False, "error": "install-system"}
+            try:
+                proc = subprocess.Popen(["pkexec", INSTALL_HELPER, "install", target["disk"],
+                                         target["mode"]], stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True)
+                last = ""
+                for line in proc.stdout:
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        last = line.strip() or last
+                        continue
+                    if "step" in message:
+                        GLib.idle_add(self._install_step, message["step"],
+                                      message.get("fraction", 0))
+                    else:
+                        reply = message
+                if proc.wait() != 0 and reply.get("ok"):
+                    reply = {"ok": False, "error": last}
+            except OSError as e:
+                reply = {"ok": False, "error": str(e)}
+            GLib.idle_add(self._install_done, reply)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _install_step(self, step, fraction):
+        self.installing_status.set_description(self.t(f"step_{step}"))
+        # The copy is most of the time: the steps take parts of the bar
+        start, size = {"partition": (0, 0.05), "copy": (0.05, 0.85), "boot": (0.9, 0.1)}[step]
+        self.install_progress.set_fraction(start + size * fraction)
+        return GLib.SOURCE_REMOVE
+
+    def _install_done(self, reply):
+        if not reply.get("ok"):
+            self.installing_status.set_icon_name("dialog-warning-symbolic")
+            self.installing_status.set_title(self.t("error_title"))
+            self.installing_status.set_description(
+                GLib.markup_escape_text(reply.get("error") or "install-system"))
+            self.install_progress.set_visible(False)
+            self.install_back.set_visible(True)
+            return GLib.SOURCE_REMOVE
+        self.installed = True
+        self.boot_entry = reply.get("boot_entry", True)
+        # The system is on the disk now: what's changed stays
+        self.banner.set_revealed(False)
+        self._show("account")
+        return GLib.SOURCE_REMOVE
+
+    def _back_to_install(self):
+        # The disks may have changed (a half-made partition table): list
+        # them again
+        self.targets, self.target = None, None
+        self._fill_install()
+        self._show("install")
+        self._list_targets()
 
     # --- choices -------------------------------------------------------------
 
@@ -671,10 +926,23 @@ class WelcomeWindow(Adw.ApplicationWindow):
             return
         self.spinner.set_visible(False)
         self.finish_status.set_icon_name("object-select-symbolic")
+        if self.installed:
+            # The live user goes at the next boot (live-retire-user.service)
+            body = self.t("done_installed_body").format(user=reply["user"])
+            if not self.boot_entry:
+                body += "\n\n" + self.t("no_boot_entry")
+            self.finish_status.set_title(self.t("installed_title"))
+            self.finish_status.set_description(GLib.markup_escape_text(body))
+            self.restart.set_visible(True)
+            self.restart.grab_focus()
+            return
         self.finish_status.set_title(self.t("done_title"))
         self.finish_status.set_description(
             GLib.markup_escape_text(self.t("done_body").format(user=reply["user"])))
         GLib.timeout_add_seconds(3, self._logout)
+
+    def _reboot(self):
+        Gio.Subprocess.new(["systemctl", "reboot"], Gio.SubprocessFlags.NONE)
 
     def _logout(self):
         Gio.Subprocess.new(["gnome-session-quit", "--logout", "--no-prompt"],

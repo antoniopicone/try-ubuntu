@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Boots the live ISO (see build.sh) in qemu-system-aarch64 with UEFI (edk2),
 # hardware acceleration (hvf on macOS, kvm on Linux) and a virtio-gpu display.
+# An x86 ISO (ubuntu-live-amd64*.iso, or --arch x86) boots in
+# qemu-system-x86_64 instead: accelerated on an x86 host (kvm, or hvf on an
+# Intel Mac), emulated (slow) on Apple Silicon.
 # On Apple Silicon it uses the QEMU from qemu/build.sh when it's there
 # (dist/qemu-macos-arm64, which install.sh downloads from the release): the
 # desktop then renders on the Mac's GPU (virtio-gpu-gl, VirGL -> ANGLE ->
@@ -27,6 +30,8 @@ usage() {
 Usage: ./run-qemu.sh [options]
 
   --iso PATH     ISO to boot (default: dist/ubuntu-live-arm64.iso)
+  --arch ARCH    the ISO's architecture, arm or x86 (default: from the ISO's
+                 name, ubuntu-live-amd64* being x86)
   --lang LOCALE  language of the live session (e.g. it_IT, de; default: the
                  host's). The ISO speaks English, Italian, Spanish, French,
                  German and Portuguese (Brazil); anything else is English
@@ -75,9 +80,17 @@ nested=1
 qemu=""
 shared=""
 audio=1
+arch=""
 while (($#)); do
   case "$1" in
     --iso)  iso=$2; shift 2 ;;
+    --arch)
+      case "$2" in
+        arm|arm64|aarch64) arch=arm64 ;;
+        x86|x86_64|amd64) arch=amd64 ;;
+        *) usage >&2; exit 64 ;;
+      esac
+      shift 2 ;;
     --lang) lang=$2; shift 2 ;;
     --mem)  mem=$2; shift 2 ;;
     --cpus) cpus=$2; shift 2 ;;
@@ -102,15 +115,26 @@ done
 
 [[ -f "$iso" ]] || {
   echo "ISO not found: $iso (run ./build.sh first, or install.sh to download it)" >&2; exit 1; }
+if [[ -z "$arch" ]]; then
+  case "$(basename "$iso")" in *amd64*|*x86*) arch=amd64 ;; *) arch=arm64 ;; esac
+fi
+# x86's state apart from arm64's: a persistent disk only works with its
+# own ISO, and the UEFI variable stores differ.
+if [[ $arch == amd64 ]]; then
+  [[ "$persist" == "$project_dir/dist/persist.qcow2" ]] && persist="$project_dir/dist/persist-amd64.qcow2"
+  [[ -n "$vars" ]] || vars="$project_dir/dist/efivars-amd64.fd"
+fi
 # The QEMU built by qemu/build.sh (install.sh puts it in the same place),
 # else the system's.
+qemu_name=qemu-system-aarch64
+[[ $arch == amd64 ]] && qemu_name=qemu-system-x86_64
 bundled="$project_dir/dist/qemu-macos-arm64/bin/qemu-system-aarch64"
-if [[ -z "$qemu" && -x "$bundled" && $(uname -s) == Darwin && $(uname -m) == arm64 ]]; then
+if [[ -z "$qemu" && $arch == arm64 && -x "$bundled" && $(uname -s) == Darwin && $(uname -m) == arm64 ]]; then
   qemu=$bundled
 fi
-[[ -n "$qemu" ]] || qemu=$(command -v qemu-system-aarch64 || true)
+[[ -n "$qemu" ]] || qemu=$(command -v "$qemu_name" || true)
 [[ -n "$qemu" && -x "$qemu" ]] || {
-  echo "qemu-system-aarch64 not found (macOS: ./qemu/build.sh or brew install qemu)" >&2; exit 1; }
+  echo "$qemu_name not found (macOS: brew install qemu$([[ $arch == arm64 ]] && echo ", or ./qemu/build.sh"))" >&2; exit 1; }
 
 # Defaults from the host: half of its CPUs, a third of its RAM (min 4 GiB).
 if [[ -z "$cpus" ]]; then
@@ -146,21 +170,36 @@ fi
 # distro's package (AAVMF on Debian/Ubuntu, edk2-aarch64 on Arch and Fedora).
 share="$(cd "$(dirname "$qemu")/.." && pwd)/share/qemu"
 code=""
-for f in "$share/edk2-aarch64-code.fd" /opt/homebrew/share/qemu/edk2-aarch64-code.fd \
-         /usr/local/share/qemu/edk2-aarch64-code.fd \
-         /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
-         /usr/share/edk2/aarch64/QEMU_CODE.fd /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw; do
+if [[ $arch == amd64 ]]; then
+  # OVMF: QEMU's (Homebrew's edk2-x86_64-code.fd), or the distro's
+  firmware_list=("$share/edk2-x86_64-code.fd" /opt/homebrew/share/qemu/edk2-x86_64-code.fd
+                 /usr/local/share/qemu/edk2-x86_64-code.fd
+                 /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd
+                 /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/edk2/ovmf/OVMF_CODE.fd)
+  vars_templates=(edk2-i386-vars.fd OVMF_VARS_4M.fd OVMF_VARS.4m.fd OVMF_VARS.fd)
+else
+  firmware_list=("$share/edk2-aarch64-code.fd" /opt/homebrew/share/qemu/edk2-aarch64-code.fd
+                 /usr/local/share/qemu/edk2-aarch64-code.fd
+                 /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+                 /usr/share/edk2/aarch64/QEMU_CODE.fd /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw)
+  vars_templates=(edk2-arm-vars.fd)
+fi
+for f in "${firmware_list[@]}"; do
   [[ -f "$f" ]] && { code=$f; share=$(dirname "$f"); break; }
 done
-[[ -n "$code" ]] || { echo "No aarch64 UEFI firmware (edk2) found" >&2; exit 1; }
+[[ -n "$code" ]] || { echo "No $arch UEFI firmware (edk2/OVMF) found" >&2; exit 1; }
 
 # Writable EFI variable store, same size as the code image (pflash units
 # must match). Kept next to the ISO so boot entries persist between runs.
 [[ -n "$vars" ]] || vars="$project_dir/dist/efivars.fd"
 if [[ ! -f "$vars" ]]; then
   mkdir -p "$(dirname "$vars")"
-  if [[ -f "$share/edk2-arm-vars.fd" ]]; then
-    cp "$share/edk2-arm-vars.fd" "$vars"
+  template=""
+  for t in "${vars_templates[@]}"; do
+    [[ -f "$share/$t" ]] && { template="$share/$t"; break; }
+  done
+  if [[ -n "$template" ]]; then
+    cp "$template" "$vars"
   else
     size=$(stat -c %s "$code" 2>/dev/null || stat -f %z "$code")
     dd if=/dev/zero of="$vars" bs=1 count=0 seek="$size" 2>/dev/null
@@ -210,6 +249,17 @@ if [[ -n "$persist" ]]; then
 fi
 
 machine=virt
+if [[ $arch == amd64 ]]; then
+  machine=q35
+  if [[ $(uname -s) == Linux && $(uname -m) == x86_64 && -w /dev/kvm ]]; then
+    accel=(-accel kvm -cpu host)
+  elif [[ $(uname -s) == Darwin && $(uname -m) == x86_64 ]]; then
+    accel=(-accel hvf -cpu host)
+  else
+    accel=(-accel tcg,thread=multi -cpu max)
+    echo "Emulating x86 (no acceleration on this $(uname -m) host): it's slow." >&2
+  fi
+else
 case "$(uname -s)" in
   Darwin) if [[ $(uname -m) == arm64 ]]; then
             # HVF has no usable guest PMU: don't advertise one.
@@ -237,6 +287,7 @@ case "$(uname -s)" in
           fi ;;
   *)      accel=(-accel tcg -cpu max) ;;
 esac
+fi
 
 # At EL2 under HVF, edk2's timer interrupt (the EL2 physical timer) never
 # fires: anything in the firmware that waits, Limine's menu included, hangs.
@@ -288,7 +339,7 @@ has_device() { grep -qF "name \"$1\"" <<<"$qemu_devices"; }
 # OpenGL display: on macOS that's the one from qemu/build.sh, whose Cocoa
 # window renders through ANGLE (OpenGL ES) on Metal. It follows the window's
 # size and the display's refresh rate.
-if ((gpu)) && [[ -z "$vnc" && $(uname -s) == Darwin ]] && has_device virtio-gpu-gl-pci; then
+if ((gpu)) && [[ $arch == arm64 && -z "$vnc" && $(uname -s) == Darwin ]] && has_device virtio-gpu-gl-pci; then
   gpu=1
 else
   gpu=0
@@ -300,6 +351,7 @@ elif ((gpu)); then
   display=(-device virtio-gpu-gl-pci -display cocoa,gl=es,zoom-to-fit=on,left-command-key=on)
 else
   display=(-device virtio-gpu-pci)
+  [[ $arch == amd64 ]] && display=(-device virtio-vga)
   if [[ -n "$vnc" ]]; then
     display+=(-display none -vnc "127.0.0.1$vnc")
   elif [[ $(uname -s) == Darwin ]]; then

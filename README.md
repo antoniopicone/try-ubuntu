@@ -21,23 +21,27 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
 ```
 
 Options after `sh -s --` go to [run-qemu.sh](run-qemu.sh), except
-`--rebuild`:
+`--rebuild`, `--arch` and `--on-usb`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh -s -- --lang de_DE --no-persist
 curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh -s -- --rebuild
+curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh -s -- --arch x86
+curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh -s -- --arch x86 --on-usb
 ```
 
-- **Which ISO**: the one for the host's CPU, when the release has it. Right
-  now releases only have `ubuntu-live-arm64.iso`: it runs with hardware
-  acceleration on Apple Silicon (hvf) and arm64 Linux (kvm), and emulated
-  (TCG, slow) on x86_64.
+- **Which ISO**: `--arch arm` (the default) or `--arch x86`. The releases
+  have `ubuntu-live-arm64.iso` and `ubuntu-live-amd64.iso`. An ISO runs
+  with hardware acceleration on a host of its own architecture (hvf on
+  Apple Silicon or an Intel Mac, kvm on Linux), and emulated (TCG, slow)
+  on the other.
 - **QEMU**: on Apple Silicon, the release's own build (see
   [QEMU for Apple Silicon](#qemu-for-apple-silicon)), with GPU acceleration
   and nested virtualization; nothing gets installed system-wide. On an Intel
   Mac it's Homebrew's (`brew install qemu`), and on Linux it's installed with
   apt (Debian, Ubuntu), dnf (Fedora) or pacman (Arch), together with the
-  aarch64 UEFI firmware (this uses sudo).
+  UEFI firmware (AAVMF or OVMF; this uses sudo). x86 ISOs always use the
+  system's `qemu-system-x86_64` (Homebrew's on a Mac).
 - **Files**: the ISO, the persistent disk and `run-qemu.sh` go in
   `~/.local/share/try-ubuntu` (set `TRY_UBUNTU_DIR` to change it). The ISO
   is checked against the release's `SHA256SUMS`, and an interrupted
@@ -53,11 +57,15 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
   persistent disks and the UEFI variables (`efivars.fd`) stay. A persistent
   disk is still moved aside when the latest release isn't the one it was
   made with. Homebrew's or the distribution's QEMU isn't touched.
+- **A USB stick for a real computer** (`--on-usb`): see
+  [On a real computer](#on-a-real-computer).
 
 ## Build it
 
 ```bash
 ./build.sh --xkb it          # → dist/ubuntu-live-arm64.iso (~1.4 GB)
+./build.sh --arch x86        # → dist/ubuntu-live-amd64.iso (emulated on Apple Silicon: slow)
+./build.sh --hardware        # → dist/ubuntu-live-arm64-hardware.iso, for real computers
 ./qemu/build.sh              # macOS: → dist/qemu-macos-arm64 (optional, GPU + nested virtualization)
 ./run-qemu.sh                # boot it in a window (--serial: serial console in the terminal too)
 ./run-qemu.sh --lang de_DE   # boot in German instead of the host's language
@@ -78,6 +86,94 @@ QEMU on `PATH` (e.g. Homebrew's), and GNOME renders in software.
 On first boot the live user (`ubuntu`) logs in by itself and the welcome
 app takes over: it creates your user and logs out to GDM (see
 [The desktop](#the-desktop)).
+
+## On a real computer
+
+```bash
+./install.sh --arch x86 --on-usb      # from a checkout, or through curl | sh -s -- --arch x86 --on-usb
+```
+
+`install.sh --on-usb` makes a live USB stick for a real computer:
+
+1. **It builds the ISO locally.** The releases' ISOs are made for QEMU:
+   the "virtual" kernel cut down to what a VM needs, and no firmware.
+   `build.sh --hardware` makes `ubuntu-live-<arch>-hardware.iso` instead,
+   with the generic kernel, all of `linux-firmware` (every vendor's: Wi-Fi,
+   GPUs, Bluetooth), Intel's sound DSP firmware, ALSA's device profiles,
+   wpa_supplicant, the Vulkan drivers and, on x86, the CPU microcode. That
+   ISO is over GitHub's 2 GiB limit for a release asset, hence the local
+   build. It uses the release's sources (or the checkout install.sh is run
+   from) and podman. On a Mac, install.sh installs podman with Homebrew and
+   creates a rootful machine if there's none. The first build compiles
+   GNOME 51, which takes 1–2 hours. For x86 on Apple Silicon everything
+   runs emulated (qemu-user in the podman machine), so it takes many
+   hours. Later builds reuse the cache. In an emulated build, the ISO
+   step runs in a native container on the same cache, since qemu-user
+   can't pass btrfs's ioctls (snapshot, resize) on. The checks that run
+   downloaded binaries (uv, rclone, Ghostty's config) only warn there,
+   since some can't run under the emulator. Their sha256 is checked
+   anyway, and native builds run them. Other arguments go to build.sh
+   (e.g. `--xkb it`).
+2. **It writes the ISO to a USB stick.** It lists the USB disks (`diskutil`
+   on macOS, `lsblk` on Linux) and asks which one to use. You confirm by
+   typing the disk's name, and it writes the ISO with `dd`. The ISO is a
+   hybrid image, so the stick boots like a CD.
+
+The computer has to boot it through UEFI with **Secure Boot off**, because
+Limine isn't signed. In the live session, the welcome app can install
+Ubuntu on the computer.
+
+### Installing on a disk
+
+Right after the keyboard, the welcome app lists the disks the system can go
+on ([install-system](overlay/usr/local/lib/live-install/install-system)
+`list`). Each needs at least 20 GB:
+
+- **the whole disk**, erased: GPT, a 512 MiB EFI system partition and a
+  btrfs partition;
+- **its free space**, next to what's already there (Windows, say): on a
+  GPT disk, the two partitions go in its largest unpartitioned stretch,
+  and the other partitions stay as they are.
+
+"Keep trying it" is the default. A disk the live system itself stands on
+(the USB stick, the persistent disk) or with a mounted partition is never
+offered. Choosing a disk asks for confirmation, then `install-system
+install` does the work. It runs through `pkexec`, under a polkit rule that
+lets the live session run it without a password. It refuses on an
+installed system or once the welcome app is done, so the rule can't be
+used to erase disks later.
+
+**How the system gets to the disk.** The running root filesystem is the
+ISO's read-only seed plus a writable sprout, in RAM or on the persistent
+disk (see [How the live btrfs works](#how-the-live-btrfs-works)).
+install-system adds the new btrfs partition to it with `btrfs device add`,
+then removes the sprout and the seed with `btrfs device remove`: btrfs
+moves everything they held onto the partition while the system keeps
+running. Nothing is copied by hand. The subvolumes, the snapper
+snapshots, and what the session already changed (language, keyboard,
+theme) all come along, and the live medium is no longer needed: its
+loops are detached and it's unmounted. Then:
+
+- `/etc/fstab` mounts `@`, `@home`, `@var` and `@snapshots` from the
+  partition, and the EFI system partition on `/boot/efi`.
+- The kernel the ISO booted goes back in `/boot` (the ISO keeps it as
+  `live/vmlinuz`), with an initramfs for booting from disk
+  (`update-initramfs`).
+- [live-limine-update](overlay/usr/local/sbin/live-limine-update) puts
+  Limine on the EFI system partition, along with copies of the two newest
+  kernels and their initramfs (on arm64, the raw `Image` that
+  `unzboot.py` extracts), and writes its menu: `root=UUID=… rootflags=subvol=@`.
+  The kernel's and initramfs-tools' hooks (`/etc/kernel/postinst.d`,
+  `postrm.d`, `/etc/initramfs/post-update.d`) run it again on every kernel
+  update. On the live system it does nothing.
+- `efibootmgr` adds a boot entry, "Ubuntu (try-ubuntu)", first in the boot
+  order. Limine is also at the fallback path `\EFI\BOOT\`, for firmware
+  that loses boot entries.
+
+The welcome app then goes on as usual: account, picture, appearance. Its
+last page doesn't log out: it asks to remove the USB stick and offers
+**Restart**. The `ubuntu` user is deleted at that first boot from the disk
+(live-retire-user.service, before GDM).
 
 ## What's in it
 
@@ -352,6 +448,7 @@ started by install.sh):
 
 | Option | |
 |---|---|
+| `--arch arm\|x86` | the ISO's architecture (default: from its name, `ubuntu-live-amd64*` being x86). x86 runs in `qemu-system-x86_64` on a q35 machine with OVMF: kvm on an x86 Linux host, hvf on an Intel Mac, emulated elsewhere. Its persistent disk and UEFI variables are `persist-amd64.qcow2` and `efivars-amd64.fd` |
 | *(none)* | the ISO in a Cocoa window. With `dist/qemu-macos-arm64`, the desktop renders on the Mac's GPU (virtio-gpu-gl) and the guest has `/dev/kvm` where the Mac allows it; with any other QEMU, it renders in software (llvmpipe) on a virtio-gpu |
 | `--lang LOCALE` | language of the live session, e.g. `it_IT` or `de` (default: the host's, see below) |
 | `--vnc :1` | graphics over VNC at `127.0.0.1:5901` instead of a window (software rendering) |
@@ -756,10 +853,13 @@ Pushing a `v*` tag runs [.github/workflows/release.yml](.github/workflows/releas
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
-- It builds the ISO with `./build.sh --xkb us` on a native arm64 runner
-  (`ubuntu-24.04-arm`), with rootful podman, since the ISO step needs loop
-  devices.
-- The GNOME 51 backport (`/cache/gnome-repo`) is kept in the Actions cache.
+- It builds the ISOs with `./build.sh --xkb us`, each on a native runner:
+  arm64 on `ubuntu-24.04-arm`, amd64 (`--arch x86`) on `ubuntu-24.04`. They
+  use rootful podman, since the ISO step needs loop devices. These are the
+  QEMU flavour. The real-computer one (`--hardware`) is built locally by
+  `install.sh --on-usb`.
+- The GNOME 51 backport (`/cache/gnome-repo`) is kept in the Actions cache,
+  one per architecture.
   Only the first build takes hours: later ones rebuild just the packages
   that changed (a new 26.10 version, different local patches, one added to
   `build-gnome.sh`). To rebuild everything, e.g. after changing the
@@ -767,7 +867,7 @@ git tag v1.0.0 && git push origin v1.0.0
   (Actions → Caches).
 - It builds `qemu-macos-arm64.tar.gz` with `./qemu/build.sh` on a
   `macos-15` runner, caching the downloads.
-- It publishes a release with `ubuntu-live-arm64.iso`,
+- It publishes a release with `ubuntu-live-arm64.iso`, `ubuntu-live-amd64.iso`,
   `qemu-macos-arm64.tar.gz` and `SHA256SUMS`.
   A release asset can be at most 2 GiB, and the build fails if the ISO is
   bigger. [install.sh](install.sh) downloads from there.
@@ -776,15 +876,22 @@ git tag v1.0.0 && git push origin v1.0.0
 
 - The backported GNOME 51 packages (and glib, gtk4, pango…) get no
   updates from 26.04. Rebuilding picks up whatever 26.10 has at that point.
-- With `--no-persist`, everything lives in RAM. The ISO has no installer.
+- With `--no-persist`, everything lives in RAM.
+- On real computers: UEFI only (no legacy BIOS boot), with Secure Boot off.
+  An installed system's Limine menu has its kernels but not snapper's
+  snapshots: booting a snapshot is for the live system.
+- Installing into free space needs a GPT disk. An MBR disk can only be
+  installed on whole.
 - The welcome app is a first draft:
   - its UI only speaks English and Italian
   - it offers six languages and ten keyboard layouts
   - it has no timezone page
 - The host's language reaches the guest only under QEMU (`run-qemu.sh`);
   on other hypervisors or hardware the live session starts in English.
-- No sound drivers other than virtio-sound, and no firmware for real
-  hardware (Wi-Fi, non-virtio GPUs): the image is aimed at VMs.
+- The QEMU flavour (the releases' ISOs) has no sound drivers other than
+  virtio-sound and no firmware for real hardware (Wi-Fi, non-virtio
+  GPUs): it's aimed at VMs. For real computers, `build.sh --hardware`
+  (what `install.sh --on-usb` builds).
 - With the QEMU from `qemu/build.sh`, sound is output only (no
   microphone), and `--vnc` doesn't work (no VNC server in it): use
   Homebrew's with `--qemu`.

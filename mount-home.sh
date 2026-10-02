@@ -80,7 +80,8 @@ fi
 podman machine ssh "sudo modprobe -a nbd isofs btrfs" >/dev/null
 
 echo "==> Mount image"
-podman build -q -t "$image" -f - "$project_dir" >/dev/null <<'EOF'
+podman build -q --platform "linux/$(podman info --format '{{.Host.Arch}}')" -t "$image" \
+  -f - "$project_dir" >/dev/null <<'EOF'
 FROM docker.io/library/ubuntu:26.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       btrfs-progs qemu-utils samba util-linux && rm -rf /var/lib/apt/lists/*

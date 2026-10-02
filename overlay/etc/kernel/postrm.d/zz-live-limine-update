@@ -1,0 +1,4 @@
+#!/bin/sh
+# Kernels and initramfs on the EFI system partition for Limine, on a system
+# installed from the live ISO (a no-op on the live system).
+exec /usr/local/sbin/live-limine-update
