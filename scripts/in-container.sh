@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Entry point inside the privileged builder container:
-# GNOME 51 backport, apfs-fuse, icloud-linux -> rootfs -> ISO.
+# GNOME packages with local fixes, apfs-fuse, icloud-linux -> rootfs -> ISO.
 # With arguments, only those steps (gnome apfs icloud rootfs iso): build.sh
 # runs the ISO step apart, in a native container, when the rest is
 # emulated (qemu-user can't pass btrfs's ioctls on, which the ISO step uses).

@@ -26,9 +26,8 @@
 # space). The releases' ISOs are made for QEMU (the "virtual" kernel, no
 # firmware): this builds the real-computer flavour locally instead
 # (build.sh --hardware: the generic kernel, all of linux-firmware), from the
-# release's sources (or the checkout this script is in), with podman. The
-# first build compiles GNOME 51: hours (many more for x86 on Apple Silicon,
-# emulated). Then it lists the USB disks, asks which one to erase, asks
+# release's sources (or the checkout this script is in), with podman (many
+# hours for x86 on Apple Silicon, emulated). Then it lists the USB disks, asks which one to erase, asks
 # again, and writes the ISO to it. Other arguments go to build.sh (--xkb it).
 # The computer must boot it with Secure Boot off (Limine isn't signed).
 #
@@ -284,7 +283,7 @@ on_usb() {
     if [ "$arch" != "$host" ]; then
       warn "building $arch on $host is emulated: the first build takes many hours"
     else
-      warn "the first build compiles GNOME 51: it takes 1-2 hours (later ones minutes)"
+      warn "the first build takes a while (later ones minutes)"
     fi
     if [ "$os" = Linux ]; then
       # Rootful podman: the ISO step needs loop devices

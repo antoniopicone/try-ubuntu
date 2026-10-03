@@ -1,37 +1,24 @@
 #!/usr/bin/env bash
-# Backports GNOME 51 to Ubuntu 26.04: rebuilds, against 26.04, the Ubuntu
-# 26.10 ($BACKPORT_SUITE) source packages of GNOME 51's core and of the
-# libraries it needs newer versions of, in dependency order. The .debs go
-# into a local apt repository ($GNOME_REPO) that build-rootfs.sh installs
-# from, and every package builds against the ones before it. A package is
-# skipped when the repository already holds its build (cached in the podman
-# volume): ~1-2 hours the first time. Local fixes in
-# $GNOME_PATCH_DIR/<source>/*.patch go on top of the package's own patches.
+# GNOME 50 is Ubuntu 26.04's own: this only rebuilds the GNOME sources that
+# have local fixes ($GNOME_PATCH_DIR/<source>/*.patch, on top of the
+# package's own patches), from 26.04's latest version (resolute-updates,
+# resolute-security). The .debs go into a local apt repository
+# ($GNOME_REPO) that build-rootfs.sh installs from. A package is skipped
+# when the repository already holds its build (cached in the podman volume).
 #
 # Runs in the builder container (an Ubuntu 26.04 image), which it changes:
-# build dependencies and the backported libraries get installed into it.
+# the build dependencies get installed into it.
 set -euo pipefail
 
 : "${GNOME_REPO:?}" "${GNOME_PATCH_DIR:?}" "${CACHE_DIR:?}" "${MIRROR:?}"
-: "${BACKPORT_SUITE:=stonking}"
 
-# Sources to rebuild, in build order. The GNOME 51 core: gsettings-desktop-schemas,
-# gnome-desktop, gnome-session, gnome-settings-daemon, mutter, gdm3,
-# xdg-desktop-portal-gnome, nautilus, gnome-shell, gnome-control-center, and
-# the Extensions app (26.04's pins gnome-shell to its exact 50.x version).
-# The rest are what those need at build time in a newer version than 26.04
-# has (debhelper 14 is only a build tool), and ibus, which gtk4 4.24 Breaks
-# in 26.04's version. Everything else (libc, systemd, Mesa, mozjs...) stays
-# 26.04's.
-BACKPORTS=(
-  debhelper wayland wayland-protocols glib2.0 pango1.0
-  gsettings-desktop-schemas accountsservice ubuntu-insights gexiv2 gjs
-  gnome-desktop ibus gtk4 gnome-session gnome-settings-daemon mutter gdm3
-  xdg-desktop-portal-gnome nautilus gnome-shell gnome-control-center
-  gnome-extensions-app
-)
-# Appended to the 26.10 version: sorts above 26.04's and below 26.10's.
-SUFFIX="~26.04.1"
+# Sources to rebuild: those with local fixes.
+REBUILDS=()
+for dir in "$GNOME_PATCH_DIR"/*/; do
+  compgen -G "$dir*.patch" >/dev/null && REBUILDS+=("$(basename "$dir")")
+done
+# Appended to 26.04's version: sorts above it, so apt prefers the rebuild.
+SUFFIX="+live1"
 
 export DEBIAN_FRONTEND=noninteractive
 # No tests, docs or LTO: faster, and LTO links need more memory than the
@@ -47,12 +34,12 @@ export DEB_BUILD_PROFILES="nocheck noinsttest"
 export DEB_BUILD_MAINT_OPTIONS="optimize=-lto"
 export DEB_CFLAGS_APPEND=-fno-lto DEB_CXXFLAGS_APPEND=-fno-lto DEB_LDFLAGS_APPEND=-fno-lto
 
-# The 26.10 sources (apt checks them against the signed archive) and the
+# 26.04's sources (apt checks them against the signed archive) and the
 # local repository of what is already rebuilt.
-cat > /etc/apt/sources.list.d/gnome-backport-src.sources <<EOF
+cat > /etc/apt/sources.list.d/gnome-src.sources <<EOF
 Types: deb-src
 URIs: $MIRROR
-Suites: $BACKPORT_SUITE
+Suites: resolute resolute-updates resolute-security
 Components: main universe
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 EOF
@@ -70,10 +57,15 @@ refresh_repo() {
 refresh_repo
 apt-get update -qq
 
-for src in "${BACKPORTS[@]}"; do
-  # The only deb-src is $BACKPORT_SUITE: one version per source.
-  ver=$(apt-cache showsrc --only-source "$src" | awk '/^Version:/ { print $2; exit }')
-  [[ -n "$ver" ]] || { echo "no $BACKPORT_SUITE source for $src" >&2; exit 1; }
+for src in "${REBUILDS[@]}"; do
+  # The latest of the suites' versions
+  ver=
+  for v in $(apt-cache showsrc --only-source "$src" | awk '/^Version:/ { print $2 }'); do
+    if [[ -z "$ver" ]] || dpkg --compare-versions "$v" gt "$ver"; then
+      ver=$v
+    fi
+  done
+  [[ -n "$ver" ]] || { echo "no 26.04 source for $src" >&2; exit 1; }
   local_patches=("$GNOME_PATCH_DIR/$src"/*.patch)
   [[ -e "${local_patches[0]}" ]] || local_patches=()
   stamp="$GNOME_REPO/.built-$src-${ver//:/%}"
@@ -81,11 +73,11 @@ for src in "${BACKPORTS[@]}"; do
     stamp+="-$(cat "${local_patches[@]}" | sha256sum | cut -c1-12)"
   fi
   if [[ -f "$stamp" ]]; then
-    echo "==> $src $ver already backported, skipping"
+    echo "==> $src $ver already rebuilt, skipping"
     continue
   fi
 
-  echo "==> Backporting $src $ver"
+  echo "==> Rebuilding $src $ver"
   work="$CACHE_DIR/gnome-build/$src"
   rm -rf "$work" && mkdir -p "$work"
   # apt downloads as _apt: it must be able to write there, or it falls back
@@ -95,7 +87,7 @@ for src in "${BACKPORTS[@]}"; do
   dir=$(find "$work" -mindepth 1 -maxdepth 1 -type d)
   {
     printf '%s (%s%s) resolute; urgency=medium\n\n' "$src" "$ver" "$SUFFIX"
-    printf '  * Rebuild of the %s package for Ubuntu 26.04 (live ISO).\n\n' "$BACKPORT_SUITE"
+    printf '  * Rebuild with local fixes (live ISO).\n\n'
     printf ' -- Live ISO builder <live@localhost>  %s\n\n' "$(date -R)"
     cat "$dir/debian/changelog"
   } > "$work/changelog" && mv "$work/changelog" "$dir/debian/changelog"

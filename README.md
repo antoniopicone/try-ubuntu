@@ -2,8 +2,8 @@
 
 A live ISO of a minimal Ubuntu for arm64, to try the amazing penguin ;)
 
-- Ubuntu 26.04 LTS (resolute) with a minimal **GNOME 51**, backported from
-  26.10
+- Ubuntu 26.04 LTS (resolute) with a minimal **GNOME 50**, 26.04's own
+  (branch `gnome-50`; `main` has GNOME 51, backported from 26.10)
 - boots with Limine (EFI) and Plymouth
 - runs on a btrfs root with subvolumes, managed by snapper; with a
   persistent disk, you can boot any snapshot from the Limine menu
@@ -104,8 +104,7 @@ app takes over: it creates your user and logs out to GDM (see
    ISO is over GitHub's 2 GiB limit for a release asset, hence the local
    build. It uses the release's sources (or the checkout install.sh is run
    from) and podman. On a Mac, install.sh installs podman with Homebrew and
-   creates a rootful machine if there's none. The first build compiles
-   GNOME 51, which takes 1–2 hours. For x86 on Apple Silicon everything
+   creates a rootful machine if there's none. For x86 on Apple Silicon everything
    runs emulated (qemu-user in the podman machine), so it takes many
    hours. Later builds reuse the cache. In an emulated build, the ISO
    step runs in a native container on the same cache, since qemu-user
@@ -184,7 +183,7 @@ last page doesn't log out: it asks to remove the USB stick and offers
 | Kernel | `linux-image-virtual` (7.0), pruned to the modules a VM needs, with no firmware. initramfs-tools with zstd -19 |
 | Boot | **Limine** 11 (arm64 UEFI), with a menu to boot snapper snapshots, and Plymouth with the `spinner` theme (GNOME's). The ISO is hybrid (El Torito EFI + appended GPT ESP), so it also boots when written with `dd` to a USB stick |
 | Filesystem | btrfs with the subvolumes `@` → `/`, `@home` → `/home`, `@var` → `/var`, `@snapshots` → `/.snapshots` (flat layout, `compress=zstd:1`). **snapper** manages `/` (snapshot #1 is the image as built) and `/home` (every hour: *Previous Versions* in Files) |
-| Desktop | a minimal **GNOME 51**: Shell, Settings, the vanilla GNOME session, GDM (see [The desktop](#the-desktop)) |
+| Desktop | a minimal **GNOME 50**: Shell, Settings, the vanilla GNOME session, GDM (see [The desktop](#the-desktop)) |
 | Theme | dark style with GNOME's blue accent, Adwaita Sans, Yaru icons, and **one of Ubuntu's stock wallpapers, picked at random at each build** |
 | Apps | **ghostty** (JetBrains Mono Nerd Font, Catppuccin Mocha; OpenGL in software under QEMU's virgl, which lacks the OpenGL 4.3 it needs), with **Ptyxis** when it can't start, **Nautilus** (with *Open in Ghostty* and *Previous Versions*), **Brave Origin** (in the desktop's language and light/dark style), GNOME Software (with **Flatpak** and Flathub), Calculator, Papers (PDF), Fonts, Text Editor, Disks, Resources, Extensions, **Cloud Config** (Google Drive, OneDrive, Dropbox, Nextcloud and iCloud Drive in Files), **Cloud Backup** (hourly, end-to-end encrypted backups of your home folder with restic, and restore, to one of those clouds, Samba or SFTP) |
 | Fonts | Adwaita Sans; Liberation, **Carlito** and **Caladea** (metric-compatible with Arial/Times New Roman/Courier New and Calibri/Cambria, so Office documents keep their layout); JetBrains Mono; **JetBrains Mono Nerd Font** (GNOME's monospace font and Ghostty's) and **Hack Nerd Font Mono** |
@@ -206,7 +205,7 @@ each keyring's fingerprints and fails if they don't match exactly.
 |---|---|---|
 | Ubuntu `resolute` (main, restricted, universe) | base system | `ubuntu-keyring` |
 | Flathub (a Flatpak remote, [scripts/flathub.flatpakrepo](scripts/flathub.flatpakrepo)) | Flatpak apps, in GNOME Software | `6E5C05D9…4184DD4D907A7CAE` |
-| Ubuntu `stonking` (26.10) sources | GNOME 51, rebuilt for 26.04 (see [The desktop](#the-desktop)) | `ubuntu-keyring` |
+| Ubuntu `resolute` sources | the GNOME packages with local fixes, rebuilt (see [The desktop](#the-desktop)) | `ubuntu-keyring` |
 | `brave-browser-apt-release.s3.brave.com` | Brave Origin (`brave-origin`, and `brave-keyring`, which then keeps the keyring up to date). Pinned so it provides **only** those | `DBF1A116…0686B78420038257`, `47D32A74…68D513D36A73CD96`, `B2A3DCA3…DE4EC67BE4B0DCA0` |
 | `pkgs.tailscale.com` | tailscale | `2596A99E…458CA832957F5868` |
 
@@ -235,7 +234,7 @@ The ISO would be much larger without these measures:
   every translation except those of the image's languages
   ([overlay/etc/dpkg/dpkg.cfg.d](overlay/etc/dpkg/dpkg.cfg.d/01-live-excludes)).
   Ubuntu's language packs only cover what Ubuntu builds in main: universe
-  apps (GNOME Software...) and the GNOME 51 backport ship their own.
+  apps (GNOME Software...) ship their own.
 - Kernel modules are cut down to filesystems, networking, crypto, virtio,
   USB/HID/SCSI/NVMe, the virtio-gpu DRM driver and virtio-sound. Other
   sound cards, other GPUs, wireless/ethernet NICs and media drivers are
@@ -376,9 +375,10 @@ files install.sh keeps, pass
 `build.sh` runs everything in a privileged **podman** container
 (`ubuntu:26.04`, native arm64 on the podman machine on Apple Silicon):
 
-1. [scripts/build-gnome.sh](scripts/build-gnome.sh) backports GNOME 51
-   (see [The desktop](#the-desktop)). It's cached in the podman volume
-   `try-ubuntu-cache`: ~1–2 hours the first time, then skipped.
+1. [scripts/build-gnome.sh](scripts/build-gnome.sh) rebuilds the GNOME
+   packages with local fixes (see [The desktop](#the-desktop)), if any.
+   It's cached in the podman volume `try-ubuntu-gnome50-cache` (GNOME 51's
+   builds, on `main`, keep `try-ubuntu-cache`), then skipped.
 2. [scripts/build-apfs-fuse.sh](scripts/build-apfs-fuse.sh) builds
    apfs-fuse, and [scripts/build-icloud-linux.sh](scripts/build-icloud-linux.sh)
    icloud-linux (Rust, with Ubuntu's toolchain), both cached the same way
@@ -556,7 +556,7 @@ service no longer runs: your user's language is the one you chose there.
 ## The desktop
 
 [scripts/desktop-gnome.sh](scripts/desktop-gnome.sh) sets up a minimal
-GNOME 51 the way Ubuntu's desktop looks, all without recommends:
+GNOME 50 the way Ubuntu's desktop looks, all without recommends:
 
 | | |
 |---|---|
@@ -820,60 +820,43 @@ GNOME 51 the way Ubuntu's desktop looks, all without recommends:
   The `-dark` suffix is added in dark style.
 - **Extensions**: pinned (`EXTENSIONS` in desktop-gnome.sh), checked with
   sha256 and installed system-wide. The build fails if one doesn't declare
-  GNOME 51. Their schemas move to the system schema directory, so the
+  GNOME 50. Their schemas move to the system schema directory, so the
   gschema override can configure them. Their own `schemas/` folder is
   removed: GNOME Shell would look for a `gschemas.compiled` there, which
   the zips no longer ship.
-  - Dash to Dock, Kiwi Menu and Vitals: their GNOME 51 release on
-    extensions.gnome.org (`version_tag`)
-  - Caffeine: a commit of its `master`, which supports GNOME 51 while its
-    last release stops at 50. Its translations come as `.po` files and are
-    compiled at build time
-  - Rounded Corners: its last release declares up to GNOME 50. It works
-    unchanged on GNOME 51.0 (tested), so the build adds 51 to its
-    `metadata.json` (`force`)
-- **Autostart**: GNOME 51's gnome-session skips autostart entries that set
-  `X-GNOME-Autostart-Phase` (it treats them as session services), so these
-  entries don't set it.
-- **GNOME 51 on 26.04**: Ubuntu 26.04 ships GNOME 50, and GNOME 51 is only
-  in 26.10 (stonking). Installing 26.10's binaries on 26.04 would pull in
-  ~280 packages built for 26.10. Instead,
-  [scripts/build-gnome.sh](scripts/build-gnome.sh) rebuilds 26.10's Ubuntu
-  **source** packages against 26.04. That's 21 sources: the GNOME 51 core
-  (gnome-shell, mutter, gdm3, gnome-session, gnome-settings-daemon,
-  gnome-control-center, nautilus, xdg-desktop-portal-gnome,
-  gsettings-desktop-schemas, gnome-desktop, and the Extensions app, since
-  26.04's pins gnome-shell to its exact 50.x version) and what it needs newer at
-  build time (glib 2.90, gtk4 4.24, pango 1.58, gjs 1.90, wayland +
-  wayland-protocols, accountsservice, gexiv2, ubuntu-insights, ibus, which
-  gtk4 4.24 `Breaks` in 26.04's version, and debhelper 14 for the build
-  only). libc, systemd, Mesa, mozjs and the
-  rest stay 26.04's.
-  - apt downloads the sources and checks them against the signed 26.10
-    archive. Each gets a `~26.04.1` changelog entry, so its version sorts
-    above 26.04's and below 26.10's.
-  - They build without tests, docs or LTO. Each package goes into a local
-    apt repository (`/cache/gnome-repo` in the podman volume), and the next
-    ones build against it.
-  - Local fixes in [patches/gnome/](patches/gnome/)`<source>/` go on top
-    of the package's own patches:
-    - [gdm3](patches/gnome/gdm3/fix-fallback-session-double-free.patch):
-      Ubuntu's `prefer_ubuntu_session_fallback.patch` frees the fallback
-      session name twice when there is no `ubuntu` session, so without the
-      fix gdm aborts as soon as someone starts to log in on an image that
-      only has the vanilla GNOME session.
+  - Dash to Dock, Kiwi Menu, Vitals, Caffeine and Rounded Corners: a
+    release on extensions.gnome.org (`version_tag`) that declares GNOME 50.
+    `force` would add the version to an extension's `metadata.json`, for
+    one that works with it without declaring it; none needs it now
+- **Autostart**: the entries don't set `X-GNOME-Autostart-Phase`: GNOME
+  51's gnome-session (on `main`) skips the ones that do, as session
+  services.
+- **GNOME 50**: Ubuntu 26.04's own, from the archive. The branch `main`
+  has GNOME 51 instead, backported from 26.10; this one is there to rule
+  out GNOME 51's own instability.
+  [scripts/build-gnome.sh](scripts/build-gnome.sh) only rebuilds the GNOME
+  sources that have local fixes:
+  - apt downloads 26.04's latest version of the source (`resolute`,
+    `-updates`, `-security`) and checks it against the signed archive. It
+    gets a `+live1` changelog entry, so its version sorts above 26.04's.
+  - It builds without tests, docs or LTO, into a local apt repository
+    (`/cache/gnome-repo` in the podman volume).
+  - Local fixes go in [patches/gnome/](patches/gnome/)`<source>/`, on top
+    of the package's own patches (`main`'s gdm3 fix, a double free in
+    26.10's `prefer_ubuntu_session_fallback.patch`, isn't needed: 26.04's
+    gdm 50.1 doesn't have the bug):
     - [nautilus](patches/gnome/nautilus/cloud-mount-icon.patch): gvfs gives
       every FUSE mount in the home folder a removable drive for icon. The
       sidebar shows a cloud
       ([live-cloud-symbolic](overlay/usr/local/share/icons/hicolor/scalable/apps/live-cloud-symbolic.svg),
       as in the mockups) for the clouds' mounts instead: rclone's with the
       device `live-cloud:<id>` (`--devname`), and icloud-linux's
-      (`fuse.icloud`). rclone's
-      other mounts (Samba, SFTP) get a network folder.
+      (`fuse.icloud`). rclone's other mounts (Samba, SFTP) get a network
+      folder.
   - The rootfs installs from that repository, which is mounted only for the
-    build, and the build fails unless the core is at version 51.
-  - It takes ~1–2 hours the first time. After that, it's skipped for as long
-    as 26.10's source versions stay the same.
+    build, and the build fails unless the core is at version 50.
+  - A package is rebuilt again only when 26.04's source version or its
+    local patches change.
 - **Settings**: gschema overrides set the defaults for GDM and every user:
   - dark style, the blue accent and Adwaita Sans
   - the keyboard layout
@@ -927,13 +910,12 @@ git tag v1.0.0 && git push origin v1.0.0
   use rootful podman, since the ISO step needs loop devices. These are the
   QEMU flavour. The real-computer one (`--hardware`) is built locally by
   `install.sh --on-usb`.
-- The GNOME 51 backport (`/cache/gnome-repo`) is kept in the Actions cache,
-  one per architecture.
-  Only the first build takes hours: later ones rebuild just the packages
-  that changed (a new 26.10 version, different local patches, one added to
-  `build-gnome.sh`). To rebuild everything, e.g. after changing the
-  `Containerfile` or the build flags, delete the `gnome-repo-*` caches
-  (Actions → Caches).
+- The rebuilt GNOME packages (`/cache/gnome-repo`) are kept in the Actions
+  cache, one per architecture (`gnome50-repo-*`, apart from `main`'s GNOME
+  51 ones). Later builds rebuild just the packages that changed (a new
+  26.04 version, different local patches). To rebuild everything, e.g.
+  after changing the `Containerfile` or the build flags, delete the
+  `gnome50-repo-*` caches (Actions → Caches).
 - It builds `qemu-macos-arm64.tar.gz` with `./qemu/build.sh` on a
   `macos-15` runner, caching the downloads.
 - It publishes a release with `ubuntu-live-arm64.iso`, `ubuntu-live-amd64.iso`,
@@ -943,8 +925,8 @@ git tag v1.0.0 && git push origin v1.0.0
 
 ## Limitations
 
-- The backported GNOME 51 packages (and glib, gtk4, pango…) get no
-  updates from 26.04. Rebuilding picks up whatever 26.10 has at that point.
+- A GNOME package rebuilt with local fixes is replaced by 26.04's next
+  update of it, which doesn't have them, when the system is upgraded.
 - With `--no-persist`, everything lives in RAM.
 - On real computers: UEFI only (no legacy BIOS boot), with Secure Boot off.
   An installed system's Limine menu has its kernels but not snapper's

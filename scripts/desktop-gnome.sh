@@ -1,4 +1,4 @@
-# Desktop part of build-rootfs.sh (sourced): a minimal GNOME 51 with GDM, on
+# Desktop part of build-rootfs.sh (sourced): a minimal GNOME 50 with GDM, on
 # NetworkManager, set up like Ubuntu's desktop:
 #   - ghostty as the terminal ("Open in Ghostty" in Nautilus), with Ptyxis
 #     to fall back on, GNOME Software (with Flatpak), Disks, Resources,
@@ -10,25 +10,24 @@
 #     (live-welcome), which creates the real user and logs out to GDM
 #   - English plus a few languages the welcome app offers; the live session
 #     starts in the host's language when it's one of them (live-locale)
-# Ubuntu 26.04 ships GNOME 50: GNOME 51 comes from the local repository
-# build-gnome.sh fills ($GNOME_REPO).
+# GNOME 50 is Ubuntu 26.04's own; the packages with local fixes come from
+# the local repository build-gnome.sh fills ($GNOME_REPO).
 
 : "${GNOME_REPO:?}"
-GNOME_VERSION=51
+GNOME_VERSION=50
 
 # GNOME Shell extensions, pinned and checked: a release on
 # extensions.gnome.org (its version_tag), or a source tarball and the
 # extension's directory in it, when GNOME $GNOME_VERSION support isn't
 # released yet. "force" declares GNOME $GNOME_VERSION for an extension that
-# doesn't yet but works with it (tested on GNOME 51.0).
+# doesn't yet but works with it.
 EXTENSIONS=(
   # uuid|version_tag or tarball URL|sha256|directory in the tarball|force
   "dash-to-dock@micxgx.gmail.com|75334|eb7647c03cad6dd1ac608da75ffdd2a2b9f8356b65bb468dc523d7ed3d26e5fc||"
   "kiwimenu@kemma|74796|9d1ee3f9fc0280301e6e044b19d90cf89b3c92c037c3d72670264a3596972e8e||"
   "Vitals@CoreCoding.com|74743|899e5ffe27d1793cf13db069d835c11136cec816717e4e450a56f08bcf976b2f||"
-  # master: its last release on extensions.gnome.org stops at GNOME 50
-  "caffeine@patapon.info|https://codeload.github.com/eonpatapon/gnome-shell-extension-caffeine/tar.gz/be18b3558a250d672a7108f01a8dcf55c0935bc6|da4f86642847abda6a156ea81d88659c8f628dec82a01c5d84a1128301b83430|caffeine@patapon.info|"
-  "Rounded_Corners@lennart-k|70231|f10cf2ee9f621e13f720e987c295a6edd78db8297f560e43cc46d64883a55856||force"
+  "caffeine@patapon.info|69851|dd2b5962ebad4e957390522e5df539764828011032360743e77cc5940ebac955||"
+  "Rounded_Corners@lennart-k|70231|f10cf2ee9f621e13f720e987c295a6edd78db8297f560e43cc46d64883a55856||"
 )
 
 # rclone for Cloud Backup: upstream's, not Ubuntu 26.04's 1.60, whose
@@ -66,7 +65,7 @@ DESKTOP_PACKAGES=(
   # Ubuntu's, when ghostty can't start: overlay/usr/local/bin/ghostty),
   # software center (PackageKit/apt), disks, system monitor, extensions
   ghostty xdg-terminal-exec ptyxis gnome-software gnome-disk-utility udisks2
-  resources gnome-extensions-app
+  resources gnome-shell-extension-prefs
   # GNOME's basic apps: calculator, PDF viewer (Papers, Evince's successor),
   # fonts, text editor
   gnome-calculator papers gnome-font-viewer gnome-text-editor
@@ -102,8 +101,8 @@ for lang in "${LANGPACKS[@]}"; do
   DESKTOP_PACKAGES+=("language-pack-$lang-base" "language-pack-gnome-$lang-base")
 done
 
-# The backport repository, bind-mounted into the chroot for the install
-# only. Its versions sort above 26.04's, so apt prefers them.
+# The repository of the rebuilt packages, bind-mounted into the chroot for
+# the install only. Their versions sort above 26.04's, so apt prefers them.
 desktop_repos() {
   mkdir -p "$ROOTFS/run/gnome-backports"
   bind "$GNOME_REPO" "$ROOTFS/run/gnome-backports"
@@ -114,7 +113,7 @@ desktop_repos() {
 desktop_install() {
   local v entry uuid src sha subdir force dir pak keep lang tmp po domain
   for p in gnome-shell mutter-common gdm3 gnome-session-bin gnome-settings-daemon \
-           gnome-control-center nautilus xdg-desktop-portal-gnome gnome-extensions-app; do
+           gnome-control-center nautilus xdg-desktop-portal-gnome gnome-shell-extension-prefs; do
     v=$(in_chroot dpkg-query -W -f '${Version}' "$p")
     [[ "${v#*:}" == "$GNOME_VERSION".* || "${v#*:}" == "$GNOME_VERSION"~* ]] \
       || { echo "$p is $v, not GNOME $GNOME_VERSION" >&2; exit 1; }

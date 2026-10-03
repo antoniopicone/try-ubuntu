@@ -17,20 +17,21 @@ jobs:
     name: ISO (${{ matrix.arch }})
     strategy:
       # One architecture failing doesn't cancel the other's build (hours, and
-      # its GNOME backport cache)
+      # its GNOME cache)
       fail-fast: false
       matrix:
         include:
           - arch: arm64
             build_arch: arm
             runner: ubuntu-24.04-arm
-            cache_volume: try-ubuntu-cache
+            cache_volume: try-ubuntu-gnome50-cache
           - arch: amd64
             build_arch: x86
             runner: ubuntu-24.04
-            cache_volume: try-ubuntu-cache-amd64
+            cache_volume: try-ubuntu-gnome50-cache-amd64
     runs-on: ${{ matrix.runner }}
-    # The GNOME 51 backport takes hours when the cache below misses.
+    # Rebuilding the GNOME packages with local fixes takes a while when the
+    # cache below misses.
     timeout-minutes: 360
     env:
       ISO: ubuntu-live-${{ matrix.arch }}.iso
@@ -50,22 +51,23 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq podman
 
-      # The backported .debs (build-gnome.sh skips a package whose build is
+      # The rebuilt GNOME .debs (build-gnome.sh skips a package whose build is
       # already in the repository: same source version, same local patches).
+      # GNOME 50's own caches (gnome50-repo-*), not GNOME 51's (branch main).
       # The latest cache with the same patches and builder image comes first,
       # else the latest one at all: the stamps already rebuild a package whose
-      # 26.10 version or local patches changed, and build-gnome.sh builds the
+      # 26.04 version or local patches changed, and build-gnome.sh builds the
       # packages it adds. To start over (a new builder image, other build
-      # flags), delete the gnome-repo-* caches in Actions.
-      - name: Restore the GNOME 51 backport
+      # flags), delete the gnome50-repo-* caches in Actions.
+      - name: Restore the rebuilt GNOME packages
         id: gnome-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/gnome-repo
-          key: gnome-repo-${{ matrix.arch }}-${{ hashFiles('patches/gnome/**', 'Containerfile') }}-${{ github.run_id }}
+          key: gnome50-repo-${{ matrix.arch }}-${{ hashFiles('patches/gnome/**', 'Containerfile') }}-${{ github.run_id }}
           restore-keys: |
-            gnome-repo-${{ matrix.arch }}-${{ hashFiles('patches/gnome/**', 'Containerfile') }}-
-            gnome-repo-${{ matrix.arch }}-
+            gnome50-repo-${{ matrix.arch }}-${{ hashFiles('patches/gnome/**', 'Containerfile') }}-
+            gnome50-repo-${{ matrix.arch }}-
 
       - name: Seed the build cache
         if: steps.gnome-cache.outputs.cache-matched-key != ''
@@ -78,7 +80,7 @@ jobs:
       - name: Build
         run: sudo ./build.sh --xkb us --arch ${{ matrix.build_arch }}
 
-      - name: Collect the GNOME 51 backport
+      - name: Collect the rebuilt GNOME packages
         id: gnome-collect
         if: ${{ !cancelled() }}
         run: |
@@ -89,12 +91,12 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/gnome-repo"
           echo "ok=true" >> "$GITHUB_OUTPUT"
 
-      - name: Save the GNOME 51 backport
+      - name: Save the rebuilt GNOME packages
         if: ${{ !cancelled() && steps.gnome-collect.outputs.ok == 'true' }}
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/gnome-repo
-          key: gnome-repo-${{ matrix.arch }}-${{ hashFiles('patches/gnome/**', 'Containerfile') }}-${{ github.run_id }}
+          key: gnome50-repo-${{ matrix.arch }}-${{ hashFiles('patches/gnome/**', 'Containerfile') }}-${{ github.run_id }}
 
       - name: Checksum
         run: |
