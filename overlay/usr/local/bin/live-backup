@@ -115,6 +115,7 @@ STRINGS = {
                        "random name that says nothing about them. If the folder already has "
                        "backups, you can open them with their recovery key.",
         "folder_share": "Choose a shared folder, or a folder inside one.",
+        "folder_loading": "Loading the folders…",
         "new_folder": "New Folder",
         "folder_name": "Folder name",
         "create": "Create",
@@ -267,6 +268,7 @@ STRINGS = {
                        "nome casuale che non dice niente di loro. Se nella cartella ci sono "
                        "già dei backup, puoi aprirli con la loro chiave di recupero.",
         "folder_share": "Scegli una cartella condivisa, o una cartella al suo interno.",
+        "folder_loading": "Carico le cartelle…",
         "new_folder": "Nuova cartella",
         "folder_name": "Nome della cartella",
         "create": "Crea",
@@ -429,6 +431,9 @@ def restic(config, env, *args):
 
 
 class Folder(GObject.Object):
+    # How many listings of its folders are on their way
+    loading = GObject.Property(type=int, default=0)
+
     def __init__(self, name, path):
         super().__init__()
         self.name, self.path = name, path
@@ -443,6 +448,8 @@ class BackupWindow(Adw.ApplicationWindow):
         self.identity = ""
         self.waiting = False
         self.stores = {}
+        self.listing = None
+        self.watches = {}
         self.history = []
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
@@ -778,11 +785,22 @@ class BackupWindow(Adw.ApplicationWindow):
         factory = Gtk.SignalListItemFactory()
         factory.connect("setup", self._setup_row)
         factory.connect("bind", self._bind_row)
+        factory.connect("unbind", self._unbind_row)
         view = Gtk.ListView(model=self.selection, factory=factory)
         view.add_css_class("navigation-sidebar")
         scrolled = Gtk.ScrolledWindow(child=view, min_content_height=280,
                                       hscrollbar_policy=Gtk.PolicyType.NEVER)
-        frame = Gtk.Frame(child=scrolled)
+        # Over the list, while the destination's own folders are on their way
+        self.folder_loading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                                      halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER,
+                                      visible=False, can_target=False)
+        self.folder_loading.append(livespinner.Spinner(size=32))
+        loading = Gtk.Label(label=t("folder_loading"))
+        loading.add_css_class("dim-label")
+        self.folder_loading.append(loading)
+        overlay = Gtk.Overlay(child=scrolled)
+        overlay.add_overlay(self.folder_loading)
+        frame = Gtk.Frame(child=overlay)
         frame.add_css_class("card")
         self.folder_group.add(frame)
 
@@ -797,15 +815,41 @@ class BackupWindow(Adw.ApplicationWindow):
     def _setup_row(_factory, item):
         box = Gtk.Box(spacing=8)
         box.append(Gtk.Image(icon_name="folder-symbolic"))
-        box.append(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END))
+        box.append(Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END))
         item.set_child(Gtk.TreeExpander(child=box))
 
-    @staticmethod
-    def _bind_row(_factory, item):
+    def _bind_row(self, _factory, item):
         row = item.get_item()
+        folder = row.get_item()
         expander = item.get_child()
         expander.set_list_row(row)
-        expander.get_child().get_last_child().set_label(row.get_item().name)
+        box = expander.get_child()
+        box.get_first_child().get_next_sibling().set_label(folder.name)
+
+        def busy(*_):
+            # An open folder whose own folders are on their way. The
+            # destination's first listing has the message over the list
+            self._row_spinner(box, row.get_expanded() and folder.loading
+                              and not self.folder_loading.get_visible())
+        self.watches[item] = [(row, row.connect("notify::expanded", busy)),
+                              (folder, folder.connect("notify::loading", busy))]
+        busy()
+
+    def _unbind_row(self, _factory, item):
+        for obj, handler in self.watches.pop(item, ()):
+            obj.disconnect(handler)
+        self._row_spinner(item.get_child().get_child(), False)
+
+    @staticmethod
+    def _row_spinner(box, show):
+        """The spinner at the end of a row: there only while it shows, since
+        it draws on every frame."""
+        last = box.get_last_child()
+        spinner = last if isinstance(last, livespinner.Spinner) else None
+        if show and not spinner:
+            box.append(livespinner.Spinner(size=16))
+        elif spinner and not show:
+            box.remove(spinner)
 
     def _list_dirs(self, path):
         if self.provider == "icloud":
@@ -819,14 +863,32 @@ class BackupWindow(Adw.ApplicationWindow):
             providers.make_dir(path)
 
     def _children(self, folder):
-        store = Gio.ListStore.new(Folder)
-        self.stores[folder.path] = store
-        self._list(folder.path, store)
+        # GTK asks twice: when the row shows up (can it be opened? it drops
+        # the answer) and when it's opened. One listing serves both
+        store = self.stores.get(folder.path)
+        if store is None:
+            store = self.stores[folder.path] = Gio.ListStore.new(Folder)
+            self._list(folder, store)
         return store
 
-    def _list(self, path, store):
+    def _list(self, folder, store):
+        path = folder.path
+        # The list only has the destination itself until its folders arrive
+        if path == self.root.get_item(0).path and not store.get_n_items():
+            self.listing = store
+            self.folder_loading.set_visible(True)
+        folder.loading += 1
+
         def done(names, error):
+            # A newer listing of the destination (another one, opened since) keeps it
+            if store is self.listing:
+                self.listing = None
+                self.folder_loading.set_visible(False)
+            folder.loading -= 1
             if error:
+                # Opening the folder again tries again
+                if self.stores.get(path) is store:
+                    del self.stores[path]
                 self._toast(error)
                 return
             store.remove_all()
@@ -864,10 +926,14 @@ class BackupWindow(Adw.ApplicationWindow):
             if answer != "create" or not name:
                 return
             path = f"{parent.path}/{name}".strip("/")
-            in_thread(lambda: self._make_dir(path),
-                      lambda _r, error: self._toast(error) if error else
-                      self._list(parent.path, self.stores.get(parent.path)
-                                 or Gio.ListStore.new(Folder)))
+
+            def made(_result, error):
+                store = self.stores.get(parent.path)
+                if error:
+                    self._toast(error)
+                elif store is not None:
+                    self._list(parent, store)
+            in_thread(lambda: self._make_dir(path), made)
         dialog.connect("response", response)
         dialog.present(self)
 
