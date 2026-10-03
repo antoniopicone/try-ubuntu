@@ -3,7 +3,7 @@
 A live ISO of a minimal Ubuntu for arm64, to try the amazing penguin ;)
 
 - Ubuntu 26.04 LTS (resolute) with a minimal **GNOME 50**, 26.04's own
-  (branch `gnome-50`; `main` has GNOME 51, backported from 26.10)
+  (the branch `gnome-51` has GNOME 51 instead, backported from 26.10)
 - boots with Limine (EFI) and Plymouth
 - runs on a btrfs root with subvolumes, managed by snapper; with a
   persistent disk, you can boot any snapshot from the Limine menu
@@ -378,7 +378,7 @@ files install.sh keeps, pass
 1. [scripts/build-gnome.sh](scripts/build-gnome.sh) rebuilds the GNOME
    packages with local fixes (see [The desktop](#the-desktop)), if any.
    It's cached in the podman volume `try-ubuntu-gnome50-cache` (GNOME 51's
-   builds, on `main`, keep `try-ubuntu-cache`), then skipped.
+   builds, on the branch `gnome-51`, keep `try-ubuntu-cache`), then skipped.
 2. [scripts/build-apfs-fuse.sh](scripts/build-apfs-fuse.sh) builds
    apfs-fuse, and [scripts/build-icloud-linux.sh](scripts/build-icloud-linux.sh)
    icloud-linux (Rust, with Ubuntu's toolchain), both cached the same way
@@ -829,11 +829,11 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
     `force` would add the version to an extension's `metadata.json`, for
     one that works with it without declaring it; none needs it now
 - **Autostart**: the entries don't set `X-GNOME-Autostart-Phase`: GNOME
-  51's gnome-session (on `main`) skips the ones that do, as session
-  services.
-- **GNOME 50**: Ubuntu 26.04's own, from the archive. The branch `main`
-  has GNOME 51 instead, backported from 26.10; this one is there to rule
-  out GNOME 51's own instability.
+  51's gnome-session (on the branch `gnome-51`) skips the ones that do, as
+  session services.
+- **GNOME 50**: Ubuntu 26.04's own, from the archive. It's the default,
+  because the GNOME 51 backported from 26.10 was unstable; that one stays
+  on the branch `gnome-51`.
   [scripts/build-gnome.sh](scripts/build-gnome.sh) only rebuilds the GNOME
   sources that have local fixes:
   - apt downloads 26.04's latest version of the source (`resolute`,
@@ -842,7 +842,7 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
   - It builds without tests, docs or LTO, into a local apt repository
     (`/cache/gnome-repo` in the podman volume).
   - Local fixes go in [patches/gnome/](patches/gnome/)`<source>/`, on top
-    of the package's own patches (`main`'s gdm3 fix, a double free in
+    of the package's own patches (`gnome-51`'s gdm3 fix, a double free in
     26.10's `prefer_ubuntu_session_fallback.patch`, isn't needed: 26.04's
     gdm 50.1 doesn't have the bug):
     - [nautilus](patches/gnome/nautilus/cloud-mount-icon.patch): gvfs gives
@@ -911,11 +911,11 @@ git tag v1.0.0 && git push origin v1.0.0
   QEMU flavour. The real-computer one (`--hardware`) is built locally by
   `install.sh --on-usb`.
 - The rebuilt GNOME packages (`/cache/gnome-repo`) are kept in the Actions
-  cache, one per architecture (`gnome50-repo-*`, apart from `main`'s GNOME
-  51 ones). Later builds rebuild just the packages that changed (a new
-  26.04 version, different local patches). To rebuild everything, e.g.
-  after changing the `Containerfile` or the build flags, delete the
-  `gnome50-repo-*` caches (Actions → Caches).
+  cache, one per architecture (`gnome50-repo-*`, apart from the GNOME 51
+  ones of the branch `gnome-51`). Later builds rebuild just the packages
+  that changed (a new 26.04 version, different local patches). To rebuild
+  everything, e.g. after changing the `Containerfile` or the build flags,
+  delete the `gnome50-repo-*` caches (Actions → Caches).
 - It builds `qemu-macos-arm64.tar.gz` with `./qemu/build.sh` on a
   `macos-15` runner, caching the downloads.
 - It publishes a release with `ubuntu-live-arm64.iso`, `ubuntu-live-amd64.iso`,
