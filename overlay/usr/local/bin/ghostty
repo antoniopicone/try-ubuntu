@@ -10,7 +10,8 @@
 # GPU, nothing changes. LIBGL_ALWAYS_SOFTWARE=0 in the environment keeps
 # the GPU for Ghostty too.
 #
-# Fallback: when Ghostty fails within its first seconds (no OpenGL, a
+# Started by systemd (the unit is Type=notify-reload): no fallback and no
+# wrapping, see below. Otherwise, fallback: when Ghostty fails within its first seconds (no OpenGL, a
 # broken config...), Ptyxis opens instead, with the same command, and a
 # notification says so. Ghostty's own subcommands (+list-fonts...) never
 # fall back.
@@ -24,6 +25,16 @@ for driver in /sys/class/drm/card*/device/driver; do
     break
   fi
 done
+
+# Started by systemd as the service's main process (the .desktop file is
+# DBusActivatable, so that's the dock too): Ghostty has to replace this
+# script. The unit is Type=notify-reload with NotifyAccess=main: READY=1
+# from a child is ignored and systemd kills the service after
+# TimeoutStartSec (90 s); the reload signal (SIGUSR2) would hit this shell.
+# systemd reports the failure itself there, so no fallback.
+if [ -n "${NOTIFY_SOCKET:-}" ] && [ "${SYSTEMD_EXEC_PID:-}" = "$$" ]; then
+  exec /usr/bin/ghostty.real "$@"
+fi
 
 case "${1:-}" in
   +*|--version|--help|-h) exec /usr/bin/ghostty.real "$@" ;;

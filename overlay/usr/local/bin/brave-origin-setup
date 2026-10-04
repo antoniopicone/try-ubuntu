@@ -1,0 +1,88 @@
+#!/bin/sh
+# brave-origin-setup: sets up Brave Origin for the current user.
+#
+#   - default browser (http, https, html, about, unknown)
+#   - first run done: no welcome page, no P3A notice, no crash-report question
+#   - Origin: free tier accepted, its policies enforced
+#   - search suggestions on by default
+#   - new tab page: clock shown, Brave stats hidden
+#
+# The values are merged into the profile's JSON files: what's already there
+# stays. Brave rewrites those files when it quits, so it must be closed.
+#
+# The build runs it on /etc/skel (BRAVE_ORIGIN_DIR=/etc/skel/.config/...),
+# so every user's profile starts like this; run it by hand to apply it to
+# an existing profile.
+#
+# BRAVE_ORIGIN_DIR=<dir> uses another profile folder (default:
+# ~/.config/BraveSoftware/Brave-Origin) and leaves the default browser alone.
+set -eu
+
+dir=${BRAVE_ORIGIN_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/BraveSoftware/Brave-Origin}
+desktop=brave-origin.desktop
+
+if pgrep -u "$(id -u)" -f '/opt/brave.com/brave-origin/' >/dev/null 2>&1; then
+  echo "Brave Origin is running: close it and run this again." >&2
+  exit 1
+fi
+
+# Default browser
+if [ -z "${BRAVE_ORIGIN_DIR:-}" ]; then
+  for type in x-scheme-handler/http x-scheme-handler/https text/html \
+              x-scheme-handler/about x-scheme-handler/unknown; do
+    xdg-mime default "$desktop" "$type"
+  done
+fi
+
+# Profile and global settings
+mkdir -p "$dir/Default"
+chmod 700 "$dir" "$dir/Default"
+: >> "$dir/First Run"
+
+python3 - "$dir" <<'PY'
+import json, os, sys
+
+def merge(dst, src):
+    for key, value in src.items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            merge(dst[key], value)
+        else:
+            dst[key] = value
+
+def update(path, settings):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        data = {}
+    merge(data, settings)
+    tmp = path + ".tmp"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        json.dump(data, f, separators=(",", ":"))
+    os.replace(tmp, path)
+
+dir = sys.argv[1]
+
+update(os.path.join(dir, "Default", "Preferences"), {
+    "brave": {
+        "has_seen_brave_welcome_page": True,
+        "new_tab_page": {"show_clock": True, "show_stats": False},
+    },
+})
+
+update(os.path.join(dir, "Local State"), {
+    "brave": {
+        "origin": {
+            "free_tier_accepted": True,
+            "policies_were_enforced": True,
+            "purchase_validated": True,
+        },
+        "p3a": {"notice_acknowledged": True},
+        "dont_ask_for_crash_reporting": True,
+        "enable_search_suggestions_by_default": True,
+    },
+    "browser": {"first_run_finished": True},
+})
+PY
+
+echo "Brave Origin set up in $dir"

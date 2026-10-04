@@ -294,6 +294,15 @@ echo 'LANG=C.UTF-8' > "$ROOTFS/etc/default/locale"
 rm -f "$ROOTFS/etc/localtime"
 
 install -m 644 "$OVERLAY/etc/skel/.zshrc" "$ROOTFS/etc/skel/.zshrc"
+# Brave Origin's first-run settings (usr/local/bin/brave-origin-setup), in
+# the skeleton: the live user and the user the welcome app creates get a
+# profile that's already set up (no welcome page, no P3A notice, no crash
+# report question; Origin's free tier accepted...). Brave merges into it
+# when it starts. The default browser is already set (mimeapps.list).
+BRAVE_ORIGIN_DIR="$ROOTFS/etc/skel/.config/BraveSoftware/Brave-Origin" \
+  sh "$OVERLAY/usr/local/bin/brave-origin-setup"
+grep -q '"first_run_finished":true' "$ROOTFS/etc/skel/.config/BraveSoftware/Brave-Origin/Local State" \
+  || { echo "Brave Origin's profile in /etc/skel isn't set up" >&2; exit 1; }
 in_chroot useradd -m -s /usr/bin/zsh -G sudo,video,render,input "$LIVE_USER"
 echo "$LIVE_USER:$LIVE_PASSWORD" | in_chroot chpasswd
 
@@ -543,6 +552,9 @@ in_chroot glib-compile-schemas /usr/share/glib-2.0/schemas
 [[ $(in_chroot env GSETTINGS_BACKEND=memory gsettings get org.gnome.desktop.interface monospace-font-name) \
    == "'JetBrainsMono Nerd Font Mono 11'" ]] \
   || { echo "GNOME's monospace font is not JetBrains Mono Nerd Font" >&2; exit 1; }
+[[ $(in_chroot env GSETTINGS_BACKEND=memory gsettings get org.gnome.nautilus.icon-view default-zoom-level) \
+   == "'small-plus'" ]] \
+  || { echo "Files' icon size is not small-plus" >&2; exit 1; }
 
 # The image's own packages: Cloud Backup's list of the user's apps
 # (apps.py) is what apt-mark shows on top of these.

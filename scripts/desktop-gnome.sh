@@ -299,6 +299,10 @@ natural-scroll=false
 [org.gnome.desktop.peripherals.touchpad]
 natural-scroll=false
 
+# Files: icons a little smaller than the default (medium)
+[org.gnome.nautilus.icon-view]
+default-zoom-level='small-plus'
+
 # Ubuntu's dash: a full-height panel on the left, "Show Apps" at the bottom,
 # no overview at login.
 [org.gnome.shell.extensions.dash-to-dock]

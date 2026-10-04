@@ -454,6 +454,57 @@ qemu_args=(
   "${serial_args[@]}"
   ${reboot_args[@]+"${reboot_args[@]}"}
 )
+# On macOS the window of a bare qemu-system-* is in the Dock under that
+# name, with the icon of a Unix executable. Started from inside an app
+# bundle it's "try-ubuntu", with its own icon (assets/try-ubuntu.icns;
+# install.sh puts it next to this script). The bundle has a hard link to
+# QEMU, signature and entitlement included (macOS sees through a symbolic
+# link, and a copy only when it's on another volume), and links to what's
+# next to QEMU's bin/: QEMU looks for its libraries and ROMs from where it
+# runs (../lib, ../share).
+if [[ $(uname -s) == Darwin && -z "$vnc" ]] && ((!headless)); then
+  real=$qemu
+  while [[ -L "$real" ]]; do
+    link=$(readlink "$real")
+    [[ "$link" == /* ]] && real=$link || real="$(dirname "$real")/$link"
+  done
+  real="$(cd "$(dirname "$real")" && pwd -P)/$(basename "$real")"
+  app="$project_dir/dist/.app-$arch/try-ubuntu.app"
+  app_qemu="$app/Contents/MacOS/try-ubuntu"
+  icon=""
+  for f in "$project_dir/assets/try-ubuntu.icns" "$project_dir/try-ubuntu.icns"; do
+    [[ -f "$f" ]] && { icon=$f; break; }
+  done
+  # Made again only for another QEMU or another icon: a running VM may be using it
+  if ! { [[ "$app_qemu" -ef "$real" ]] || cmp -s "$app_qemu" "$real"; } ||
+     ! cmp -s "${icon:-/dev/null}" "$app/Contents/Resources/try-ubuntu.icns"; then
+    rm -rf "$app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    ln "$real" "$app_qemu" 2>/dev/null || cp "$real" "$app_qemu"
+    for d in "$(dirname "$(dirname "$real")")"/*/; do
+      [[ "$(basename "$d")" == bin ]] || ln -s "${d%/}" "$app/Contents/$(basename "$d")"
+    done
+    cp "${icon:-/dev/null}" "$app/Contents/Resources/try-ubuntu.icns"
+    cat > "$app/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>try-ubuntu</string>
+  <key>CFBundleDisplayName</key><string>try-ubuntu</string>
+  <key>CFBundleIdentifier</key><string>io.github.antoniopicone.try-ubuntu</string>
+  <key>CFBundleExecutable</key><string>try-ubuntu</string>
+  <key>CFBundleIconFile</key><string>try-ubuntu</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+EOF
+    touch "$app"   # the Dock reads the icon again
+  fi
+  qemu=$app_qemu
+fi
+
 if ((${#reboot_args[@]} == 0)); then
   exec "$qemu" "${qemu_args[@]}" "$@"
 fi

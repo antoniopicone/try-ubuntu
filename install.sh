@@ -110,7 +110,8 @@ install_qemu_release() {
 purge_downloads() {
   say "Deleting the downloaded ISO, QEMU and caches in $dist"
   rm -rf "$dist"/*.iso "$dist"/*.iso.*.part "$dist"/*.release \
-    "$dist/qemu-macos-arm64" "$dist"/.qemu.* "$dist"/.kernel-* "$DIR/run-qemu.sh"
+    "$dist/qemu-macos-arm64" "$dist"/.qemu.* "$dist"/.kernel-* "$dist"/.app-* \
+    "$DIR/run-qemu.sh" "$DIR/try-ubuntu.icns"
 }
 
 install_qemu() {
@@ -403,6 +404,11 @@ main() {
   curl -fsSL -o "$DIR/run-qemu.sh" "https://raw.githubusercontent.com/$REPO/$tag/run-qemu.sh" ||
     die "can't download run-qemu.sh"
   chmod +x "$DIR/run-qemu.sh"
+  # The Dock icon of QEMU's window on a Mac (run-qemu.sh does without it too)
+  [ "$(uname -s)" != Darwin ] ||
+    curl -fsSL -o "$DIR/try-ubuntu.icns" \
+      "https://raw.githubusercontent.com/$REPO/$tag/assets/try-ubuntu.icns" 2>/dev/null ||
+    rm -f "$DIR/try-ubuntu.icns"
 
   say "Booting Ubuntu Live $tag (close the window to quit)"
   # Under curl | sh stdin is the script: QEMU's serial console (--headless,

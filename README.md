@@ -450,6 +450,7 @@ started by install.sh):
 | `efivars.fd` | UEFI variables (boot entries) |
 | `serial.log` | the guest's serial console output of the last boot |
 | `.kernel-<iso>/` | kernel, initramfs and `limine.conf` extracted from the ISO for nested virtualization, refreshed when the ISO changes |
+| `.app-<arch>/try-ubuntu.app` | macOS: the app bundle QEMU is started from, so that its window is "try-ubuntu" in the Dock, with its own icon ([assets/try-ubuntu-app.svg](assets/try-ubuntu-app.svg), as `try-ubuntu.icns`), not "qemu-system-aarch64" with a Unix executable's. It holds a hard link to QEMU and links to its libraries and ROMs, and is made again when QEMU or the icon changes |
 
 | Option | |
 |---|---|
@@ -958,6 +959,13 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
     its light or dark mode is the device's.
   - **ads and trackers**: Brave's own Shields block them, so no extension
     is needed.
+  - **first run**: the build runs
+    [brave-origin-setup](overlay/usr/local/bin/brave-origin-setup) on
+    `/etc/skel`, so the live user's and every new user's profile starts set
+    up: no welcome page, no P3A notice, no crash-report question, Origin's
+    free tier accepted, search suggestions on, the new tab page with the
+    clock and without Brave's stats. Run it by hand (with Brave closed) to
+    apply the same to an existing profile.
   - **its repository, and no other**: brave-origin's maintainer scripts
     come from Chrome's. Unless `/etc/default/brave-origin` says
     `repo_add_once="false"`, its postinst adds a repository of its own, and
@@ -972,7 +980,11 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
   first 10 seconds (no usable OpenGL, a broken config…), Ptyxis opens
   instead, with the same working directory and command, and a
   notification says so. `xdg-terminals.list` names Ptyxis second, for
-  when Ghostty isn't installed at all.
+  when Ghostty isn't installed at all. When systemd starts it (the
+  `.desktop` file is D-Bus activatable, so the dock does too), the wrapper
+  `exec`s Ghostty with no fallback: the unit is `Type=notify-reload`, and
+  systemd ignores the ready notice from a child of the service, so it would
+  kill Ghostty after 90 seconds.
 - **Yaru ↔ accent color**: [yaru-accent-sync](overlay/usr/local/bin/yaru-accent-sync)
   runs in every session (from `/etc/xdg/autostart`). It follows
   Settings › Appearance and sets `Yaru-<variant>[-dark]` with Ubuntu's own
@@ -1038,6 +1050,7 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
   - the enabled extensions
   - the dash favorites (Nautilus, Brave Origin, Ghostty, Software, Resources)
   - traditional scrolling (not "natural"), for mice and touchpads
+  - Files' icons one step smaller than the default (`small-plus`)
   - the extensions' settings
   - no welcome tour
 
