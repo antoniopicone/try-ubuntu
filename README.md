@@ -1,6 +1,10 @@
-# try-ubuntu
+<p align="center">
+  <img src="assets/try-ubuntu-app.svg" width="160" height="160" alt="try-ubuntu">
+</p>
 
-A live ISO of a minimal Ubuntu for arm64, to try the amazing penguin ;)
+<h1 align="center">try-ubuntu</h1>
+
+<p align="center">A live ISO of a minimal Ubuntu for arm64, to try the amazing penguin ;)</p>
 
 - Ubuntu 26.04 LTS (resolute) with a minimal **GNOME 50**, 26.04's own
   (the branch `gnome-51` has GNOME 51 instead, backported from 26.10)
