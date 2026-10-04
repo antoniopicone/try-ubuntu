@@ -34,6 +34,12 @@
 # QEMU: on Apple Silicon, the release's build for arm64 ISOs (qemu/build.sh:
 # GPU acceleration and nested virtualization), in $TRY_UBUNTU_DIR/dist;
 # otherwise Homebrew's on a Mac, the distribution's on Linux.
+#
+# On a terminal it shows the logo and its steps as a list: a dot for those
+# to come, a spinner for the one running, a tick for those done. What the
+# commands print goes to $TRY_UBUNTU_DIR/install.log, and its last line
+# next to the spinner. Without a terminal on stderr (a pipe, a file) the
+# steps are plain lines, with the commands' output between them.
 set -eu
 
 REPO=${TRY_UBUNTU_REPO:-antoniopicone/try-ubuntu}
@@ -41,14 +47,364 @@ DIR=${TRY_UBUNTU_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/try-ubuntu}
 # This script's own checkout, when it's run from one (not piped)
 SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P || true)
 
-say()  { printf '\033[1m==> %s\033[0m\n' "$*" >&2; }
-warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 has()  { command -v "$1" >/dev/null 2>&1; }
+
+# --- the screen ----------------------------------------------------------------
+#
+# plan names the steps, ui_begin draws them, step starts the next one (the
+# one before is done), note adds a few words to its line, finish ends the
+# list. File descriptor 3 is the terminal; while the list is on, 1 and 2 are
+# the log. The list is redrawn from the line under it, where the cursor
+# stays: nothing else may write to the terminal meanwhile (questions get
+# their room with ui_pause).
+
+exec 3>&2
+esc=$(printf '\033') cr=$(printf '\r')
+ui=0 nsteps=0 cur=0 open=0 below=0 paused=0 spin_pid='' step_note='' error=''
+iso_size=0 log_mark=0
+# curl's progress: a bar on the terminal, its meter in the log
+meter=--progress-bar
+c_reset='' c_bold='' c_dim='' c_red='' c_green='' c_yellow='' c_blue=''
+if [ -z "${NO_COLOR:-}" ]; then
+  c_reset="${esc}[0m" c_bold="${esc}[1m" c_dim="${esc}[2m" c_red="${esc}[31m"
+  c_green="${esc}[32m" c_yellow="${esc}[33m" c_blue="${esc}[34m"
+fi
+
+say() {
+  if [ "$ui" = 1 ]; then printf '==> %s\n' "$*" >&2
+  else printf '%s==> %s%s\n' "$c_bold" "$*" "$c_reset" >&2; fi
+}
+
+warn() {
+  if [ "$ui" = 1 ]; then
+    printf 'warning: %s\n' "$*" >&2
+    ui_below "$c_yellow!$c_reset" "$*"
+  else
+    printf '%swarning:%s %s\n' "$c_yellow" "$c_reset" "$*" >&2
+  fi
+}
+
+# With the list on, ui_exit shows the error (the EXIT trap).
+die() {
+  if [ "$ui" = 1 ]; then error=$*
+  else printf '%serror:%s %s\n' "$c_red" "$c_reset" "$*" >&2; fi
+  exit 1
+}
+
+is_number() { case $1 in ''|*[!0-9]*) return 1 ;; esac; }
+
+fmt_time() {
+  if [ "$1" -ge 3600 ]; then printf '%d:%02d:%02d' $(($1 / 3600)) $(($1 % 3600 / 60)) $(($1 % 60))
+  else printf '%d:%02d' $(($1 / 60)) $(($1 % 60)); fi
+}
+
+plan() {
+  for label do
+    nsteps=$((nsteps + 1))
+    eval "step_$nsteps=\$label"
+  done
+}
+
+# A channel of the 256-color cube, for terminals without 24-bit colors.
+cube() {
+  if [ "$1" -lt 48 ]; then echo 0
+  elif [ "$1" -lt 115 ]; then echo 1
+  else echo $((($1 - 35) / 40)); fi
+}
+
+# The glyph of assets/try-ubuntu-app.svg (a desktop screen and the penguin
+# in front of it) in ASCII, in the colors of the icon's screen, aubergine
+# to orange. $1: what is about to happen, written next to it.
+ui_logo() {
+  n=0
+  while IFS= read -r line; do
+    r=$((165 + 81 * n / 12)) g=$((60 + 72 * n / 12)) b=$((150 - 71 * n / 12))
+    n=$((n + 1))
+    if [ -z "$c_reset" ]; then color=''
+    elif [ "${COLORTERM:-}" = truecolor ] || [ "${COLORTERM:-}" = 24bit ]; then
+      color="${esc}[38;2;$r;$g;${b}m"
+    else
+      color="${esc}[38;5;$((16 + 36 * $(cube $r) + 6 * $(cube $g) + $(cube $b)))m"
+    fi
+    case $n in
+      6) side="${c_bold}try-ubuntu$c_reset" ;;
+      7) side="$c_dim$1$c_reset" ;;
+      *) side='' ;;
+    esac
+    printf '  %s%-31s%s%s\n' "$color" "$line" "$c_reset" "$side" >&3
+  done <<'EOF'
+ .#######################.
+ ##                     ##
+ ##  =================  ##
+ ##  #                  ##
+ ##  #                  ##
+ ##  #                  ##
+ ##                     ##
+ '############  _.#####._
+           ## .d#########b.
+             d##P  9#P  9##b
+     ####### ###b  d#b  d###
+             ####P"   "9####
+             "#####___#####"
+EOF
+}
+
+# The list, when stderr is a terminal with room for it. $1: see ui_logo.
+ui_begin() {
+  [ -t 2 ] && [ "${TERM:-dumb}" != dumb ] || return 0
+  size=$(stty size </dev/tty 2>/dev/null) || return 0
+  rows=${size% *} cols=${size#* }
+  is_number "$rows" && is_number "$cols" || return 0
+  [ "$rows" -ge $((nsteps + 4)) ] && [ "$cols" -ge 50 ] || return 0
+  log="$DIR/install.log"
+  mkdir -p "$DIR" 2>/dev/null && { true > "$log"; } 2>/dev/null || return 0
+
+  case ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} in
+    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*)
+      g_frames='⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏' g_todo='•' g_done='✓' g_skip='–' g_fail='✗' g_go='▸' ;;
+    *)
+      g_frames='| / - \' g_todo='.' g_done='+' g_skip='-' g_fail='x' g_go='>' ;;
+  esac
+  # A frame every tenth of a second, where sleep takes fractions
+  tick=0.1 every=10
+  sleep 0.1 2>/dev/null || tick=1 every=1
+
+  # No line wrapping (?7l) while drawing: what doesn't fit is cut
+  printf '\033[?25l\033[?7l\n' >&3
+  if [ "$rows" -ge $((nsteps + 16)) ]; then ui_logo "$1"
+  else printf '  %stry-ubuntu%s  %s%s%s\n' "$c_bold" "$c_reset" "$c_dim" "$1" "$c_reset" >&3; fi
+  printf '\n' >&3
+  i=0
+  while [ "$i" -lt "$nsteps" ]; do
+    i=$((i + 1))
+    eval "label=\$step_$i"
+    printf '  %s%s %s%s\n' "$c_dim" "$g_todo" "$label" "$c_reset" >&3
+  done
+  printf '\033[?7h' >&3
+  exec 4>&1 >>"$log" 2>&1
+  ui=1 meter=''
+}
+
+# Line $1 of the list becomes $2.
+ui_line() {
+  up=$((nsteps - $1 + 1 + below))
+  printf '\033[?7l\033[%dA\r\033[2K%s\033[%dB\r\033[?7h' "$up" "$2" "$up" >&3
+}
+
+# A line under the list, to stay there: $1 its mark, $2 its text.
+ui_below() {
+  spinning=$spin_pid
+  spin_stop
+  printf '  %s %s\n' "$1" "$2" >&3
+  below=$((below + (${#2} + 4 + cols - 1) / cols))
+  [ -z "$spinning" ] || spin_start
+}
+
+# The last thing the running step printed, for its line: without colors and
+# what a terminal can't count on, and with curl's meter and dd's progress
+# made readable.
+detail() {
+  d=$(tail -c 2048 "$log" 2>/dev/null | tr '\r\t' '\n ' |
+    LC_ALL=C sed -e "s/$esc\[[0-9;?]*[A-Za-z]//g" -e 's/^ *//' -e '/^$/d' | tail -n 1 |
+    LC_ALL=C tr -cd '\40-\176')
+  case $d in '### '*) return 0 ;; esac
+  d=${d#==> }
+  set -- $d
+  if [ $# -eq 12 ] && is_number "$1"; then
+    # curl: % total % received % sent, average speeds, times, speed
+    case "$2:${11}" in
+      0:*) d='' ;;
+      *:*-*) d="$1% of $2, ${12}/s" ;;
+      *:*:*:*) d="$1% of $2, ${12}/s, ${11} left" ;;
+    esac
+  elif [ "${2:-}" = bytes ] && is_number "$1" && [ "$iso_size" -gt 0 ]; then
+    d="$(($1 * 100 / iso_size))%, ${d##*, }"
+  fi
+  printf '%s' "$d"
+}
+
+# The running step's line, in the background until spin_stop (or until
+# this script is gone): the spinner,
+# the time it's taking, and its last line of output.
+spin() {
+  set +e -f
+  eval "label=\$step_$cur"
+  head="$c_bold$label$c_reset${step_note:+  $c_dim$step_note$c_reset}"
+  room=$((cols - ${#label} - ${#step_note} - 8))
+  [ "$room" -gt 0 ] || room=0
+  n=0 status=''
+  while :; do
+    for frame in $g_frames; do
+      [ ! -e "$log.stop" ] || exit 0
+      if [ $((n % every)) -eq 0 ]; then
+        kill -0 $$ 2>/dev/null || exit 0
+        status=$(printf "%.${room}s" "$(fmt_time $(($(date +%s) - started)))  $(detail)")
+      fi
+      n=$((n + 1))
+      ui_line "$cur" "  $c_blue$frame$c_reset $head  $c_dim$status$c_reset"
+      sleep "$tick"
+    done
+  done
+}
+
+spin_start() {
+  rm -f "$log.stop"
+  spin &
+  spin_pid=$!
+}
+
+# With a file, not a signal: dash loses the one that reaches a subshell
+# before it has reset the traps (the spinner of a step that has just begun).
+spin_stop() {
+  [ -n "$spin_pid" ] || return 0
+  { true > "$log.stop"; } 2>/dev/null || kill "$spin_pid" 2>/dev/null || true
+  wait "$spin_pid" 2>/dev/null || true
+  rm -f "$log.stop"
+  spin_pid=''
+}
+
+# The current step's line as it stays: done, skip, fail, or go for the one
+# the list hands the terminal over to.
+ui_mark() {
+  open=0
+  eval "label=\$step_$cur"
+  took=$(($(date +%s) - started))
+  words=$step_note
+  [ "$took" -lt 10 ] || words="${words:+$words, }$(fmt_time "$took")"
+  room=$((cols - ${#label} - 6))
+  [ "$room" -gt 0 ] || room=0
+  words=$(printf "%.${room}s" "$words")
+  case $1 in
+    done) line="  $c_green$g_done$c_reset $label" ;;
+    skip) line="  $c_dim$g_skip $label$c_reset" ;;
+    fail) line="  $c_red$g_fail$c_reset $c_bold$label$c_reset" ;;
+    go)   line="  $c_blue$g_go$c_reset $c_bold$label$c_reset" ;;
+  esac
+  ui_line "$cur" "$line${words:+  $c_dim$words$c_reset}"
+}
+
+ui_next() {
+  spin_stop
+  [ "$open" = 0 ] || ui_mark done
+  cur=$((cur + 1)) open=1 step_note='' started=$(date +%s)
+  eval "label=\$step_$cur"
+  printf '\n### %s\n' "$label" >&2
+  log_mark=$(wc -l < "$log" | tr -d ' ')
+}
+
+# The next step of the plan starts.
+step() {
+  if [ "$ui" = 1 ]; then
+    ui_next
+    spin_start
+  else
+    cur=$((cur + 1))
+    eval "say \"\$step_$cur\""
+  fi
+}
+
+# The next step of the plan isn't needed: $1 says why.
+skip() {
+  if [ "$ui" = 1 ]; then
+    ui_next
+    step_note=$1
+    ui_mark skip
+  else
+    cur=$((cur + 1))
+  fi
+}
+
+# A few words on the running step's line, which stay when it's done.
+note() {
+  if [ "$ui" = 1 ]; then
+    step_note=$1
+    [ -z "$spin_pid" ] || { spin_stop; spin_start; }
+  else
+    printf '    %s\n' "$1" >&2
+  fi
+}
+
+# Room under the list for questions and their answers, $1 lines: scrolled
+# into view now, since the place ui_resume wipes from is a spot on the
+# screen, lost if it scrolls later.
+ui_pause() {
+  [ "$ui" = 1 ] || return 0
+  spin_stop
+  eval "label=\$step_$cur"
+  ui_line "$cur" "  $c_blue?$c_reset $c_bold$label$c_reset"
+  lines=$1 room=$((rows - nsteps - below - 1))
+  [ "$lines" -le "$room" ] || lines=$room
+  [ "$lines" -ge 1 ] || lines=1
+  i=0
+  while [ "$i" -lt "$lines" ]; do
+    printf '\n' >&3
+    i=$((i + 1))
+  done
+  printf '\033[%dA%s7\033[?25h' "$lines" "$esc" >&3
+  paused=1
+}
+
+ui_resume() {
+  [ "$ui" = 1 ] || return 0
+  printf '%s8\033[J\033[?25l' "$esc" >&3
+  paused=0
+  spin_start
+}
+
+ui_close() {
+  printf '\033[?25h\n' >&3
+  exec 1>&4 2>&3 4>&-
+  ui=0
+}
+
+# The list is over, its last step done (or $1, see ui_mark): the terminal
+# goes to what comes next.
+finish() {
+  [ "$ui" = 1 ] || return 0
+  spin_stop
+  [ "$open" = 0 ] || ui_mark "${1:-done}"
+  ui_close
+}
+
+# On exit with the list still on: the step that was running failed. Its last
+# lines of output follow, without the progress meters' rewrites.
+ui_exit() {
+  [ "$ui" = 1 ] || return 0
+  set +e
+  spin_stop
+  [ "$paused" = 0 ] || printf '%s8\033[J' "$esc" >&3
+  if [ "$open" = 1 ]; then
+    [ "$1" -lt 129 ] || step_note=interrupted
+    if [ "$1" -eq 0 ]; then ui_mark done; else ui_mark fail; fi
+  fi
+  ui_close
+  [ "$1" -ne 0 ] && [ "$1" -lt 129 ] || return 0
+  printf '%s' "$c_dim" >&2
+  tail -n +"$((log_mark + 1))" "$log" |
+    LC_ALL=C sed -e "s/$cr\$//" -e "s/.*$cr//" -e "s/$esc\[[0-9;?]*[A-Za-z]//g" \
+      -e '/^ *$/d' -e '/^### /d' | tail -n 8 | sed 's/^/    /' >&2
+  printf '%s  %serror:%s %s\n  The whole output is in %s\n' "$c_reset" "$c_red" "$c_reset" \
+    "${error:-this step failed (exit status $1)}" "$log" >&2
+}
+trap 'ui_exit $?' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# sudo's password, asked under the list before the command that needs it:
+# sudo would ask on the line the spinner redraws from.
+sudo_ready() {
+  [ "$ui" = 1 ] && has sudo || return 0
+  sudo -n true 2>/dev/null && return 0
+  was_paused=$paused
+  [ "$was_paused" = 1 ] || ui_pause 4
+  sudo -v -p '  Password for sudo: ' 2>&3 || die "sudo didn't get the password"
+  [ "$was_paused" = 1 ] || ui_resume
+}
 
 sudo_run() {
   if [ "$(id -u)" -eq 0 ]; then "$@"
-  elif has sudo; then sudo "$@"
+  elif has sudo; then sudo_ready; sudo "$@"
   else die "run as root or install sudo: $*"; fi
 }
 
@@ -57,10 +413,11 @@ sha256() {
   else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
 
-# The answer to a question, from the terminal even under curl | sh.
+# The answer to a question, from the terminal even under curl | sh. It
+# fails without a terminal: its caller dies (here it's in a subshell).
 ask() {
-  printf '%s ' "$1" >&2
-  read -r answer </dev/tty || die "no terminal to answer from"
+  printf '%s ' "$1" >&3
+  read -r answer </dev/tty || return 1
   printf '%s\n' "$answer"
 }
 
@@ -89,11 +446,12 @@ install_qemu_release() {
   qemu_stamp="$dist/qemu-macos-arm64.release"
   if [ -x "$dist/qemu-macos-arm64/bin/qemu-system-aarch64" ] &&
      [ "$(cat "$qemu_stamp" 2>/dev/null || true)" = "$tag" ]; then
+    note "the release's build for Apple Silicon, already here"
     return 0
   fi
-  say "Downloading QEMU for Apple Silicon ($tag)"
+  note "the release's build for Apple Silicon"
   tmp=$(mktemp -d "$dist/.qemu.XXXXXX")
-  curl -fL --progress-bar -o "$tmp/$qemu_tgz" "$base/$qemu_tgz" </dev/null || {
+  curl -fL $meter -o "$tmp/$qemu_tgz" "$base/$qemu_tgz" </dev/null || {
     rm -rf "$tmp"; die "QEMU download failed; run this again"; }
   if [ "$(sha256 "$tmp/$qemu_tgz")" != "$(printf '%s\n' "$sums" | grep " \*\{0,1\}$qemu_tgz\$" | cut -d' ' -f1)" ]; then
     rm -rf "$tmp"; die "checksum mismatch for $qemu_tgz; run this again"
@@ -108,7 +466,7 @@ install_qemu_release() {
 # --rebuild: everything downloaded from the releases, and the caches. Not
 # the persistent disks (persist*.qcow2) nor the UEFI variables (efivars*.fd).
 purge_downloads() {
-  say "Deleting the downloaded ISO, QEMU and caches in $dist"
+  note "in $dist"
   rm -rf "$dist"/*.iso "$dist"/*.iso.*.part "$dist"/*.release \
     "$dist/qemu-macos-arm64" "$dist"/.qemu.* "$dist"/.kernel-* "$dist"/.app-* \
     "$DIR/run-qemu.sh" "$DIR/try-ubuntu.icns"
@@ -120,13 +478,19 @@ install_qemu() {
   case "$os" in
     Darwin)
       [ "$arch" = arm64 ] && [ "$host" = arm64 ] && install_qemu_release && return 0
-      has "$qemu" && return 0
+      if has "$qemu"; then
+        note "already installed"
+        return 0
+      fi
       has brew || die "QEMU is missing and Homebrew isn't installed: see https://brew.sh, then run this again"
-      say "Installing QEMU (brew install qemu)"
+      note "brew install qemu"
       brew install qemu ;;
     Linux)
-      has "$qemu" && linux_firmware_found && return 0
-      say "Installing QEMU and the $arch UEFI firmware"
+      if has "$qemu" && linux_firmware_found; then
+        note "already installed"
+        return 0
+      fi
+      note "with the $arch UEFI firmware"
       if has apt-get; then
         sudo_run apt-get update -qq
         if [ "$arch" = amd64 ]; then
@@ -159,12 +523,12 @@ install_qemu() {
 get_sources() {
   if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/build.sh" ] && [ -f "$SELF_DIR/scripts/build-rootfs.sh" ]; then
     src=$SELF_DIR
-    say "Building from the checkout in $src"
+    note "the checkout in $src"
     return
   fi
   src="$DIR/src/$tag"
+  note "$tag"
   if [ ! -f "$src/build.sh" ]; then
-    say "Downloading the sources of $tag"
     rm -rf "$src"
     mkdir -p "$src"
     curl -fsSL "https://github.com/$REPO/archive/refs/tags/$tag.tar.gz" </dev/null |
@@ -223,26 +587,34 @@ human() { awk -v b="$1" 'BEGIN { printf "%.1f GB", b / 1000000000 }'; }
 
 write_usb() {
   iso_size=$(wc -c < "$1" | tr -d ' ')
+  step
   disks=$(list_usb)
   [ -n "$disks" ] || die "no USB disk found: plug one in (at least $(human "$iso_size")) and run this again"
-  printf '\nUSB disks:\n' >&2
+  ui_pause $(($(printf '%s\n' "$disks" | wc -l) + 9))
+  printf '\n  USB disks:\n' >&3
   i=0
   printf '%s\n' "$disks" | while IFS='|' read -r dev bytes desc; do
     i=$((i + 1))
-    printf '  %d) %s  %s  %s\n' "$i" "$dev" "$(human "$bytes")" "$desc" >&2
+    printf '    %d) %s  %s  %s\n' "$i" "$dev" "$(human "$bytes")" "$desc" >&3
   done
-  choice=$(ask "Which one gets the live system (number, or Enter to stop)?")
+  choice=$(ask "  Which one gets the live system (number, or Enter to stop)?") ||
+    die "no terminal to answer from"
   [ -n "$choice" ] || die "stopped: nothing was written"
   case "$choice" in *[!0-9]*) die "not a number: $choice" ;; esac
   line=$(printf '%s\n' "$disks" | sed -n "${choice}p")
   [ -n "$line" ] || die "no disk number $choice"
   dev=${line%%|*}; rest=${line#*|}; bytes=${rest%%|*}; desc=${rest#*|}
   [ "$bytes" -ge "$iso_size" ] || die "$dev is too small ($(human "$bytes")) for the ISO ($(human "$iso_size"))"
-  warn "everything on $dev ($desc, $(human "$bytes")) will be erased"
-  confirm=$(ask "Type $dev to erase it and write the live system:")
+  printf '  %s!%s everything on %s (%s, %s) will be erased\n' "$c_yellow" "$c_reset" \
+    "$dev" "$desc" "$(human "$bytes")" >&3
+  confirm=$(ask "  Type $dev to erase it and write the live system:") ||
+    die "no terminal to answer from"
   [ "$confirm" = "$dev" ] || die "stopped: nothing was written"
+  [ "$(id -u)" -eq 0 ] || sudo_ready
+  ui_resume
+  note "$dev, $desc, $(human "$bytes")"
 
-  say "Writing $(basename "$1") to $dev (it takes a few minutes)"
+  step
   case "$os" in
     Darwin)
       diskutil unmountDisk force "$dev" >/dev/null
@@ -259,6 +631,7 @@ write_usb() {
       sudo_run dd if="$1" of="$dev" bs=4M conv=fsync oflag=direct status=progress
       sync ;;
   esac
+  finish
   say "Done: the USB stick is ready"
   cat >&2 <<EOF
 
@@ -271,7 +644,9 @@ EOF
 }
 
 on_usb() {
+  step
   get_sources
+  step
   get_podman
   iso="$src/dist/ubuntu-live-$arch-hardware.iso"
   stamp="$iso.release"
@@ -279,8 +654,9 @@ on_usb() {
   # checkout, only --rebuild or a missing ISO does
   outdated=0
   [ "$src" != "$SELF_DIR" ] && [ "$(cat "$stamp" 2>/dev/null || true)" != "$tag" ] && outdated=1
+  step
   if [ "$rebuild" = 1 ] || [ ! -f "$iso" ] || [ "$outdated" = 1 ]; then
-    say "Building the live ISO for real computers ($arch, $tag)"
+    note "$arch, $tag"
     if [ "$arch" != "$host" ]; then
       warn "building $arch on $host is emulated: the first build takes many hours"
     else
@@ -294,7 +670,7 @@ on_usb() {
     fi
     printf '%s\n' "$tag" > "$stamp"
   else
-    say "Using $iso, already built for $tag"
+    note "$arch, already built for $tag"
   fi
   write_usb "$iso"
 }
@@ -337,12 +713,25 @@ main() {
   has curl || die "curl is required"
   has bash || die "bash is required (run-qemu.sh and build.sh are bash scripts)"
 
+  plan "Find the latest release"
+  if [ "$on_usb" = 1 ]; then
+    plan "Get the sources" "Get podman" "Build the ISO for real computers" \
+      "Choose the USB stick" "Write the live system to it"
+    ui_begin "a live USB stick for a real computer ($arch_opt)"
+  else
+    [ "$rebuild" = 0 ] || plan "Delete the downloads and the caches"
+    plan "Get QEMU" "Download the ISO" "Check the SHA-256" "Get the launcher" "Boot Ubuntu Live"
+    ui_begin "the live session in QEMU ($arch_opt)"
+  fi
+
+  step
   # /releases/latest redirects to /releases/tag/<tag>: no API call, no rate limit.
   tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest") ||
     die "can't reach github.com/$REPO"
   tag=${tag##*/}
   case "$tag" in ''|latest|releases) die "$REPO has no release yet" ;; esac
   base="https://github.com/$REPO/releases/download/$tag"
+  note "$tag"
 
   if [ "$on_usb" = 1 ]; then
     on_usb "$@"
@@ -367,8 +756,12 @@ main() {
   [ "$arch" = amd64 ] && persist=persist-amd64.qcow2
   stamp="$dist/$iso.release"
   current=$(cat "$stamp" 2>/dev/null || true)
-  [ "$rebuild" = 0 ] || purge_downloads
+  if [ "$rebuild" = 1 ]; then
+    step
+    purge_downloads
+  fi
 
+  step
   install_qemu
   if [ "$os" = Linux ] && [ "$arch" = "$host" ] && [ -e /dev/kvm ] && [ ! -w /dev/kvm ]; then
     warn "/dev/kvm isn't writable: add yourself to the kvm group (sudo usermod -aG kvm \$USER, then log in again) for hardware acceleration"
@@ -380,10 +773,11 @@ main() {
     for f in "$dist/$iso".*.part; do
       [ "$f" = "$part" ] || rm -f "$f"
     done
-    say "Downloading $iso ($tag)"
-    curl -fL --progress-bar -C - -o "$part" "$base/$iso" </dev/null ||
+    step
+    note "$iso"
+    curl -fL $meter -C - -o "$part" "$base/$iso" </dev/null ||
       die "download failed; run this again to resume it"
-    say "Checking the SHA-256"
+    step
     if [ "$(sha256 "$part")" != "$expected" ]; then
       rm -f "$part"
       die "checksum mismatch for $iso; run this again"
@@ -396,11 +790,16 @@ main() {
       if [ -f "$dist/$persist.iso" ]; then
         mv "$dist/$persist.iso" "$dist/$old.iso"
       fi
-      say "The persistent disk of $current only works with its ISO: moved to $dist/$old"
+      warn "the persistent disk of $current only works with its ISO: moved to $dist/$old"
     fi
+  else
+    step
+    note "$iso, already here"
+    skip "done when it was downloaded"
   fi
 
   # run-qemu.sh from the same tag as the ISO.
+  step
   curl -fsSL -o "$DIR/run-qemu.sh" "https://raw.githubusercontent.com/$REPO/$tag/run-qemu.sh" ||
     die "can't download run-qemu.sh"
   chmod +x "$DIR/run-qemu.sh"
@@ -410,13 +809,15 @@ main() {
       "https://raw.githubusercontent.com/$REPO/$tag/assets/try-ubuntu.icns" 2>/dev/null ||
     rm -f "$DIR/try-ubuntu.icns"
 
-  say "Booting Ubuntu Live $tag (close the window to quit)"
+  step
+  note "$tag, close the window to quit"
+  finish go
   # Under curl | sh stdin is the script: QEMU's serial console (--headless,
   # --serial) needs the terminal.
   if { : </dev/tty; } 2>/dev/null; then
-    exec bash "$DIR/run-qemu.sh" --iso "$dist/$iso" --arch "$arch_opt" "$@" </dev/tty
+    exec bash "$DIR/run-qemu.sh" --iso "$dist/$iso" --arch "$arch_opt" "$@" </dev/tty 3>&-
   fi
-  exec bash "$DIR/run-qemu.sh" --iso "$dist/$iso" --arch "$arch_opt" "$@"
+  exec bash "$DIR/run-qemu.sh" --iso "$dist/$iso" --arch "$arch_opt" "$@" 3>&-
 }
 
 # In a function, so sh has read the whole script before anything runs.

@@ -50,6 +50,11 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
   `~/.local/share/try-ubuntu` (set `TRY_UBUNTU_DIR` to change it). The ISO
   is checked against the release's `SHA256SUMS`, and an interrupted
   download resumes.
+- **What it shows**: on a terminal, the logo and the steps as a list, with
+  a spinner on the one running and a tick on those done. What the commands
+  print goes to `~/.local/share/try-ubuntu/install.log`, and its last line
+  next to the spinner (`tail -f` it to follow a long build). Piped or
+  redirected, it prints plain lines instead.
 - **Updates**: running it again boots the same ISO, or downloads the newer
   one when there's a new release. The old persistent disk only works with
   its own ISO, so it's moved aside to `persist-<tag>.qcow2` (see

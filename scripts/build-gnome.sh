@@ -57,6 +57,24 @@ refresh_repo() {
 refresh_repo
 apt-get update -qq
 
+# While a package builds (its output is in build.log), where it's at: the
+# debhelper step and ninja's count, as "nautilus: dh_auto_build [210/312]".
+# One line, rewritten: install.sh shows it next to its spinner.
+progress() {  # $1: the source, $2: its build.log
+  local now last='' width=0
+  while sleep 5; do
+    now=$(awk '
+      /^ +dh_[a-z_]+/ { step = $1; count = "" }
+      /^ +debian\/rules [a-z_]+_dh_/ { step = $2; sub(/^[a-z_]+_dh_/, "dh_", step); count = "" }
+      match($0, /^\[[0-9]+\/[0-9]+\]/) { count = " " substr($0, 1, RLENGTH) }
+      END { print step count }' "$2" 2>/dev/null) || continue
+    [[ -n "$now" && "$now" != "$last" ]] || continue
+    last=$now now="    $1: $now"
+    (( ${#now} > width )) && width=${#now}
+    printf '\r%-*s' "$width" "$now"
+  done
+}
+
 for src in "${REBUILDS[@]}"; do
   # The latest of the suites' versions
   ver=
@@ -102,8 +120,16 @@ for src in "${REBUILDS[@]}"; do
   fi
 
   apt-get build-dep -y -qq --no-install-recommends -P "${DEB_BUILD_PROFILES// /,}" "$dir" >/dev/null
+  progress "$src" "$work/build.log" &
+  progress_pid=$!
+  built=0
   (cd "$dir" && dpkg-buildpackage -b -uc -us -P"${DEB_BUILD_PROFILES// /,}") \
-    > "$work/build.log" 2>&1 || { tail -60 "$work/build.log" >&2; exit 1; }
+    > "$work/build.log" 2>&1 || built=$?
+  kill "$progress_pid" 2>/dev/null || true
+  wait "$progress_pid" 2>/dev/null || true
+  # The end of the line of progress
+  echo
+  (( built == 0 )) || { tail -60 "$work/build.log" >&2; exit 1; }
   mv "$work"/*.deb "$GNOME_REPO/"
   refresh_repo
   touch "$stamp"
