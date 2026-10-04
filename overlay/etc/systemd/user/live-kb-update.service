@@ -1,0 +1,14 @@
+[Unit]
+Description=Update the knowledge base: conversions, index, embeddings (live-kb)
+# Not on battery: it waits for the next run on the charger.
+ConditionACPower=true
+
+[Service]
+Type=oneshot
+# qmd and its Node.js are installed with npm into the user's home
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/live-kb update
+# In the background, at the lowest CPU and disk priority
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle

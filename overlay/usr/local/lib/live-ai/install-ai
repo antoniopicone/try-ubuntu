@@ -1,0 +1,288 @@
+#!/usr/bin/python3
+"""install-ai: the AI app's system installs, as root through pkexec
+(org.ubuntu.live-ai.install: it asks for the user's password). Only these:
+
+  claude-desktop [--cowork]  Anthropic's apt repository (key checked) + claude-desktop;
+                             --cowork adds the QEMU packages Cowork's VM needs
+  claude-code                Anthropic's apt repository + claude-code
+  chatgpt                    OpenAI's .deb, which adds OpenAI's repository for updates
+  ollama CONTEXT [--rocm]    Ollama's release into /usr, the ollama user, its service on
+                             127.0.0.1:11434 with that context length; --rocm (amd64) adds
+                             the AMD GPU libraries
+  packages PACKAGE...        archive packages the app needs, from a fixed list
+  kvm                        adds the calling user to the kvm group (Cowork)
+
+Progress goes to stderr; the last line on stdout is JSON: {"ok": true} or
+{"ok": false, "error": "..."}. The package lists are refreshed first: the
+image ships without them.
+"""
+import base64
+import hashlib
+import json
+import os
+import pwd
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+# Anthropic's signing key, for Claude Desktop and Claude Code (their docs).
+ANTHROPIC_FPR = "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
+CLAUDE_DESKTOP = {
+    "key": "https://downloads.claude.ai/claude-desktop/key.asc",
+    "keyring": "/usr/share/keyrings/claude-desktop-archive-keyring.asc",
+    "list": "/etc/apt/sources.list.d/claude-desktop.list",
+    "line": "deb [arch=amd64,arm64 signed-by={keyring}] "
+            "https://downloads.claude.ai/claude-desktop/apt/stable stable main",
+}
+CLAUDE_CODE = {
+    "key": "https://downloads.claude.ai/keys/claude-code.asc",
+    "keyring": "/etc/apt/keyrings/claude-code.asc",
+    "list": "/etc/apt/sources.list.d/claude-code.list",
+    "line": "deb [signed-by={keyring}] "
+            "https://downloads.claude.ai/claude-code/apt/stable stable main",
+}
+CHATGPT_DEB = "https://persistent.oaistatic.com/codex-app-prod/linux/deb/latest/chatgpt_{arch}.deb"
+OLLAMA_TAR = "https://ollama.com/download/ollama-linux-{arch}.tar.zst"
+OLLAMA_ROCM_TAR = "https://ollama.com/download/ollama-linux-amd64-rocm.tar.zst"
+OLLAMA_UNIT = "/etc/systemd/system/ollama.service"
+OLLAMA_DROPIN = "/etc/systemd/system/ollama.service.d/live-ai.conf"
+# What the app may install from the archive: Node.js for the npm agents and
+# qmd, the converters and YAML for the knowledge base, gh for GitHub sources.
+PACKAGES = {"nodejs", "npm", "poppler-utils", "pandoc", "python3-yaml", "gh", "git"}
+COWORK = {"amd64": ["qemu-system-x86", "ovmf", "virtiofsd"],
+          "arm64": ["qemu-system-arm", "qemu-efi-aarch64", "virtiofsd"]}
+
+
+class Failure(Exception):
+    pass
+
+
+def say(message):
+    print(message, file=sys.stderr, flush=True)
+
+
+def run(*cmd, **kw):
+    say("+ " + " ".join(cmd))
+    result = subprocess.run(cmd, stdout=sys.stderr, stderr=subprocess.PIPE, text=True, **kw)
+    if result.returncode != 0:
+        raise Failure(f"{cmd[0]} {cmd[1] if len(cmd) > 1 else ''}: "
+                      f"{(result.stderr or '').strip().splitlines()[-1:] or result.returncode}")
+    return result
+
+
+def arch():
+    return subprocess.run(["dpkg", "--print-architecture"], capture_output=True,
+                          text=True, check=True).stdout.strip()
+
+
+def download(url, dest):
+    say(f"downloading {url}")
+    request = urllib.request.Request(url, headers={"User-Agent": "try-ubuntu live-ai"})
+    with urllib.request.urlopen(request, timeout=60) as response, open(dest, "wb") as out:
+        shutil.copyfileobj(response, out)
+
+
+def apt_update():
+    run("apt-get", "update", "-q")
+
+
+def apt_install(*packages):
+    run("apt-get", "install", "-y", "-q", *packages,
+        env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"})
+
+
+def key_fingerprint(armored):
+    """The v4 fingerprint of an ASCII-armored OpenPGP public key: SHA-1 over
+    0x99, the primary key packet's 2-byte length and its body (RFC 4880,
+    12.2). Enough to check a vendor's key without gpg, which the image lacks."""
+    lines = armored.strip().splitlines()
+    try:
+        start = lines.index(next(l for l in lines if l.startswith("-----BEGIN PGP PUBLIC KEY")))
+    except StopIteration:
+        raise Failure("not an OpenPGP public key")
+    body = []
+    for line in lines[start + 1:]:
+        if line.startswith("-----END") or line.startswith("="):
+            break
+        if ":" in line or not line.strip():
+            continue  # armor headers and the blank line after them
+        body.append(line.strip())
+    data = base64.b64decode("".join(body))
+    tag = data[0]
+    if not tag & 0x80:
+        raise Failure("not an OpenPGP packet")
+    if tag & 0x40:  # new format
+        if (tag & 0x3F) != 6:
+            raise Failure("the first packet isn't a public key")
+        first = data[1]
+        if first < 192:
+            length, offset = first, 2
+        elif first < 224:
+            length, offset = ((first - 192) << 8) + data[2] + 192, 3
+        else:
+            length, offset = int.from_bytes(data[2:6], "big"), 6
+    else:  # old format
+        if ((tag >> 2) & 0x0F) != 6:
+            raise Failure("the first packet isn't a public key")
+        size = {0: 1, 1: 2, 2: 4}[tag & 3]
+        length, offset = int.from_bytes(data[1:1 + size], "big"), 1 + size
+    packet = data[offset:offset + length]
+    if packet[0] != 4:
+        raise Failure(f"OpenPGP key version {packet[0]}, expected 4")
+    return hashlib.sha1(b"\x99" + length.to_bytes(2, "big") + packet).hexdigest().upper()
+
+
+def anthropic_repo(repo):
+    """Anthropic's key (checked) and repository, as their docs lay them out."""
+    with tempfile.TemporaryDirectory() as tmp:
+        key = os.path.join(tmp, "key.asc")
+        download(repo["key"], key)
+        with open(key, encoding="ascii", errors="replace") as fh:
+            fpr = key_fingerprint(fh.read())
+        if fpr != ANTHROPIC_FPR:
+            raise Failure(f"unexpected key fingerprint {fpr} (expected {ANTHROPIC_FPR})")
+        say(f"key fingerprint checked: {fpr}")
+        os.makedirs(os.path.dirname(repo["keyring"]), exist_ok=True)
+        shutil.copyfile(key, repo["keyring"])
+        os.chmod(repo["keyring"], 0o644)
+    with open(repo["list"], "w") as fh:
+        fh.write(repo["line"].format(keyring=repo["keyring"]) + "\n")
+
+
+def calling_user():
+    uid = os.environ.get("PKEXEC_UID")
+    if not uid or not uid.isdigit():
+        raise Failure("run through pkexec")
+    return pwd.getpwuid(int(uid)).pw_name
+
+
+def do_claude_desktop(args):
+    anthropic_repo(CLAUDE_DESKTOP)
+    apt_update()
+    packages = ["claude-desktop"]
+    if "--cowork" in args:
+        packages += COWORK.get(arch(), [])
+    apt_install(*packages)
+
+
+def do_claude_code(_args):
+    anthropic_repo(CLAUDE_CODE)
+    apt_update()
+    apt_install("claude-code")
+
+
+def do_chatgpt(_args):
+    a = arch()
+    if a not in ("amd64", "arm64"):
+        raise Failure(f"no ChatGPT package for {a}")
+    with tempfile.TemporaryDirectory() as tmp:
+        os.chmod(tmp, 0o755)  # apt's sandbox user (_apt) reads the file
+        deb = os.path.join(tmp, f"chatgpt_{a}.deb")
+        download(CHATGPT_DEB.format(arch=a), deb)
+        name = subprocess.run(["dpkg-deb", "-f", deb, "Package"], capture_output=True,
+                              text=True).stdout.strip()
+        if name != "chatgpt":
+            raise Failure(f"the download isn't the ChatGPT package ({name or 'not a .deb'})")
+        apt_update()
+        apt_install(deb)
+
+
+def ollama_answers():
+    try:
+        with socket.create_connection(("127.0.0.1", 11434), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+def do_ollama(args):
+    if not args or not args[0].isdigit() or not 2048 <= int(args[0]) <= 262144:
+        raise Failure("ollama CONTEXT: a context length in tokens")
+    context = args[0]
+    a = arch()
+    if a not in ("amd64", "arm64"):
+        raise Failure(f"no Ollama build for {a}")
+    with tempfile.TemporaryDirectory() as tmp:
+        tarballs = [OLLAMA_TAR.format(arch=a)]
+        if "--rocm" in args[1:] and a == "amd64":
+            tarballs.append(OLLAMA_ROCM_TAR)
+        for url in tarballs:
+            dest = os.path.join(tmp, os.path.basename(url))
+            download(url, dest)
+            # An older version's libraries mustn't mix with the new ones
+            if url == tarballs[0] and os.path.isdir("/usr/lib/ollama"):
+                shutil.rmtree("/usr/lib/ollama")
+            run("tar", "--zstd", "-x", "--no-same-owner", "-f", dest, "-C", "/usr")
+    if not os.path.exists("/usr/bin/ollama"):
+        raise Failure("the Ollama archive had no bin/ollama")
+    try:
+        pwd.getpwnam("ollama")
+    except KeyError:
+        run("useradd", "-r", "-s", "/bin/false", "-U", "-m", "-d", "/usr/share/ollama", "ollama")
+    with open(OLLAMA_UNIT, "w") as fh:
+        fh.write("[Unit]\n"
+                 "Description=Ollama (local models, installed by the AI app)\n"
+                 "After=network-online.target\n\n"
+                 "[Service]\n"
+                 "ExecStart=/usr/bin/ollama serve\n"
+                 "User=ollama\nGroup=ollama\n"
+                 "Restart=always\nRestartSec=3\n"
+                 "# Only this computer: no other device reaches the models\n"
+                 "Environment=OLLAMA_HOST=127.0.0.1:11434\n\n"
+                 "[Install]\nWantedBy=multi-user.target\n")
+    os.makedirs(os.path.dirname(OLLAMA_DROPIN), exist_ok=True)
+    with open(OLLAMA_DROPIN, "w") as fh:
+        fh.write("# The AI app's choice for this computer's memory (live-ai)\n"
+                 f"[Service]\nEnvironment=OLLAMA_CONTEXT_LENGTH={context}\n")
+    run("systemctl", "daemon-reload")
+    run("systemctl", "enable", "ollama.service")
+    run("systemctl", "restart", "ollama.service")
+    for _ in range(30):
+        if ollama_answers():
+            return
+        time.sleep(1)
+    raise Failure("Ollama didn't start (journalctl -u ollama)")
+
+
+def do_packages(args):
+    if not args:
+        raise Failure("packages: name at least one")
+    bad = [p for p in args if p not in PACKAGES]
+    if bad:
+        raise Failure("not on the list: " + ", ".join(bad))
+    apt_update()
+    apt_install(*args)
+
+
+def do_kvm(_args):
+    user = calling_user()
+    run("getent", "group", "kvm")
+    run("usermod", "-aG", "kvm", user)
+
+
+ACTIONS = {"claude-desktop": do_claude_desktop, "claude-code": do_claude_code,
+           "chatgpt": do_chatgpt, "ollama": do_ollama, "packages": do_packages, "kvm": do_kvm}
+
+
+def main():
+    if os.geteuid() != 0:
+        print(json.dumps({"ok": False, "error": "must run as root (pkexec)"}))
+        return 1
+    if len(sys.argv) < 2 or sys.argv[1] not in ACTIONS:
+        print(json.dumps({"ok": False, "error": "unknown action"}))
+        return 64
+    try:
+        ACTIONS[sys.argv[1]](sys.argv[2:])
+    except (Failure, OSError, subprocess.CalledProcessError) as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return 1
+    print(json.dumps({"ok": True}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

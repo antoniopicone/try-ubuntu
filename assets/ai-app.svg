@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#B9A4F5"/>
+      <stop offset="1" stop-color="#7356D8"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5B3FBF"/>
+      <stop offset="1" stop-color="#432C98"/>
+    </linearGradient>
+    <linearGradient id="spark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EDE8FB"/>
+    </linearGradient>
+    <linearGradient id="prompt" gradientUnits="userSpaceOnUse" x1="0" y1="150" x2="0" y2="214">
+      <stop offset="0" stop-color="#4A33A8"/>
+      <stop offset="1" stop-color="#30207A"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="150%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="3"/>
+      <feOffset dy="4"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.25"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="tile" x="-10%" y="-10%" width="120%" height="125%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2.5"/>
+      <feOffset dy="3"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.3"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Base tile: Cloud Backup's and Cloud Config's (Yaru rounded square with bottom edge), in violet -->
+  <g filter="url(#tile)">
+    <rect x="20" y="24" width="216" height="212" rx="44" fill="url(#edge)"/>
+    <rect x="20" y="20" width="216" height="208" rx="44" fill="url(#bg)"/>
+    <rect x="21" y="21" width="214" height="206" rx="43" fill="none" stroke="#FFFFFF" stroke-opacity="0.25" stroke-width="2"/>
+  </g>
+
+  <!-- A large four-pointed sparkle, up and to the left, and a small one beside it -->
+  <path filter="url(#soft)" fill="url(#spark)"
+        d="M104 46 C109 86 122 99 162 104 C122 109 109 122 104 162 C99 122 86 109 46 104 C86 99 99 86 104 46 Z"/>
+  <path filter="url(#soft)" fill="url(#spark)"
+        d="M172 50 C174 64 178 68 192 70 C178 72 174 76 172 90 C170 76 166 72 152 70 C166 68 170 64 172 50 Z"/>
+
+  <!-- In front, bottom right: a terminal prompt in a rounded badge, outlined in white -->
+  <g filter="url(#soft)">
+    <rect x="132" y="146" width="90" height="70" rx="16" fill="url(#prompt)" stroke="#FFFFFF" stroke-width="5"/>
+    <path d="M152 168 L168 181 L152 194" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M176 196 L200 196" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round"/>
+  </g>
+</svg>

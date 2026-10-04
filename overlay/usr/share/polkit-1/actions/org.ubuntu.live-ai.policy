@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD polkit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+<!-- The AI app's system installs (Claude, ChatGPT, Ollama and a few archive
+     packages). The helper takes only the actions it lists, never a command or
+     a package name of the caller's choosing beyond a fixed set; still, it adds
+     repositories and installs software, so it asks for an administrator's
+     password, kept for a few minutes. -->
+<policyconfig>
+  <action id="org.ubuntu.live-ai.install">
+    <description>Install AI apps and tools</description>
+    <message>Authentication is required to install AI apps and tools</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/lib/live-ai/install-ai</annotate>
+  </action>
+</policyconfig>

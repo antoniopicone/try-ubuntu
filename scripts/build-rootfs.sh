@@ -239,6 +239,11 @@ packages=(
   fonts-liberation fonts-crosextra-carlito fonts-crosextra-caladea fonts-jetbrains-mono
   # btrfs snapshots of / (the @ subvolume)
   snapper
+  # AI (live-ai): crashes kept for the agents to explain (systemd-coredump,
+  # and gdb to read them), YAML for the knowledge base's settings (live-kb).
+  # The apps, agents, Ollama and the models come later, when the user picks
+  # them in the AI app.
+  systemd-coredump gdb python3-yaml
   # QEMU (run-qemu.sh): the clipboard shared with the host's window
   # (spice-vdagent, on Xwayland: Mutter bridges its clipboard to Wayland's)
   # and the host's shared folder (9p, shown to the user through bindfs)
@@ -295,6 +300,19 @@ echo "$LIVE_USER:$LIVE_PASSWORD" | in_chroot chpasswd
 in_chroot systemctl enable systemd-resolved.service bluetooth.service \
   power-profiles-daemon.service avahi-daemon.service tailscaled.service ufw.service
 in_chroot systemctl set-default graphical.target
+# Crash notifications for every user (the AI app's live-crash-watch: it only
+# speaks up once the user has an AI agent; a user turns it off by masking it).
+in_chroot systemctl --global enable live-crash-watch.service
+[[ -L "$ROOTFS/etc/systemd/user/graphical-session.target.wants/live-crash-watch.service" ]] \
+  || { echo "live-crash-watch.service is not enabled" >&2; exit 1; }
+# Cores go to systemd-coredump, where coredumpctl and the agents find them
+grep -rqs 'systemd-coredump' "$ROOTFS/usr/lib/sysctl.d/" \
+  || { echo "systemd-coredump doesn't handle the cores" >&2; exit 1; }
+# The agents' skills (live-agent-link links them into each agent)
+for skill in ubuntu-system ubuntu-live-image diagnose-crash knowledge-base; do
+  [[ -f "$ROOTFS/usr/local/share/live-ai/skills/$skill/SKILL.md" ]] \
+    || { echo "the $skill skill is missing" >&2; exit 1; }
+done
 
 # Boot splash: "spinner", with Adwaita Sans instead of the (not installed)
 # Cantarell for messages and the disk-unlock prompt.

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# live-agent-link: links the system's agent skills
+# (/usr/local/share/live-ai/skills) into the user's AI agents.
+#
+#   live-agent-link --agent claude [--agent codex ...]   link them
+#   live-agent-link --unlink --agent claude              remove the links
+#   live-agent-link --status                             what is linked where
+#
+# One symlink per skill, not the whole folder, so the user's own skills in
+# the same folder stay as they are. Something already there with the same
+# name that isn't one of these links is never touched. Run as the user.
+set -euo pipefail
+
+SKILLS_SRC="${LIVE_AI_SKILLS_DIR:-/usr/local/share/live-ai/skills}"
+
+# Each agent's folder for the user's skills (their own documentation).
+skills_dir_for() {
+  case "$1" in
+    claude)   echo "$HOME/.claude/skills" ;;
+    codex)    echo "${CODEX_HOME:-$HOME/.codex}/skills" ;;
+    gemini)   echo "$HOME/.gemini/skills" ;;
+    opencode) echo "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills" ;;
+    *) return 1 ;;
+  esac
+}
+
+die() { echo "live-agent-link: $*" >&2; exit 1; }
+
+agents=() mode="link"
+while (($#)); do
+  case "$1" in
+    --agent)  agents+=("${2-}"); shift 2 || die "--agent needs a name" ;;
+    --unlink) mode="unlink"; shift ;;
+    --status) mode="status"; shift ;;
+    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+
+[[ -d "$SKILLS_SRC" ]] || die "no skills in $SKILLS_SRC"
+
+ours() {   # ours TARGET SKILL: TARGET is our link to SKILL
+  [[ -L "$1" && "$(readlink -f "$1")" == "$(readlink -f "$2")" ]]
+}
+
+if [[ "$mode" == status ]]; then
+  for a in claude codex gemini opencode; do
+    d=$(skills_dir_for "$a")
+    for s in "$SKILLS_SRC"/*/; do
+      n=$(basename "$s")
+      if ours "$d/$n" "$s"; then echo "$a: $n -> $d/$n"; fi
+    done
+  done
+  exit 0
+fi
+
+((${#agents[@]})) || die "name at least one --agent (claude, codex, opencode, gemini)"
+
+for a in "${agents[@]}"; do
+  d=$(skills_dir_for "$a") || die "unknown agent: $a"
+  # OpenCode reads ~/.claude/skills too: linking there as well would list
+  # every skill twice.
+  if [[ "$a" == opencode && "$mode" == link && -L "$HOME/.claude/skills/ubuntu-system" ]]; then
+    echo "opencode: already sees the skills in ~/.claude/skills"
+    continue
+  fi
+  [[ "$mode" == link ]] && mkdir -p "$d"
+  for s in "$SKILLS_SRC"/*/; do
+    n=$(basename "$s"); target="$d/$n"
+    if [[ "$mode" == unlink ]]; then
+      if ours "$target" "$s"; then rm -f -- "$target"; echo "$a: removed $n"; fi
+      continue
+    fi
+    if ours "$target" "$s"; then
+      echo "$a: $n already linked"
+    elif [[ -e "$target" || -L "$target" ]]; then
+      echo "$a: $target exists and isn't this system's link: left alone" >&2
+    else
+      ln -s -- "${s%/}" "$target"
+      echo "$a: linked $n"
+    fi
+  done
+done

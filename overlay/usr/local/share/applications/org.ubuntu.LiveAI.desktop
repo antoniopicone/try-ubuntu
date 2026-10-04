@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=AI
+Comment=Claude, ChatGPT, agents, a local model and a knowledge base of your files
+Comment[it]=Claude, ChatGPT, agenti, un modello locale e una knowledge base dei tuoi file
+Exec=live-ai
+Icon=org.ubuntu.LiveAI
+Categories=GTK;GNOME;Utility;
+Keywords=ai;claude;chatgpt;codex;opencode;ollama;llm;agent;knowledge;
+Keywords[it]=ai;ia;claude;chatgpt;codex;opencode;ollama;llm;agente;knowledge;intelligenza artificiale;
+StartupNotify=true

@@ -1,5 +1,5 @@
 """livespinner: a spinner for the live system's apps (welcome, Cloud Backup,
-Previous Versions), in place of Adw.Spinner.
+Previous Versions, Wallpapers), in place of Adw.Spinner.
 
 libadwaita 1.9's Adw.Spinner stays on its first frame when GNOME Shell has
 animations off, which it does whenever the desktop renders in software

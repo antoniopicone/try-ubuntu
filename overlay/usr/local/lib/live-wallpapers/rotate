@@ -1,0 +1,113 @@
+#!/usr/bin/python3
+"""rotate: sets a new wallpaper, for Wallpapers' automatic change.
+
+Started by live-wallpapers@<hourly|daily|weekly>.timer, or at every login
+(live-wallpapers.service), systemd user units the app turns on. What it
+sets is the app's choice (config.json's "auto"):
+  - daily: the photo of the day
+  - collection: one of the saved wallpapers, the least recently used
+  - search: a result of a saved search, one that wasn't set lately
+With "pair" it sets two: of a handful of candidates, the lightest for the
+light style and the darkest for the dark one. With "match_theme" the accent
+color follows the wallpaper of the style in use.
+
+Exits 0 when there's nothing to do (turned off, a metered network, an empty
+collection), 1 when the services didn't answer: systemd then tries again in
+a while.
+"""
+import random
+import sys
+
+sys.path.insert(0, "/usr/local/lib/live-wallpapers")
+import desktop  # noqa: E402
+import palette  # noqa: E402
+import sources  # noqa: E402
+import store  # noqa: E402
+from sources import Query  # noqa: E402
+
+CANDIDATES = 6  # looked at to pair a light wallpaper with a dark one
+
+
+def candidates(config):
+    """The wallpapers to choose from, the best first."""
+    auto = config["auto"]
+    recent = [item.key for item in store.history()]
+    if auto["from"] == "collection":
+        items = store.collection()
+        # Those never set first, then the ones set longest ago
+        return sorted(items, key=lambda item: -recent.index(item.key)
+                      if item.key in recent else -len(recent) - 1)
+    if auto["from"] == "search":
+        saved = store.saved_search(config, auto["search"])
+        if saved:
+            query = Query.from_dict(saved["query"], config["screen"])
+            items = []
+            for page in random.sample(range(1, 4), 3):
+                items = [item for item in sources.search_all(query, config, page)[0]
+                         if item.key not in recent and item.width >= item.height]
+                if items:
+                    break
+            random.shuffle(items)
+            return items
+    # The photo of the day: also when the saved search is gone
+    today = sources.daily(config)
+    return [today] if today else []
+
+
+def measured(items):
+    """[(item, its pixels)] for the items whose thumbnail loads."""
+    result = []
+    for item in items:
+        try:
+            data = sources.thumbnail(item.thumb)
+            result.append((item, desktop.pixels(desktop.texture(data))))
+        except Exception as e:  # a thumbnail that isn't an image, the network
+            print(f"rotate: {item.key}: {e}", file=sys.stderr)
+    return result
+
+
+def main():
+    config = store.load_config()
+    auto = config["auto"]
+    if not auto["enabled"]:
+        return 0
+    if auto["metered"] and desktop.metered():
+        print("rotate: metered network, the wallpaper stays")
+        return 0
+    items = candidates(config)
+    if auto["from"] == "daily" and auto["pair"]:
+        # The photo of the day is one: pair it with the museums' works of the day
+        items += sources.highlights(config)
+    if not items and auto["from"] == "collection":
+        print("rotate: the collection is empty, the wallpaper stays")
+        return 0
+    if not items:
+        print("rotate: no source answered", file=sys.stderr)
+        return 1
+
+    chosen = {"light": items[0], "dark": items[0]}
+    shades = dict((item.key, pixels) for item, pixels in measured(items[:CANDIDATES]))
+    if auto["pair"] and len(shades) > 1:
+        ranked = sorted((item for item in items if item.key in shades),
+                        key=lambda item: palette.brightness(shades[item.key]))
+        chosen = {"light": ranked[-1], "dark": ranked[0]}
+
+    try:
+        paths = {which: store.download(item) for which, item in chosen.items()}
+    except sources.SourceError as e:
+        print(f"rotate: {e}", file=sys.stderr)
+        return 1
+    desktop.set_wallpaper(paths["light"], dark=False)
+    desktop.set_wallpaper(paths["dark"], light=False)
+    current = chosen[desktop.style()]
+    if config["match_theme"] and current.key in shades:
+        desktop.set_accent(palette.accent(shades[current.key]))
+    for item in {item.key: item for item in chosen.values()}.values():
+        store.remember(item)
+    store.prune(paths.values())
+    print("rotate: " + ", ".join(f"{which}: {item.key}" for which, item in chosen.items()))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

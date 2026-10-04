@@ -185,12 +185,13 @@ last page doesn't log out: it asks to remove the USB stick and offers
 | Filesystem | btrfs with the subvolumes `@` → `/`, `@home` → `/home`, `@var` → `/var`, `@snapshots` → `/.snapshots` (flat layout, `compress=zstd:1`). **snapper** manages `/` (snapshot #1 is the image as built) and `/home` (every hour: *Previous Versions* in Files) |
 | Desktop | a minimal **GNOME 50**: Shell, Settings, the vanilla GNOME session, GDM (see [The desktop](#the-desktop)) |
 | Theme | dark style with GNOME's blue accent, Adwaita Sans, Yaru icons, and **one of Ubuntu's stock wallpapers, picked at random at each build** |
-| Apps | **ghostty** (JetBrains Mono Nerd Font, Catppuccin Mocha; OpenGL in software under QEMU's virgl, which lacks the OpenGL 4.3 it needs), with **Ptyxis** when it can't start, **Nautilus** (with *Open in Ghostty* and *Previous Versions*), **Brave Origin** (in the desktop's language and light/dark style), GNOME Software (with **Flatpak** and Flathub), Calculator, Papers (PDF), Fonts, Text Editor, Disks, Resources, Extensions, **Cloud Config** (Google Drive, OneDrive, Dropbox, Nextcloud and iCloud Drive in Files), **Cloud Backup** (hourly, end-to-end encrypted backups of your home folder with restic, and restore, to one of those clouds, Samba or SFTP) |
+| Apps | **ghostty** (JetBrains Mono Nerd Font, Catppuccin Mocha; OpenGL in software under QEMU's virgl, which lacks the OpenGL 4.3 it needs), with **Ptyxis** when it can't start, **Nautilus** (with *Open in Ghostty* and *Previous Versions*), **Brave Origin** (in the desktop's language and light/dark style), GNOME Software (with **Flatpak** and Flathub), Calculator, Papers (PDF), Fonts, Text Editor, Disks, Resources, Extensions, **Cloud Config** (Google Drive, OneDrive, Dropbox, Nextcloud and iCloud Drive in Files), **Cloud Backup** (hourly, end-to-end encrypted backups of your home folder with restic, and restore, to one of those clouds, Samba or SFTP), **Wallpapers** (a wallpaper from several photo services at once, with filters, a preview on the desktop and an automatic change) |
 | Fonts | Adwaita Sans; Liberation, **Carlito** and **Caladea** (metric-compatible with Arial/Times New Roman/Courier New and Calibri/Cambria, so Office documents keep their layout); JetBrains Mono; **JetBrains Mono Nerd Font** (GNOME's monospace font and Ghostty's) and **Hack Nerd Font Mono** |
 | Network | NetworkManager (via netplan, as on Ubuntu Desktop) |
 | QEMU integration | sound (virtio-sound, PipeWire), the clipboard shared with the QEMU window (**spice-vdagent**), the host's shared folder (9p + **bindfs**, see [Running](#running)) |
 | Services | polkit, UPower, power-profiles-daemon, BlueZ, GeoClue, avahi-daemon (+ nss-mdns), Tailscale, ufw |
 | Tools | podman (rootless: uidmap + passt), git, curl, wget, **eza** (`ls` is `eza --icons=always`), **apfs-fuse** (Mac disks, read-only, also from Nautilus) |
+| AI | the **AI** app (see [The desktop](#the-desktop)): Claude's and ChatGPT's desktop apps, Claude Code, Codex and OpenCode, a local model with Ollama and a knowledge base of your files (qmd), each installed when you pick it; skills that teach the agents this system; crashes kept by **systemd-coredump** (with gdb) and handed to your agent from a notification |
 | Development | Python 3.14 with `pip` and `venv`, **uv** / uvx (0.12, from Astral's releases), **zsh** (the default shell) with the **pure** prompt |
 | Languages | English, plus Italian, Spanish, French, German and Portuguese (Brazil): locales and Ubuntu's `language-pack-*-base` / `language-pack-gnome-*-base` |
 | Excluded | ModemManager, pinned to priority -1 so no dependency can pull it in |
@@ -598,7 +599,7 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
   through `pkexec`. A [polkit policy](overlay/usr/share/polkit-1/actions/org.ubuntu.live-welcome.policy)
   lets the active session run it without a password, and it works only
   once (`/var/lib/live-welcome/done`). It:
-  - creates the user (zsh, groups `sudo video render input`, subuids for
+  - creates the user (zsh, groups `sudo adm video render input`, subuids for
     podman)
   - sets the system language and keyboard, which GDM uses too
   - compiles the user's GNOME settings into their dconf database: style,
@@ -607,7 +608,8 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
   - installs the picture (AccountsService: GDM, the Shell and Settings
     show it)
   - writes `~/.gitconfig` with `user.name` / `user.email`
-  - starts Cloud Config at the first login, which then opens Cloud Backup (see below)
+  - starts Cloud Config at the first login, which then opens Cloud Backup,
+    which then opens the AI app (see below)
   - retires the live user: no autologin, password locked, out of the admin
     groups and without passwordless sudo right away; then
     `live-retire-user.service` deletes it, home included, as soon as its
@@ -776,6 +778,177 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
     package lists and skips what the archive doesn't have, e.g. a package
     from a repository added by hand. What couldn't be installed is listed.
 
+- **Wallpapers** ([live-wallpapers](overlay/usr/local/bin/live-wallpapers),
+  icon [assets/wallpapers-app.svg](assets/wallpapers-app.svg)) finds a
+  wallpaper in several photo services at once and sets it. It's in the app
+  grid ("Sfondi" in Italian).
+  - **The services**
+    ([sources.py](overlay/usr/local/lib/live-wallpapers/sources.py)), each
+    one HTTP API, asked together and their results dealt like cards:
+
+    | Service | Key | What it has | Its own filters |
+    |---|---|---|---|
+    | [Openverse](https://openverse.org) | no (20 searches a minute, 200 a day, 1000 thumbnails a day) | Creative Commons and public-domain photos, illustrations and artworks: Flickr, StockSnap, Wikimedia Commons… | type, wide, large, license |
+    | [Art Institute of Chicago](https://api.artic.edu/docs/) | no | public-domain (CC0) paintings and prints, up to 3000 px wide | type |
+    | [Cleveland Museum of Art](https://openaccess-api.clevelandart.org/) | no | Open Access (CC0) paintings and prints, 3400 px | type |
+    | [NASA](https://images.nasa.gov) | no | its image library | |
+    | [Wallhaven](https://wallhaven.cc/help/api) | no (45 requests a minute) | wallpapers its users upload, screen-sized | category, color, size, ratio, order |
+    | [Pixabay](https://pixabay.com/api/docs/) | the user's own, free | photos and illustrations, 1280 px without an approved key | type, color, order |
+
+    Wallhaven is off until turned on under Sources: it doesn't say whose
+    its wallpapers are or under which license. Pixabay works once its key
+    is pasted there (kept in `~/.config/live-wallpapers/config.json`,
+    readable only by you). **Unsplash and Pexels aren't there**: their API
+    terms forbid wallpaper apps, and Sources says so. Every answer is kept
+    on disk (`~/.cache/live-wallpapers`: searches for 6 hours, Pixabay's
+    for the day its terms ask for, thumbnails for a month), so the
+    anonymous quotas last.
+  - **Discover**: a search, the photo of the day (a public-domain one,
+    the same all day, from the sources that are on in turn), seven moods
+    (searches ready to run, each with its first result for cover) and a
+    few museum works. **Surprise Me** opens a random result of a random
+    search.
+  - **Search**, with filters on the left: which sources, the type (photos,
+    paintings, illustrations, prints, space, anime), a color, "Fit my
+    screen" (landscape, at least the largest monitor's pixels), "Free
+    works only" (CC0 and public domain), the order. A source that can't
+    answer a search says why next to its name (off, no key, none of that
+    type, licenses not stated). Only Wallhaven and Pixabay filter by color
+    themselves: for the others the app does, on each thumbnail's own
+    colors ([palette.py](overlay/usr/local/lib/live-wallpapers/palette.py):
+    a color counts when 12% of 24×24 pixels have it), and asks for more
+    pages while few results are left. A search can be saved, for the
+    automatic change.
+  - **Preview**: the wallpaper on a small desktop (top bar, dock, a
+    window) before anything changes, for the light or the dark style, or
+    both. Position: fill (drag the preview to choose the framing), fit or
+    center (around the image, itself blurred). Blur and darkening. All of
+    these are rendered into the image that's set, at the screen's size, by
+    the same code that draws the preview (a GSK render node: `compose()`);
+    an untouched image is set as downloaded, with GNOME's `zoom`. The
+    side shows who made it, the license, the size and the image's five
+    main colors.
+  - **Match the theme to the wallpaper** (on by default, remembered): with
+    the wallpaper, the app sets the GNOME accent color closest to the
+    image's colors (slate for a muted one), and
+    [yaru-accent-sync](overlay/usr/local/bin/yaru-accent-sync) the Yaru
+    icons. The nine accents are there to pick another.
+  - **Collection**: the wallpapers kept from their preview (a star), with
+    their thumbnails, so they show without the network. "Download" copies
+    the image to a "Wallpapers" folder in Pictures.
+  - **Automatic**: a new wallpaper every hour, day, week or login, from
+    the photo of the day, the collection (the least recently used) or a
+    saved search (a result not set lately). "Day and night" sets two: of
+    six candidates, the lightest for the light style and the darkest for
+    the dark one. Not on metered networks, unless allowed.
+    [rotate](overlay/usr/local/lib/live-wallpapers/rotate) does it,
+    without a display, started by
+    [live-wallpapers@.timer](overlay/etc/systemd/user/live-wallpapers@.timer)
+    (`hourly`, `daily`, `weekly`: the app enables the instance chosen; a
+    change missed while logged out happens at the next login) or, for "at
+    every login", by
+    [live-wallpapers.service](overlay/etc/systemd/user/live-wallpapers.service)
+    itself, which tries again a few times when the network isn't up yet.
+  - **What it keeps**
+    ([store.py](overlay/usr/local/lib/live-wallpapers/store.py)): the
+    downloaded images in `~/.local/share/live-wallpapers/images`, where
+    only those of the wallpapers in use, of the collection and of the last
+    few set stay.
+
+- **AI** ([live-ai](overlay/usr/local/bin/live-ai), icon
+  [assets/ai-app.svg](assets/ai-app.svg)) comes last at the first login:
+  Cloud Backup's last button (or "Set Up Later") opens it. Afterwards it's
+  in the app grid. Every part is optional, and nothing of it is in the ISO
+  but the app and its tools: what you pick is downloaded then.
+  - **This computer**: CPU, memory, graphics and free disk
+    ([live-ai-resources](overlay/usr/local/bin/live-ai-resources)), which
+    decide the local model below.
+  - **Apps**: **Claude** (Anthropic's desktop app, beta for Linux: chat,
+    projects, Cowork, Claude Code) and **ChatGPT** (OpenAI's, preview for
+    Linux, with Codex). Claude comes from Anthropic's apt repository, whose
+    key [install-ai](overlay/usr/local/lib/live-ai/install-ai) checks
+    against Anthropic's published fingerprint (`31DDDE24…BAA929FF1A7ECACE`,
+    computed in Python: the image has no gpg) before trusting it. ChatGPT is
+    OpenAI's `.deb`, which adds OpenAI's repository for its updates. On a
+    computer with KVM the app offers Cowork too: its QEMU packages and the
+    `kvm` group.
+  - **Terminal agents**: **Claude Code** (Anthropic's apt repository),
+    **Codex** and **OpenCode** (npm, into the home folder: `~/.local`, never
+    `sudo npm`; Node.js 22 from the archive when it's missing). The system's
+    skills ([overlay/usr/local/share/live-ai/skills](overlay/usr/local/share/live-ai/skills))
+    are linked into each agent's skills folder
+    ([live-agent-link](overlay/usr/local/bin/live-agent-link)), one link per
+    skill, so the user's own skills stay as they are:
+    - `ubuntu-system`: configuring the system (gsettings, shortcuts,
+      extensions, `gdctl`), installing apps (apt or Flathub, no
+      recommends, no snap), diagnosing what doesn't work; with rules: look
+      commands up instead of remembering them, never write into `/usr`, a
+      snapper snapshot or a dconf backup before a change and a line in
+      `~/.local/state/live-ai/agent-changes.log` after it, `pkexec` for
+      privileges and never a password in the chat, the user's yes before
+      anything destructive;
+    - `ubuntu-live-image`: this image's own machinery (the live btrfs,
+      snapshots and `live-rollback`, Limine, the cut-down VM kernel, Cloud
+      Config's mounts, Cloud Backup's recovery key), so an agent doesn't
+      "fix" what is deliberate;
+    - `diagnose-crash`: a crash from its core dump, read-only: the facts
+      (`coredumpctl`), the boring causes first (out of memory), the
+      timeline, every thread's stack, symbols from Ubuntu's debuginfod
+      (not for the rebuilt GNOME packages, which it says), the core in
+      `$XDG_RUNTIME_DIR` and deleted afterwards, and where to report it;
+    - `knowledge-base`: searching the knowledge base, citing the files.
+
+    One agent is the default ([live-agent](overlay/usr/local/bin/live-agent)),
+    which the app's Open buttons and the crash notifications start in a
+    terminal (its first run signs in).
+  - **Local model**: [Ollama](https://ollama.com), from its release into
+    `/usr` (not its install script), with a service of the app's own
+    listening on 127.0.0.1 only, and one model picked from the memory it can
+    use: a GPU's (NVIDIA with its driver, AMD with ROCm), otherwise the RAM
+    less 8 GB. `qwen3.5:2b` (2.7 GB, to try things out) from 11 GB of RAM,
+    `qwen3.5:4b` (3.4 GB) from 14 GB, `qwen3.5:9b` on a
+    10 GB GPU, `qwen3.6:27b` on 22 GB, `qwen3.6:35b-a3b` (a mixture of
+    experts, 3B active, so usable on a CPU) from 40 GB of RAM or a 28 GB
+    GPU. With less there's none, and the app says so. The model becomes
+    OpenCode's, which then works entirely on the computer.
+  - **Knowledge base**: [qmd](https://github.com/tobi/qmd) (npm) indexes
+    your files and searches them by keywords, by meaning (a multilingual
+    embedding model, Qwen3-Embedding 0.6B) and with a reranker, all on the
+    computer (~2.6 GB of models, in `~/.cache/qmd`).
+    [live-kb](overlay/usr/local/bin/live-kb) manages its sources:
+    Documents and Desktop (Markdown and text as they are; PDFs through
+    pdftotext, Word, OpenDocument, EPUB and HTML read directly, into
+    Markdown copies in `~/.local/share/live-ai/kb` that keep the original's
+    path), and the Git repositories in the home folder and in the QEMU
+    host's shared folder, read without changing them (no lock files, nothing
+    that looks like a secret). Cloud folders are refused: indexing them
+    would download them whole. The app asks which agents may search it: it
+    registers qmd's MCP server with Claude Code, Codex (also what ChatGPT's
+    Codex reads) and OpenCode, and says plainly that a cloud agent sends
+    what it finds to its provider. A user timer re-indexes every 6 hours,
+    on the charger only, at idle priority
+    ([live-kb-update.timer](overlay/etc/systemd/user/live-kb-update.timer)).
+    The converted copies aren't in Cloud Backup: they're made again.
+  - **Crashes**: systemd-coredump keeps every crash's core.
+    [live-crash-watch](overlay/usr/local/bin/live-crash-watch), a user
+    service on for everyone, follows its journal entries and, once the user
+    has an agent, shows "<program> crashed" with **Diagnose**
+    ([live-agent-crash](overlay/usr/local/bin/live-agent-crash): the agent
+    in a terminal, with the facts and the diagnose-crash skill) and
+    **Mute** ([live-crash-mute](overlay/usr/local/bin/live-crash-mute)).
+    The crash's name and command line, which the crashed program chose,
+    reach the agent as data through a private file, never through a shell
+    command line. The time is the crash's own (`COREDUMP_TIMESTAMP`). The
+    app's switch turns it off (it masks the service). The user is in the
+    `adm` group, as Ubuntu's first user is, to read those journal entries.
+  - The system installs go through install-ai, as root through `pkexec`
+    under [its polkit action](overlay/usr/share/polkit-1/actions/org.ubuntu.live-ai.policy),
+    which asks for the user's password (kept for a few minutes). It takes
+    only the actions it lists, and archive packages only from a fixed list.
+    Its apt runs get snapper's usual snapshot first.
+  - [live-debug](overlay/usr/local/bin/live-debug) prints a summary of the
+    system for people and agents, without ever asking for a password.
+
 - **Brave Origin** is the browser: Brave with its Shields but without
   what funds Brave (Rewards, Wallet, VPN, Leo AI, News, Talk, Tor,
   Playlist, Speedreader…) and without the usage ping, crash reports and
@@ -879,7 +1052,7 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
   acceleration), GNOME Shell turns animations off, and libadwaita 1.9's
   `Adw.Spinner` stays frozen on its first frame even with animations
   forced back on in the app. The live system's apps (welcome, Cloud
-  Backup, Previous Versions) use
+  Backup, Previous Versions, Wallpapers) use
   [livespinner](overlay/usr/local/lib/live-common/livespinner.py) instead,
   which draws itself on every frame tick.
 - **Default browser**: setup-user writes the system's default apps (Brave
@@ -946,7 +1119,25 @@ git tag v1.0.0 && git push origin v1.0.0
 - With the QEMU from `qemu/build.sh`, sound is output only (no
   microphone), and `--vnc` doesn't work (no VNC server in it): use
   Homebrew's with `--qemu`.
+- Wallpapers:
+  - the services' searches work best in English, and its own strings are
+    in English and Italian only
+  - the anonymous quotas are small (Openverse: 200 searches a day): past
+    them a source is skipped until the next day, with a message
+  - Pixabay gives images up to 1280 px wide without an approved key, so
+    "Fit my screen" leaves it out on larger screens
+  - Unsplash and Pexels can't be added (their API terms); The Met and
+    Wikimedia Commons could, and aren't yet
 - apfs-fuse only reads APFS: Mac disks can't be written to.
+- AI: Claude Desktop is a beta and ChatGPT's app a preview on Linux. Gemini
+  CLI isn't offered: since June 2026 it needs a paid API key or a Code
+  Assist licence. Ollama runs on the CPU unless there's an NVIDIA GPU with
+  its driver (not in the image) or an AMD one with ROCm; its Vulkan backend
+  is experimental and left off. Without a GPU the knowledge base's first
+  search by meaning takes minutes while its models load. Cowork needs KVM
+  and the vhost modules, which the QEMU flavour's kernel doesn't keep. On a
+  live system without a persistent disk, what the AI app installs is gone
+  at shutdown.
 - The Microsoft core fonts (Arial, Times New Roman…) aren't included: their
   license allows redistributing only the original installers. Liberation,
   Carlito and Caladea take their place with the same metrics; `sudo apt

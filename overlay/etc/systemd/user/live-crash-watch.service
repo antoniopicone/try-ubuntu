@@ -1,0 +1,14 @@
+[Unit]
+Description=Crash notifications, with diagnosis by the AI agent (live-crash-watch)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/live-crash-watch
+# It exits with 0 when cores don't go to systemd-coredump: no restart loop.
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

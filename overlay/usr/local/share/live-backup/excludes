@@ -5,6 +5,9 @@
 # container images and layers (podman), Flatpak apps' caches
 /home/*/.local/share/containers
 /home/*/.var/app/*/cache
+# the AI app's knowledge base: converted copies and GitHub clones, made
+# again by the next update (its models and index are in ~/.cache)
+/home/*/.local/share/live-ai/kb
 # iCloud Drive (icloud-linux): it lives in iCloud already
 /home/*/iCloud
 # the backup's own state

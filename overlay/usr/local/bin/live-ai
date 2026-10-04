@@ -1,0 +1,765 @@
+#!/usr/bin/python3
+"""live-ai: the AI app. Sets up AI on this computer, each part optional:
+  - the official desktop apps: Claude (beta for Linux) and ChatGPT (preview,
+    with Codex)
+  - terminal agents: Claude Code, Codex, OpenCode. The system's skills
+    (/usr/local/share/live-ai/skills) are linked into each, so they know how
+    to configure this system, install apps and diagnose crashes; one is the
+    default (live-agent), which crash notifications hand crashes to
+  - a local chat model with Ollama, sized to this computer's memory
+    (live-ai-resources), set as OpenCode's model
+  - a local knowledge base (qmd, through live-kb) of the user's documents and
+    projects, which the agents the user picks can search over MCP
+The system installs go through /usr/local/lib/live-ai/install-ai (pkexec,
+the user's password); the rest stays in the home folder (aisetup.py).
+
+At the first login of the user live-welcome created it comes last, after
+Cloud Backup (live-backup --first-run opens it with --first-run); afterwards
+it's in the app grid.
+"""
+import os
+import sys
+import threading
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+
+sys.path.insert(0, "/usr/local/lib/live-ai")
+sys.path.insert(0, "/usr/local/lib/live-common")
+import aisetup  # noqa: E402
+import livespinner  # noqa: E402
+
+APP_ID = "org.ubuntu.LiveAI"
+
+DESKTOP_APPS = [
+    # id, package, command, name key, subtitle key
+    ("claude-desktop", "claude-desktop", "claude-desktop", "claude_app", "claude_app_body"),
+    ("chatgpt", "chatgpt", "chatgpt", "chatgpt_app", "chatgpt_app_body"),
+]
+TERMINAL_AGENTS = [
+    # command, name, subtitle key
+    ("claude", "Claude Code", "claude_code_body"),
+    ("codex", "Codex", "codex_body"),
+    ("opencode", "OpenCode", "opencode_body"),
+]
+
+STRINGS = {
+    "en": {
+        "title": "AI",
+        "intro_title": "AI on This Computer",
+        "intro_body": "Pick what you want: the apps to chat with Claude or ChatGPT, agents that work in your folders and know this system, a model that runs right here, and a knowledge base of your documents and projects. Everything is optional.",
+        "computer": "This Computer",
+        "cpu": "Processor",
+        "ram": "Memory",
+        "gpu": "Graphics",
+        "gpu_none": "None the local models can use",
+        "threads": "{n} threads",
+        "apps": "Apps",
+        "apps_body": "The official desktop apps. They sign in with your account.",
+        "claude_app": "Claude",
+        "claude_app_body": "Anthropic · chat, projects, Cowork · beta for Linux",
+        "chatgpt_app": "ChatGPT",
+        "chatgpt_app_body": "OpenAI · chat and Codex · preview for Linux",
+        "agents": "Terminal Agents",
+        "agents_body": "They work in your folders from the terminal, and they know this system: how to set it up, install apps and explain a crash.",
+        "claude_code_body": "Anthropic · needs a Claude Pro or Max plan, or an API account",
+        "codex_body": "OpenAI · sign in with ChatGPT",
+        "opencode_body": "Open source · works with the local model below",
+        "default_agent": "Default agent",
+        "default_agent_body": "The one crash notifications and live-agent open",
+        "install": "Install",
+        "installed": "Installed",
+        "open": "Open",
+        "open_terminal": "Open in the terminal: its first run signs in",
+        "local": "Local Model",
+        "local_body": "A chat model that runs on this computer: nothing leaves it. OpenCode uses it.",
+        "local_none": "Not enough memory for a useful model",
+        "local_none_body": "{gb} GB to spare. The knowledge base still works, and Claude or ChatGPT can answer from it.",
+        "model": "Model",
+        "model_other": "Another model",
+        "model_rec": "{size} GB, recommended",
+        "model_alt": "{size} GB",
+        "model_ready": "{model} is ready",
+        "model_ready_body": "Try it: ollama run {model}",
+        "model_where_gpu": "On the graphics card ({gb} GB)",
+        "model_where_cpu": "On the processor: answers come slower than in the cloud",
+        "download": "Download",
+        "kb": "Knowledge Base",
+        "kb_body": "Your documents and projects, indexed on this computer, so the agents you pick can search them.",
+        "kb_setup": "Set Up the Knowledge Base",
+        "kb_setup_body": "About 2.6 GB of search models, downloaded once",
+        "kb_sources": "{n} sources",
+        "kb_update": "Update Now",
+        "kb_updating": "Updating…",
+        "kb_auto": "Update automatically",
+        "kb_auto_body": "Every 6 hours, only on the charger",
+        "kb_change": "Change",
+        "set_up": "Set Up",
+        "kb_small": "This computer has too little memory or disk for it (8 GB of RAM, 6 GB free).",
+        "kb_what": "What to Include",
+        "kb_what_body": "Files stay where they are; PDFs, Word and OpenDocument files are converted into a separate copy. Cloud folders aren't included: they'd be downloaded in full.",
+        "kb_documents": "Documents",
+        "kb_desktop": "Desktop",
+        "kb_projects": "Projects",
+        "kb_projects_body": "The Git repositories in your home folder. Lock files and files that may hold secrets are left out.",
+        "kb_no_projects": "No Git repositories in your home folder",
+        "kb_who": "Who Can Search It",
+        "kb_who_body": "The index stays here. But what a cloud agent finds goes to its provider with your question; OpenCode with the local model keeps everything on this computer.",
+        "kb_chatgpt": "Codex in ChatGPT",
+        "kb_no_agents": "No agent installed yet: you can allow them later",
+        "kb_build": "Build the Knowledge Base",
+        "kb_started": "The knowledge base is being built in the background",
+        "kb_saved": "Saved",
+        "crash": "Crashes",
+        "crash_watch": "Offer a diagnosis when an app crashes",
+        "crash_watch_body": "A notification hands it to your default agent",
+        "done": "Done",
+        "done_hint": "Come back any time from the app grid: AI.",
+        "back": "Back",
+        "error_title": "Something Went Wrong",
+        "cancelled": "Cancelled",
+        "w_install": "Installing {name}…",
+        "w_password": "Your password may be asked for: these go into the system.",
+        "w_model": "Downloading {model}…",
+        "w_model_body": "{size} GB: it can take a while.",
+        "w_kb": "Setting up the knowledge base…",
+        "w_kb_body": "The search tool and its settings. The models come with the first indexing.",
+        "done_install": "{name} is installed",
+        "done_model": "{model} is ready",
+        "cowork_title": "Cowork too?",
+        "cowork_body": "Cowork, Claude's tab for longer tasks, runs them in a virtual machine: it adds QEMU (about 100 MB), and you join the kvm group (log out and back in afterwards).",
+        "cowork_yes": "With Cowork",
+        "cowork_no": "Without",
+        "relogin": "Log out and back in for Cowork.",
+    },
+    "it": {
+        "title": "AI",
+        "intro_title": "L'AI su questo computer",
+        "intro_body": "Scegli quello che ti serve: le app per parlare con Claude o ChatGPT, agenti che lavorano nelle tue cartelle e conoscono questo sistema, un modello che gira qui, e una knowledge base dei tuoi documenti e progetti. È tutto facoltativo.",
+        "computer": "Questo computer",
+        "cpu": "Processore",
+        "ram": "Memoria",
+        "gpu": "Grafica",
+        "gpu_none": "Nessuna che i modelli locali possano usare",
+        "threads": "{n} thread",
+        "apps": "App",
+        "apps_body": "Le app desktop ufficiali. Accedi con il tuo account.",
+        "claude_app": "Claude",
+        "claude_app_body": "Anthropic · chat, progetti, Cowork · beta per Linux",
+        "chatgpt_app": "ChatGPT",
+        "chatgpt_app_body": "OpenAI · chat e Codex · anteprima per Linux",
+        "agents": "Agenti nel terminale",
+        "agents_body": "Lavorano nelle tue cartelle dal terminale e conoscono questo sistema: come configurarlo, installare app e spiegare un crash.",
+        "claude_code_body": "Anthropic · serve un piano Claude Pro o Max, o un account API",
+        "codex_body": "OpenAI · accedi con ChatGPT",
+        "opencode_body": "Open source · funziona con il modello locale qui sotto",
+        "default_agent": "Agente predefinito",
+        "default_agent_body": "Quello che aprono le notifiche dei crash e live-agent",
+        "install": "Installa",
+        "installed": "Installato",
+        "open": "Apri",
+        "open_terminal": "Apri nel terminale: al primo avvio si accede",
+        "local": "Modello locale",
+        "local_body": "Un modello che gira su questo computer: non esce nulla. Lo usa OpenCode.",
+        "local_none": "Memoria insufficiente per un modello utile",
+        "local_none_body": "{gb} GB disponibili. La knowledge base funziona lo stesso, e Claude o ChatGPT possono rispondere usandola.",
+        "model": "Modello",
+        "model_other": "Un altro modello",
+        "model_rec": "{size} GB, consigliato",
+        "model_alt": "{size} GB",
+        "model_ready": "{model} è pronto",
+        "model_ready_body": "Provalo: ollama run {model}",
+        "model_where_gpu": "Sulla scheda grafica ({gb} GB)",
+        "model_where_cpu": "Sul processore: le risposte arrivano più lente che nel cloud",
+        "download": "Scarica",
+        "kb": "Knowledge base",
+        "kb_body": "I tuoi documenti e progetti, indicizzati su questo computer, perché gli agenti che scegli possano cercarci.",
+        "kb_setup": "Configura la knowledge base",
+        "kb_setup_body": "Circa 2,6 GB di modelli di ricerca, scaricati una volta",
+        "kb_sources": "{n} sorgenti",
+        "kb_update": "Aggiorna ora",
+        "kb_updating": "Aggiornamento…",
+        "kb_auto": "Aggiorna automaticamente",
+        "kb_auto_body": "Ogni 6 ore, solo con l'alimentatore",
+        "kb_change": "Modifica",
+        "set_up": "Configura",
+        "kb_small": "Questo computer ha troppa poca memoria o spazio (8 GB di RAM, 6 GB liberi).",
+        "kb_what": "Cosa includere",
+        "kb_what_body": "I file restano dove sono; PDF, file Word e OpenDocument vengono convertiti in una copia a parte. Le cartelle dei cloud restano fuori: verrebbero scaricate per intero.",
+        "kb_documents": "Documenti",
+        "kb_desktop": "Scrivania",
+        "kb_projects": "Progetti",
+        "kb_projects_body": "I repository Git nella tua cartella home. Lockfile e file che potrebbero contenere segreti restano fuori.",
+        "kb_no_projects": "Nessun repository Git nella tua cartella home",
+        "kb_who": "Chi può cercarci",
+        "kb_who_body": "L'indice resta qui. Ma ciò che trova un agente cloud va al suo fornitore insieme alla domanda; OpenCode con il modello locale tiene tutto su questo computer.",
+        "kb_chatgpt": "Codex in ChatGPT",
+        "kb_no_agents": "Nessun agente installato: potrai consentirlo più avanti",
+        "kb_build": "Crea la knowledge base",
+        "kb_started": "La knowledge base si sta creando in background",
+        "kb_saved": "Salvato",
+        "crash": "Crash",
+        "crash_watch": "Proponi una diagnosi quando un'app va in crash",
+        "crash_watch_body": "Una notifica la passa al tuo agente predefinito",
+        "done": "Fatto",
+        "done_hint": "Puoi tornare qui quando vuoi dalla griglia delle app: AI.",
+        "back": "Indietro",
+        "error_title": "Qualcosa è andato storto",
+        "cancelled": "Annullato",
+        "w_install": "Installazione di {name}…",
+        "w_password": "Potrebbe esserti chiesta la password: vanno nel sistema.",
+        "w_model": "Download di {model}…",
+        "w_model_body": "{size} GB: può volerci un po'.",
+        "w_kb": "Configurazione della knowledge base…",
+        "w_kb_body": "Lo strumento di ricerca e le sue impostazioni. I modelli arrivano con la prima indicizzazione.",
+        "done_install": "{name} è installato",
+        "done_model": "{model} è pronto",
+        "cowork_title": "Anche Cowork?",
+        "cowork_body": "Cowork, la scheda di Claude per le attività lunghe, le esegue in una macchina virtuale: aggiunge QEMU (circa 100 MB) e ti inserisce nel gruppo kvm (poi esci e rientra).",
+        "cowork_yes": "Con Cowork",
+        "cowork_no": "Senza",
+        "relogin": "Esci e rientra per usare Cowork.",
+    },
+}
+
+MODEL_SIZES = {"qwen3.5:2b": "2.7", "qwen3.5:4b": "3.4", "qwen3.5:9b": "6.6",
+               "qwen3.6:27b": "18", "qwen3.6:35b-a3b": "23"}
+
+
+def t(key, /, **kw):
+    lang = os.environ.get("LANG", "")[:2]
+    return STRINGS.get(lang, STRINGS["en"]).get(key, STRINGS["en"][key]).format(**kw)
+
+
+def in_thread(work, done):
+    """work() in a thread, then done(result, error) in the main loop."""
+    def run():
+        try:
+            result, error = work(), None
+        except Exception as e:  # shown to the user
+            result, error = None, getattr(e, "message", None) or str(e) or type(e).__name__
+        GLib.idle_add(lambda: done(result, error) and False)
+    threading.Thread(target=run, daemon=True).start()
+
+
+class AIWindow(Adw.ApplicationWindow):
+    def __init__(self, app, first_run):
+        super().__init__(application=app, title=t("title"), default_width=760,
+                         default_height=720)
+        self.first_run = first_run
+        self.res = {}
+        self.installed = {}
+        self.history = []
+        self.busy = False
+
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
+                               vexpand=True)
+        for name, page in (("home", self._page_home()), ("kb", self._page_kb()),
+                           ("working", self._page_working()), ("error", self._page_error())):
+            self.stack.add_named(page, name)
+        self.back = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text=t("back"),
+                               visible=False)
+        self.back.connect("clicked", lambda *_: self._back())
+        header = Adw.HeaderBar()
+        header.pack_start(self.back)
+        header.set_title_widget(Adw.WindowTitle(title=t("title")))
+        self.toasts = Adw.ToastOverlay(child=self.stack)
+        view = Adw.ToolbarView(content=self.toasts)
+        view.add_top_bar(header)
+        self.set_content(view)
+        self._refresh()
+
+    # --- helpers ---------------------------------------------------------------------
+
+    @staticmethod
+    def _page(*children):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+        for child in children:
+            box.append(child)
+        clamp = Adw.Clamp(maximum_size=600, child=box, margin_top=24, margin_bottom=24,
+                          margin_start=12, margin_end=12)
+        return Gtk.ScrolledWindow(child=clamp, hscrollbar_policy=Gtk.PolicyType.NEVER)
+
+    @staticmethod
+    def _button(label, suggested=False):
+        button = Gtk.Button(label=label, halign=Gtk.Align.CENTER)
+        button.add_css_class("pill")
+        if suggested:
+            button.add_css_class("suggested-action")
+        return button
+
+    @staticmethod
+    def _row_button(label, suggested=False):
+        button = Gtk.Button(label=label, valign=Gtk.Align.CENTER)
+        if suggested:
+            button.add_css_class("suggested-action")
+        return button
+
+    @staticmethod
+    def _clear(group, rows):
+        for row in rows:
+            group.remove(row)
+        rows.clear()
+
+    def _show(self, name, remember=True):
+        current = self.stack.get_visible_child_name()
+        if remember and current and current not in ("working", "error"):
+            self.history.append(current)
+        self.stack.set_visible_child_name(name)
+        self.back.set_visible(bool(self.history) and name != "working")
+
+    def _back(self):
+        if self.history:
+            self.stack.set_visible_child_name(self.history.pop())
+        self.back.set_visible(bool(self.history))
+
+    def _toast(self, message):
+        self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(message), timeout=6))
+
+    def _page_working(self):
+        self.working_status = Adw.StatusPage(vexpand=True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        box.append(livespinner.Spinner(size=48))
+        self.working_bar = Gtk.ProgressBar(show_text=True, visible=False, margin_start=48,
+                                           margin_end=48)
+        box.append(self.working_bar)
+        self.working_line = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER,
+                                      ellipsize=3, max_width_chars=60)
+        self.working_line.add_css_class("dim-label")
+        self.working_line.add_css_class("caption")
+        box.append(self.working_line)
+        self.working_status.set_child(box)
+        return self.working_status
+
+    def _working(self, title, body=""):
+        self.busy = True
+        self.working_status.set_title(title)
+        self.working_status.set_description(body)
+        self.working_bar.set_visible(False)
+        self.working_line.set_label("")
+        self._show("working")
+
+    def _progress_line(self, line):
+        GLib.idle_add(lambda: self.working_line.set_label(line[:200]) and False)
+
+    def _fraction(self, value):
+        def apply():
+            self.working_bar.set_visible(True)
+            self.working_bar.set_fraction(value)
+            self.working_bar.set_text(f"{round(value * 100)}%")
+        GLib.idle_add(lambda: apply() and False)
+
+    def _page_error(self):
+        self.error_status = Adw.StatusPage(icon_name="dialog-warning-symbolic", vexpand=True,
+                                           title=t("error_title"))
+        back = self._button(t("back"))
+        back.connect("clicked", lambda *_: self._finish())
+        self.error_status.set_child(back)
+        return self.error_status
+
+    def _finish(self, message=None, error=None):
+        """Back on the home page after a job, refreshed."""
+        self.busy = False
+        if error == "cancelled":
+            error, message = None, t("cancelled")
+        if error:
+            self.error_status.set_description(GLib.markup_escape_text(str(error)))
+            self.stack.set_visible_child_name("error")
+            self.back.set_visible(False)
+            return
+        self.history.clear()
+        self._show("home", remember=False)
+        self._refresh()
+        if message:
+            self._toast(message)
+
+    # --- the home page -----------------------------------------------------------------
+
+    def _page_home(self):
+        intro = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        intro.append(Gtk.Image(icon_name=APP_ID, pixel_size=96))
+        heading = Gtk.Label(label=t("intro_title"), wrap=True, justify=Gtk.Justification.CENTER)
+        heading.add_css_class("title-1")
+        intro.append(heading)
+        body = Gtk.Label(label=t("intro_body"), wrap=True, justify=Gtk.Justification.CENTER)
+        intro.append(body)
+        self.computer = Adw.PreferencesGroup(title=t("computer"))
+        self.computer_rows = []
+        self.apps_group = Adw.PreferencesGroup(title=t("apps"), description=t("apps_body"))
+        self.apps_rows = []
+        self.agents_group = Adw.PreferencesGroup(title=t("agents"), description=t("agents_body"))
+        self.agents_rows = []
+        self.local_group = Adw.PreferencesGroup(title=t("local"), description=t("local_body"))
+        self.local_rows = []
+        self.kb_group = Adw.PreferencesGroup(title=t("kb"), description=t("kb_body"))
+        self.kb_rows = []
+        crash = Adw.PreferencesGroup(title=t("crash"))
+        self.crash_row = Adw.SwitchRow(title=t("crash_watch"), subtitle=t("crash_watch_body"))
+        self.crash_handler = self.crash_row.connect("notify::active", lambda *_: self._set_crash())
+        crash.add(self.crash_row)
+        self.done = self._button(t("done"), suggested=True)
+        self.done.connect("clicked", lambda *_: self.close())
+        self.done_hint = Gtk.Label(label=t("done_hint"), wrap=True,
+                                   justify=Gtk.Justification.CENTER)
+        self.done_hint.add_css_class("dim-label")
+        self.done.set_visible(self.first_run)
+        self.done_hint.set_visible(self.first_run)
+        return self._page(intro, self.computer, self.apps_group, self.agents_group,
+                          self.local_group, self.kb_group, crash, self.done, self.done_hint)
+
+    def _refresh(self):
+        def work():
+            state = {
+                "res": aisetup.resources(),
+                "apps": {a[0]: aisetup.dpkg_installed(a[1]) for a in DESKTOP_APPS},
+                "agents": {a[0]: aisetup.agent_installed(a[0]) for a in TERMINAL_AGENTS},
+                "default": aisetup.default_agent(),
+                "models": aisetup.ollama_models(),
+                "kb": aisetup.kb_status(),
+                "kb_timer": aisetup.kb_timer_enabled(),
+                "kb_updating": aisetup.kb_updating(),
+                "crash": aisetup.crash_watch_enabled(),
+            }
+            return state
+        in_thread(work, lambda state, error: error and self._toast(error) or self._fill(state))
+
+    def _fill(self, s):
+        self.res = s["res"]
+        self.installed = s["agents"]
+        self._fill_computer(s["res"])
+        self._fill_apps(s["apps"])
+        self._fill_agents(s["agents"], s["default"])
+        self._fill_local(s["res"], s["models"])
+        self._fill_kb(s)
+        with self.crash_row.handler_block(self.crash_handler):
+            self.crash_row.set_active(s["crash"])
+        self.crash_row.set_sensitive(any(s["agents"].values()))
+
+    def _fill_computer(self, r):
+        self._clear(self.computer, self.computer_rows)
+        gpu = (f"{r.get('GPU_NAME')} · {r.get('GPU_VRAM_GB')} GB" if r.get("GPU_BACKEND") != "none"
+               else t("gpu_none"))
+        for title, value in ((t("cpu"), f"{r.get('CPU_NAME', '')} · "
+                                       f"{t('threads', n=r.get('CPU_THREADS', '?'))}"),
+                             (t("ram"), f"{r.get('RAM_GB', '?')} GB"), (t("gpu"), gpu)):
+            row = Adw.ActionRow(title=title, subtitle=GLib.markup_escape_text(value))
+            row.add_css_class("property")
+            self.computer.add(row)
+            self.computer_rows.append(row)
+
+    def _fill_apps(self, installed):
+        self._clear(self.apps_group, self.apps_rows)
+        for app_id, package, command, name, body in DESKTOP_APPS:
+            row = Adw.ActionRow(title=t(name), subtitle=t(body))
+            if installed[app_id]:
+                button = self._row_button(t("open"))
+                button.connect("clicked", lambda _b, c=command: self._launch(c))
+            else:
+                button = self._row_button(t("install"))
+                button.connect("clicked", lambda _b, a=app_id, n=t(name): self._install_app(a, n))
+            row.add_suffix(button)
+            self.apps_group.add(row)
+            self.apps_rows.append(row)
+
+    def _fill_agents(self, installed, default):
+        self._clear(self.agents_group, self.agents_rows)
+        for command, name, body in TERMINAL_AGENTS:
+            row = Adw.ActionRow(title=name, subtitle=t(body))
+            if installed[command]:
+                button = self._row_button(t("open"))
+                button.set_tooltip_text(t("open_terminal"))
+                button.connect("clicked", lambda _b, c=command: aisetup.open_agent(c))
+            else:
+                button = self._row_button(t("install"))
+                button.connect("clicked", lambda _b, c=command, n=name: self._install_agent(c, n))
+            row.add_suffix(button)
+            self.agents_group.add(row)
+            self.agents_rows.append(row)
+        ready = [c for c, _, _ in TERMINAL_AGENTS if installed[c]]
+        if ready:
+            names = {c: n for c, n, _ in TERMINAL_AGENTS}
+            combo = Adw.ComboRow(title=t("default_agent"), subtitle=t("default_agent_body"),
+                                 model=Gtk.StringList.new([names[c] for c in ready]))
+            combo.set_selected(ready.index(default) if default in ready else 0)
+            if default not in ready:
+                aisetup.set_default_agent(ready[0])
+            combo.connect("notify::selected",
+                          lambda r, _p: aisetup.set_default_agent(ready[r.get_selected()]))
+            self.agents_group.add(combo)
+            self.agents_rows.append(combo)
+
+    def _fill_local(self, r, models):
+        self._clear(self.local_group, self.local_rows)
+        current = aisetup.load_state().get("model")
+        if current in models:
+            row = Adw.ActionRow(title=t("model_ready", model=current),
+                                subtitle=t("model_ready_body", model=current))
+            row.add_prefix(Gtk.Image(icon_name="object-select-symbolic"))
+            self.local_group.add(row)
+            self.local_rows.append(row)
+        rec = r.get("REC_MODEL", "")
+        choices = ([rec] if rec else []) + [m for m in r.get("ALT_MODELS", []) if m != rec]
+        choices = [m for m in choices if m not in models]
+        if not rec and not choices:
+            row = Adw.ActionRow(title=t("local_none"),
+                                subtitle=t("local_none_body", gb=r.get("BUDGET_GB", "0")))
+            row.add_prefix(Gtk.Image(icon_name="dialog-information-symbolic"))
+            self.local_group.add(row)
+            self.local_rows.append(row)
+            return
+        if not choices:
+            return
+        where = (t("model_where_gpu", gb=r.get("GPU_VRAM_GB")) if r.get("RUN_PATH") == "gpu"
+                 else t("model_where_cpu"))
+        combo = Adw.ComboRow(title=t("model_other") if current in models else t("model"),
+                             model=Gtk.StringList.new(choices))
+
+        def describe(*_):
+            m = choices[combo.get_selected()]
+            size = t("model_rec" if m == rec else "model_alt", size=MODEL_SIZES.get(m, "?"))
+            combo.set_subtitle(f"{size} · {where}")
+        combo.connect("notify::selected", describe)
+        describe()
+        button = self._row_button(t("download"), suggested=not current)
+        button.connect("clicked", lambda *_: self._install_model(choices[combo.get_selected()]))
+        combo.add_suffix(button)
+        self.local_group.add(combo)
+        self.local_rows.append(combo)
+
+    def _fill_kb(self, s):
+        self._clear(self.kb_group, self.kb_rows)
+        kb, r = s["kb"], s["res"]
+        if not kb.get("configured"):
+            row = Adw.ActionRow(title=t("kb_setup"), subtitle=t("kb_setup_body"))
+            row.add_prefix(Gtk.Image(icon_name="system-search-symbolic"))
+            if r.get("KB_OK") == "yes":
+                button = self._row_button(t("set_up"), suggested=True)
+                button.connect("clicked", lambda *_: self._open_kb())
+                row.add_suffix(button)
+                row.set_activatable_widget(button)
+            else:
+                row.set_subtitle(t("kb_small"))
+            self.kb_group.add(row)
+            self.kb_rows.append(row)
+            return
+        n = len([c for c in kb.get("collections", []) if not c["name"].endswith("-converted")])
+        row = Adw.ActionRow(title=t("kb_sources", n=n),
+                            subtitle=", ".join(c["name"] for c in kb["collections"]
+                                               if not c["name"].endswith("-converted")))
+        row.add_prefix(Gtk.Image(icon_name="system-search-symbolic"))
+        change = self._row_button(t("kb_change"))
+        change.connect("clicked", lambda *_: self._open_kb())
+        row.add_suffix(change)
+        self.kb_group.add(row)
+        self.kb_rows.append(row)
+        update = Adw.ActionRow(title=t("kb_updating") if s["kb_updating"] else t("kb_update"))
+        if s["kb_updating"]:
+            update.add_suffix(livespinner.Spinner(size=16))
+            GLib.timeout_add_seconds(10, self._poll_kb)
+        else:
+            button = self._row_button(t("kb_update"))
+            button.connect("clicked", lambda *_: self._kb_update_now())
+            update.set_title(t("kb_update"))
+            update.add_suffix(button)
+            update.set_activatable_widget(button)
+        self.kb_group.add(update)
+        self.kb_rows.append(update)
+        auto = Adw.SwitchRow(title=t("kb_auto"), subtitle=t("kb_auto_body"),
+                             active=s["kb_timer"])
+        auto.connect("notify::active", lambda r, _p: self._safe(aisetup.set_kb_timer,
+                                                                 r.get_active()))
+        self.kb_group.add(auto)
+        self.kb_rows.append(auto)
+
+    def _poll_kb(self):
+        if self.stack.get_visible_child_name() == "home" and not self.busy:
+            self._refresh()
+        return GLib.SOURCE_REMOVE
+
+    @staticmethod
+    def _home(path):
+        home = os.path.expanduser("~")
+        return "~" + path[len(home):] if path == home or path.startswith(home + "/") else path
+
+    def _safe(self, fn, *args):
+        try:
+            fn(*args)
+        except Exception as e:  # noqa: BLE001 - shown to the user
+            self._toast(str(e))
+
+    def _launch(self, command):
+        try:
+            Gio.Subprocess.new([command], Gio.SubprocessFlags.NONE)
+        except GLib.Error as e:
+            self._toast(e.message)
+
+    def _set_crash(self):
+        in_thread(lambda: aisetup.set_crash_watch(self.crash_row.get_active()),
+                  lambda _r, error: error and self._toast(error))
+
+    def _kb_update_now(self):
+        self._safe(aisetup.start_kb_update)
+        GLib.timeout_add(800, lambda: self._refresh() and False)
+
+    # --- installing --------------------------------------------------------------------
+
+    def _install_app(self, app_id, name):
+        if app_id == "claude-desktop" and aisetup.has_kvm():
+            dialog = Adw.AlertDialog(heading=t("cowork_title"), body=t("cowork_body"))
+            dialog.add_response("no", t("cowork_no"))
+            dialog.add_response("yes", t("cowork_yes"))
+            dialog.set_response_appearance("yes", Adw.ResponseAppearance.SUGGESTED)
+            dialog.connect("response", lambda _d, r: self._do_install_app(app_id, name,
+                                                                          r == "yes"))
+            dialog.present(self)
+            return
+        self._do_install_app(app_id, name, False)
+
+    def _do_install_app(self, app_id, name, cowork):
+        self._working(t("w_install", name=name), t("w_password"))
+
+        def work():
+            args = [app_id] + (["--cowork"] if cowork else [])
+            aisetup.install_ai(*args, progress=self._progress_line)
+            if cowork:
+                aisetup.install_ai("kvm", progress=self._progress_line)
+        in_thread(work, lambda _r, error: self._finish(
+            t("done_install", name=name) + (" " + t("relogin") if cowork else ""), error))
+
+    def _install_agent(self, command, name):
+        self._working(t("w_install", name=name), t("w_password"))
+
+        def work():
+            aisetup.install_agent(command, progress=self._progress_line)
+            model = aisetup.load_state().get("model")
+            if command == "opencode" and model in aisetup.ollama_models():
+                aisetup.configure_opencode(model=model)
+            if not any(v for k, v in self.installed.items() if k != command):
+                aisetup.set_default_agent(command)
+        in_thread(work, lambda _r, error: self._finish(t("done_install", name=name), error))
+
+    def _install_model(self, model):
+        r = self.res
+        size = MODEL_SIZES.get(model, "?")
+        self._working(t("w_model", model=model), t("w_model_body", size=size))
+        in_thread(lambda: aisetup.install_model(
+                      model, r.get("REC_CTX", "16384"), rocm=r.get("GPU_BACKEND") == "rocm",
+                      progress=self._progress_line, fraction=self._fraction),
+                  lambda _r, error: self._finish(t("done_model", model=model), error))
+
+    # --- the knowledge base page ---------------------------------------------------------
+
+    def _page_kb(self):
+        self.kb_what = Adw.PreferencesGroup(title=t("kb_what"), description=t("kb_what_body"))
+        self.kb_what_rows = []
+        self.kb_projects = Adw.PreferencesGroup(title=t("kb_projects"),
+                                                description=t("kb_projects_body"))
+        self.kb_project_rows = []
+        self.kb_who = Adw.PreferencesGroup(title=t("kb_who"), description=t("kb_who_body"))
+        self.kb_who_rows = []
+        options = Adw.PreferencesGroup()
+        self.kb_auto_row = Adw.SwitchRow(title=t("kb_auto"), subtitle=t("kb_auto_body"),
+                                         active=True)
+        options.add(self.kb_auto_row)
+        self.kb_build = self._button(t("kb_build"), suggested=True)
+        self.kb_build.connect("clicked", lambda *_: self._build_kb())
+        return self._page(self.kb_what, self.kb_projects, self.kb_who, options, self.kb_build)
+
+    def _open_kb(self):
+        kb = aisetup.kb_status()
+        have = {c["path"] for c in kb.get("collections", [])}
+        first = not kb.get("configured")
+
+        self._clear(self.kb_what, self.kb_what_rows)
+        self.kb_dirs = []
+        for kind, name, key in (("DOCUMENTS", "documents", "kb_documents"),
+                                ("DESKTOP", "desktop", "kb_desktop")):
+            path = aisetup.user_dir(kind)
+            if not path:
+                continue
+            row = Adw.SwitchRow(title=t(key), subtitle=GLib.markup_escape_text(self._home(path)),
+                                active=first or path in have)
+            self.kb_what.add(row)
+            self.kb_what_rows.append(row)
+            self.kb_dirs.append((row, name, path, t(key)))
+
+        self._clear(self.kb_projects, self.kb_project_rows)
+        self.kb_repos = []
+        repos = aisetup.discover_repos()
+        for path, name, remote in repos:
+            row = Adw.SwitchRow(title=GLib.markup_escape_text(name),
+                                subtitle=GLib.markup_escape_text(remote or self._home(path)),
+                                active=first or path in have)
+            self.kb_projects.add(row)
+            self.kb_project_rows.append(row)
+            self.kb_repos.append((row, path, name, remote))
+        if not repos:
+            row = Adw.ActionRow(title=t("kb_no_projects"))
+            self.kb_projects.add(row)
+            self.kb_project_rows.append(row)
+
+        self._clear(self.kb_who, self.kb_who_rows)
+        self.kb_agents = []
+        names = {c: n for c, n, _ in TERMINAL_AGENTS}
+        candidates = [c for c, _, _ in TERMINAL_AGENTS if aisetup.agent_installed(c)]
+        if aisetup.dpkg_installed("chatgpt") and "codex" not in candidates:
+            candidates.append("codex")
+            names["codex"] = t("kb_chatgpt")
+        for agent in candidates:
+            row = Adw.SwitchRow(title=names[agent], active=first or aisetup.mcp_enabled(agent))
+            self.kb_who.add(row)
+            self.kb_who_rows.append(row)
+            self.kb_agents.append((row, agent))
+        if not candidates:
+            row = Adw.ActionRow(title=t("kb_no_agents"))
+            self.kb_who.add(row)
+            self.kb_who_rows.append(row)
+
+        self.kb_auto_row.set_active(first or aisetup.kb_timer_enabled())
+        self.kb_first = first
+        self._show("kb")
+
+    def _build_kb(self):
+        sources = [(name, path, label) for row, name, path, label in self.kb_dirs
+                   if row.get_active()]
+        repos = [(path, name, remote) for row, path, name, remote in self.kb_repos
+                 if row.get_active()]
+        dropped = [name for row, name, _, _ in self.kb_dirs if not row.get_active()]
+        agents = [(agent, row.get_active()) for row, agent in self.kb_agents]
+        auto = self.kb_auto_row.get_active()
+        first = self.kb_first
+        self._working(t("w_kb"), t("w_kb_body"))
+
+        def work():
+            for name in dropped + [f"repo-{n}" for row, _, n, _ in self.kb_repos
+                                   if not row.get_active()]:
+                aisetup.run(["live-kb", "remove", name], check=False)
+            aisetup.setup_kb(sources, repos, convert=True, progress=self._progress_line)
+            for agent, enabled in agents:
+                aisetup.set_mcp(agent, enabled)
+            aisetup.set_kb_timer(auto)
+            aisetup.start_kb_update()
+        in_thread(work, lambda _r, error: self._finish(
+            t("kb_started") if first else t("kb_saved"), error))
+
+
+class AIApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.first_run = False
+
+    def do_command_line(self, command_line):
+        self.first_run = "--first-run" in command_line.get_arguments()[1:]
+        self.activate()
+        return 0
+
+    def do_activate(self):
+        window = self.get_active_window() or AIWindow(self, self.first_run)
+        window.present()
+
+
+if __name__ == "__main__":
+    sys.exit(AIApp().run(sys.argv))

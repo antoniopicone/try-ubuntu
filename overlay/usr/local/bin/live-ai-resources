@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# live-ai-resources: what this computer can run locally, for the AI app
+# (live-ai) and live-debug. No privileges, changes nothing.
+#
+#   live-ai-resources          a readable summary with the recommendation
+#   live-ai-resources --env    the same as KEY=value lines (what live-ai reads)
+#
+# The chat model is picked from the memory it can use: the VRAM of a GPU
+# Ollama drives (NVIDIA with its driver, AMD with ROCm), otherwise the RAM
+# minus 8 GB for the system, the desktop and the knowledge base's models.
+# The catalogue below holds Ollama library tags checked on 2026-10-03; when a
+# tag goes away, `ollama pull` fails plainly and the app says so.
+#
+# For tests: LIVE_AI_MEMINFO, LIVE_AI_DRM_DIR and LIVE_AI_DF_PATH replace
+# /proc/meminfo, /sys/class/drm and the folder whose free space counts.
+set -uo pipefail
+
+MEMINFO="${LIVE_AI_MEMINFO:-/proc/meminfo}"
+DRM_DIR="${LIVE_AI_DRM_DIR:-/sys/class/drm}"
+DF_PATH="${LIVE_AI_DF_PATH:-$HOME}"
+
+# tag|download size in GB|what it's for
+CATALOG=(
+  "qwen3.5:2b|2.7|small, for trying things out"
+  "qwen3.5:4b|3.4|light: summaries and questions about the knowledge base"
+  "qwen3.5:9b|6.6|balanced, reliable with tools"
+  "qwen3.6:27b|18|dense and strong: needs a GPU with plenty of memory"
+  "qwen3.6:35b-a3b|23|mixture of experts, 3B active: quick even on a CPU with plenty of RAM"
+)
+KB_MODELS_GB=3   # qmd's multilingual embedding, reranker and query expansion (~2.6 GB)
+
+gb() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1073741824 }'; }
+
+ram_kb=$(awk '/^MemTotal:/ { print $2 }' "$MEMINFO" 2>/dev/null)
+ram_gb=$(awk -v k="${ram_kb:-0}" 'BEGIN { printf "%.1f", k / 1048576 }')
+threads=$(nproc 2>/dev/null || echo 1)
+arch=$(uname -m)
+cpu_name=$(awk -F: '/^model name/ { sub(/^ +/, "", $2); print $2; exit }' /proc/cpuinfo 2>/dev/null)
+
+gpu_vendor=none gpu_name="" gpu_vram_gb=0 gpu_backend=none igpu=""
+
+# NVIDIA: nvidia-smi (the proprietary driver) is the only reliable source.
+if command -v nvidia-smi >/dev/null 2>&1; then
+  line=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
+  if [[ -n "$line" ]]; then
+    gpu_vendor=nvidia gpu_backend=cuda
+    gpu_name=$(echo "${line%,*}" | sed 's/ *$//')
+    gpu_vram_gb=$(awk -v m="${line##*,}" 'BEGIN { printf "%.1f", m / 1024 }')
+  fi
+fi
+
+# AMD and Intel from the DRM cards. An AMD card with at least 6 GB of its
+# own memory counts as a GPU (ROCm); anything else is an integrated one.
+for dev in "$DRM_DIR"/card[0-9]*/device; do
+  [[ -r "$dev/vendor" ]] || continue
+  case "$(cat "$dev/vendor")" in
+    0x1002)
+      vram=$(cat "$dev/mem_info_vram_total" 2>/dev/null || echo 0)
+      vram_gb=$(gb "$vram")
+      if [[ "$gpu_vendor" == none && "$arch" == x86_64 ]] && awk -v v="$vram_gb" 'BEGIN { exit !(v >= 6) }'; then
+        gpu_vendor=amd gpu_backend=rocm gpu_vram_gb=$vram_gb
+        gpu_name="AMD Radeon ($(basename "$(readlink -f "$dev")"))"
+      elif [[ -z "$igpu" ]]; then
+        igpu="AMD Radeon, integrated ($vram_gb GB reserved)"
+      fi ;;
+    0x8086) [[ -z "$igpu" ]] && igpu="Intel, integrated" ;;
+    0x1af4) [[ -z "$igpu" ]] && igpu="virtio-gpu (a virtual machine)" ;;
+  esac
+done
+
+disk_free_gb=$(df -P -B1 "$DF_PATH" 2>/dev/null | awk 'NR == 2 { printf "%.1f", $4 / 1073741824 }')
+vulkan=no
+compgen -G "/usr/share/vulkan/icd.d/*.json" >/dev/null && vulkan=yes
+
+cpu_budget=$(awk -v r="$ram_gb" 'BEGIN { b = r - 8; if (b < 0) b = 0; printf "%.1f", b }')
+if [[ "$gpu_backend" != none ]]; then path=gpu budget=$gpu_vram_gb; else path=cpu budget=$cpu_budget; fi
+
+pick() {   # pick BUDGET PATH: the model for that much memory, or nothing
+  if [[ "$2" == gpu ]]; then
+    awk -v b="$1" 'BEGIN {
+      if (b >= 28) print "qwen3.6:35b-a3b"; else if (b >= 22) print "qwen3.6:27b";
+      else if (b >= 10) print "qwen3.5:9b"; else if (b >= 6) print "qwen3.5:4b"; else print "" }'
+  else
+    # On a CPU a dense model above ~4B is too slow to talk to; the MoE one
+    # runs only 3B parameters per token.
+    awk -v b="$1" 'BEGIN {
+      if (b >= 32) print "qwen3.6:35b-a3b"; else if (b >= 6) print "qwen3.5:4b";
+      else if (b >= 3) print "qwen3.5:2b"; else print "" }'
+  fi
+}
+
+rec=$(pick "$budget" "$path")
+# A GPU too small for any model: the CPU, if the RAM allows.
+if [[ -z "$rec" && "$path" == gpu ]]; then
+  rec=$(pick "$cpu_budget" cpu)
+  [[ -n "$rec" ]] && { path=cpu; budget=$cpu_budget; }
+fi
+
+rec_size=0 rec_desc=""
+for e in "${CATALOG[@]}"; do
+  IFS='|' read -r tag size desc <<<"$e"
+  [[ "$tag" == "$rec" ]] && { rec_size=$size; rec_desc=$desc; }
+done
+
+ctx=16384
+if [[ -n "$rec" ]] && awk -v b="$budget" -v s="$rec_size" 'BEGIN { exit !(b - s >= 6) }'; then ctx=32768; fi
+
+# The others that fit, for choosing by hand (no dense 27B on a CPU).
+alts=()
+for e in "${CATALOG[@]}"; do
+  IFS='|' read -r tag size _ <<<"$e"
+  [[ "$tag" == "$rec" ]] && continue
+  [[ "$path" == cpu && "$tag" == "qwen3.6:27b" ]] && continue
+  awk -v b="$budget" -v s="$size" 'BEGIN { exit !(s + 2 <= b) }' && alts+=("$tag")
+done
+
+kb_ok=no
+awk -v r="$ram_gb" -v d="${disk_free_gb:-0}" -v k="$KB_MODELS_GB" 'BEGIN { exit !(r >= 7.5 && d >= k + 3) }' && kb_ok=yes
+disk_ok=yes
+if [[ -n "$rec" ]] && ! awk -v d="${disk_free_gb:-0}" -v s="$rec_size" -v k="$KB_MODELS_GB" 'BEGIN { exit !(d >= s + k + 4) }'; then
+  disk_ok=no
+fi
+qmd_gpu=cpu
+if [[ "$gpu_backend" == cuda ]]; then qmd_gpu=cuda; elif [[ "$vulkan" == yes && "$path" == gpu ]]; then qmd_gpu=vulkan; fi
+
+case "${1-}" in
+  -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --env)
+    cat <<EOF
+ARCH=$arch
+CPU_NAME=${cpu_name:-$arch}
+CPU_THREADS=$threads
+RAM_GB=$ram_gb
+GPU_VENDOR=$gpu_vendor
+GPU_NAME=$gpu_name
+GPU_BACKEND=$gpu_backend
+GPU_VRAM_GB=$gpu_vram_gb
+IGPU=$igpu
+DISK_FREE_GB=${disk_free_gb:-0}
+VULKAN=$vulkan
+RUN_PATH=$path
+BUDGET_GB=$budget
+REC_MODEL=$rec
+REC_MODEL_SIZE_GB=$rec_size
+REC_CTX=$ctx
+ALT_MODELS=${alts[*]-}
+KB_OK=$kb_ok
+DISK_OK=$disk_ok
+QMD_GPU=$qmd_gpu
+EOF
+    exit 0 ;;
+esac
+
+echo "This computer"
+echo "  CPU:    ${cpu_name:-$arch}, $threads threads"
+echo "  RAM:    $ram_gb GB"
+if [[ "$gpu_vendor" != none ]]; then
+  echo "  GPU:    $gpu_name, $gpu_vram_gb GB ($gpu_backend)"
+else
+  echo "  GPU:    none Ollama can use${igpu:+ ($igpu)}"
+fi
+echo "  Disk:   ${disk_free_gb:-?} GB free in $DF_PATH"
+echo
+echo "Knowledge base (qmd, ~2.6 GB of models, on $qmd_gpu)"
+if [[ "$kb_ok" == yes ]]; then echo "  fits"; else echo "  needs 8 GB of RAM and 6 GB free"; fi
+echo
+echo "Local chat model (Ollama): $budget GB to use, on the $path"
+if [[ -n "$rec" ]]; then
+  echo "  recommended: $rec ($rec_size GB): $rec_desc; context $ctx tokens"
+  ((${#alts[@]})) && echo "  also fits:   ${alts[*]}"
+  [[ "$disk_ok" == no ]] && echo "  not enough free disk space for the model and the knowledge base"
+else
+  echo "  none: too little memory for a useful one. The knowledge base works anyway,"
+  echo "  and Claude or ChatGPT can answer from it."
+fi
+exit 0

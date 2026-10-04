@@ -1,0 +1,17 @@
+[Unit]
+Description=A new wallpaper (see the Wallpapers app)
+Documentation=file:/usr/local/lib/live-wallpapers/rotate
+# Right after the login the network may not be there yet: a few more tries
+StartLimitIntervalSec=30min
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/live-wallpapers/rotate
+Restart=on-failure
+RestartSec=3min
+Nice=10
+
+[Install]
+# Enabled by itself only for "at every login"; otherwise a timer starts it
+WantedBy=graphical-session.target

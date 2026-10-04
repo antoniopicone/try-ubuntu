@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Wallpapers
+Name[it]=Sfondi
+Comment=Find a wallpaper in several photo services, and set it
+Comment[it]=Trova uno sfondo tra più servizi di foto, e impostalo
+Exec=live-wallpapers
+Icon=org.ubuntu.LiveWallpapers
+Categories=GTK;GNOME;Utility;Graphics;
+Keywords=wallpaper;background;desktop;photo;art;
+Keywords[it]=sfondo;sfondi;scrivania;desktop;foto;arte;
+StartupNotify=true

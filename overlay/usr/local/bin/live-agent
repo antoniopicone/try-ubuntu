@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# live-agent: starts the user's default AI agent, optionally with a prompt.
+#
+# The default agent is in ~/.config/live-ai/agent.conf (AGENT=<name>), set by
+# the AI app (live-ai). The system's skills are linked into every agent's
+# skills folder (live-agent-link), so a prompt only has to name the skill.
+#
+# A prompt never goes through a command line a shell parses: when a terminal
+# window has to open, it's written to a private file in $XDG_RUNTIME_DIR and
+# read back by another live-agent inside the terminal, which hands it to the
+# agent as a single argument.
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/live-ai"
+CONFIG_FILE="$CONFIG_DIR/agent.conf"
+WORKDIR="${XDG_STATE_HOME:-$HOME/.local/state}/live-ai/agent-workdir"
+KNOWN_AGENTS=(claude codex opencode gemini)
+export PATH="$HOME/.local/bin:$PATH"
+
+usage() {
+  cat <<'EOF'
+Usage: live-agent [options]
+
+  --prompt TEXT         the first message
+  --prompt-file FILE    read it from a file (deleted afterwards)
+  --agent NAME          this agent instead of the default
+  --terminal            always open a new terminal window
+  --dry-run             print what would run
+  --list                the supported agents and which are installed
+  --has-agent           exit 0 when the default agent is installed
+  --get-default         print the default agent
+  --set-default NAME    set the default agent
+  -h, --help            this help
+
+Agents: claude (Claude Code), codex (Codex CLI), opencode, gemini.
+Without --terminal, run from a terminal the agent starts there; otherwise
+(a notification, the app) a terminal window opens.
+EOF
+}
+
+die() { echo "live-agent: $*" >&2; exit 1; }
+
+is_known() {
+  local a
+  for a in "${KNOWN_AGENTS[@]}"; do [[ "$a" == "$1" ]] && return 0; done
+  return 1
+}
+
+get_default() {
+  local agent=""
+  if [[ -r "$CONFIG_FILE" ]]; then
+    # Read as data, not sourced: the file can't run code.
+    agent=$(sed -n 's/^AGENT=["'\'']\{0,1\}\([a-z0-9-]*\)["'\'']\{0,1\}[[:space:]]*$/\1/p' "$CONFIG_FILE" | tail -1)
+  fi
+  echo "${agent:-claude}"
+}
+
+set_default() {
+  is_known "$1" || die "unknown agent: $1 (supported: ${KNOWN_AGENTS[*]})"
+  mkdir -p "$CONFIG_DIR"
+  printf 'AGENT=%s\n' "$1" > "$CONFIG_FILE"
+  echo "Default agent: $1"
+}
+
+# AGENT_ARGV: the agent's command line, with the prompt if there is one.
+build_agent_argv() {
+  local agent="$1" prompt="$2"
+  case "$agent" in
+    claude)   AGENT_ARGV=(claude);   [[ -n "$prompt" ]] && AGENT_ARGV+=("$prompt") ;;
+    codex)    AGENT_ARGV=(codex);    [[ -n "$prompt" ]] && AGENT_ARGV+=("$prompt") ;;
+    gemini)   AGENT_ARGV=(gemini);   [[ -n "$prompt" ]] && AGENT_ARGV+=(--prompt-interactive "$prompt") ;;
+    opencode) AGENT_ARGV=(opencode); [[ -n "$prompt" ]] && AGENT_ARGV+=(--prompt "$prompt") ;;
+    *) die "unknown agent: $agent" ;;
+  esac
+  return 0
+}
+
+# TERM_ARGV: the terminal to open; the command goes after it. The image's
+# default terminal is ghostty (falling back to Ptyxis by itself, see
+# /usr/local/bin/ghostty), through xdg-terminal-exec.
+pick_terminal() {
+  if command -v xdg-terminal-exec >/dev/null 2>&1; then TERM_ARGV=(xdg-terminal-exec)
+  elif command -v ghostty >/dev/null 2>&1; then TERM_ARGV=(ghostty -e)
+  elif command -v ptyxis >/dev/null 2>&1; then TERM_ARGV=(ptyxis --new-window --)
+  else die "no terminal found"
+  fi
+}
+
+notify_error() {
+  echo "live-agent: $1" >&2
+  if ! [[ -t 2 ]] && command -v notify-send >/dev/null 2>&1; then
+    notify-send --app-name=AI --icon=org.ubuntu.LiveAI "AI" "$1" || true
+  fi
+}
+
+agent="" prompt="" prompt_file="" force_terminal=0 dry_run=0
+while (($#)); do
+  case "$1" in
+    --prompt)       prompt="${2-}"; shift 2 || die "--prompt needs a text" ;;
+    --prompt-file)  prompt_file="${2-}"; shift 2 || die "--prompt-file needs a file" ;;
+    --agent)        agent="${2-}"; shift 2 || die "--agent needs a name" ;;
+    --terminal)     force_terminal=1; shift ;;
+    --dry-run)      dry_run=1; shift ;;
+    --list)
+      def=$(get_default)
+      for a in "${KNOWN_AGENTS[@]}"; do
+        mark=" "; [[ "$a" == "$def" ]] && mark="*"
+        if command -v "$a" >/dev/null 2>&1; then st="installed"; else st="not installed"; fi
+        printf '%s %-9s %s\n' "$mark" "$a" "$st"
+      done
+      exit 0 ;;
+    --has-agent)    command -v "$(get_default)" >/dev/null 2>&1; exit ;;
+    --get-default)  get_default; exit 0 ;;
+    --set-default)  set_default "${2-}"; exit 0 ;;
+    -h|--help)      usage; exit 0 ;;
+    *) die "unknown option: $1 (see --help)" ;;
+  esac
+done
+
+[[ -z "$agent" ]] && agent=$(get_default)
+is_known "$agent" || die "unknown agent: $agent (supported: ${KNOWN_AGENTS[*]})"
+
+if [[ -n "$prompt_file" ]]; then
+  [[ -r "$prompt_file" ]] || die "can't read the prompt file: $prompt_file"
+  prompt=$(cat "$prompt_file")
+  rm -f "$prompt_file"
+fi
+
+if ! command -v "$agent" >/dev/null 2>&1 && ((dry_run == 0)); then
+  notify_error "$agent isn't installed: set it up in the AI app."
+  exit 1
+fi
+
+mkdir -p "$WORKDIR"
+
+if [[ -t 0 && -t 1 ]] && ((force_terminal == 0)); then
+  build_agent_argv "$agent" "$prompt"
+  if ((dry_run)); then
+    printf 'cd %q\n' "$WORKDIR"; printf '%q ' "${AGENT_ARGV[@]}"; echo
+    exit 0
+  fi
+  cd "$WORKDIR"
+  exec "${AGENT_ARGV[@]}"
+fi
+
+# A new window: the prompt goes through a private file, never a command line.
+pick_terminal
+runtime="${XDG_RUNTIME_DIR:-/tmp}/live-ai"
+mkdir -p "$runtime"; chmod 700 "$runtime"
+child=(live-agent --agent "$agent")
+pf=""
+if [[ -n "$prompt" ]]; then
+  pf=$(mktemp -p "$runtime" prompt-XXXXXX)
+  printf '%s' "$prompt" > "$pf"
+  child+=(--prompt-file "$pf")
+fi
+if ((dry_run)); then
+  printf '%q ' "${TERM_ARGV[@]}" "${child[@]}"; echo
+  if [[ -n "$pf" ]]; then echo "--- prompt ($pf) ---"; cat "$pf"; echo; rm -f "$pf"; fi
+  exit 0
+fi
+cd "$WORKDIR"
+setsid -f "${TERM_ARGV[@]}" "${child[@]}" >/dev/null 2>&1 </dev/null

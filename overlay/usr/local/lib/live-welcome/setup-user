@@ -19,7 +19,8 @@ be used to create more users. Besides the user it sets:
   - git's user.name / user.email
   - Cloud Config at the first login (live-cloud-config --first-run: the
     network, Tailscale, the clouds; it removes itself from autostart and
-    opens Cloud Backup, live-backup --first-run, for the backups)
+    opens Cloud Backup, live-backup --first-run, for the backups, which
+    then opens the AI app, live-ai --first-run)
   - the user's picture (the avatar, when there is one), for GDM and GNOME
 and it takes the live user's admin rights away at once, turns GDM's
 autologin off and has live-retire-user.service delete the live user (with
@@ -51,7 +52,9 @@ ACCENTS = {"blue", "teal", "green", "yellow", "orange", "red", "pink",
 YARU = {"blue": "blue", "teal": "prussiangreen", "green": "olive",
         "yellow": "yellow", "orange": "", "red": "red", "pink": "magenta",
         "purple": "purple", "slate": "sage"}
-GROUPS = ["sudo", "video", "render", "input"]
+# adm: the system journal, as for Ubuntu's first user (coredumpctl and the
+# crash notifications read systemd-coredump's entries there)
+GROUPS = ["sudo", "adm", "video", "render", "input"]
 
 
 def fail(message):

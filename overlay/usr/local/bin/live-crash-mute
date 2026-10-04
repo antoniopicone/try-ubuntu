@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# live-crash-mute: mutes or unmutes the crash notifications of one program.
+#
+#   live-crash-mute                    the muted programs
+#   live-crash-mute '<program>'        mute it (a name or a path)
+#   live-crash-mute '<program>' off    unmute it
+#
+# The key is the executable's file name (as in COREDUMP_EXE), also from a full
+# path. Muting fixes nothing: the program still crashes, only the
+# notification goes. For all of them: systemctl --user mask --now
+# live-crash-watch.service
+set -euo pipefail
+
+MUTE_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/live-ai/crash-mute"
+
+case "${1-}" in
+  -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+if (($# == 0)); then
+  if [[ -s "$MUTE_FILE" ]]; then grep -v '^#' "$MUTE_FILE" | sed '/^$/d'
+  else echo "No program is muted."; fi
+  exit 0
+fi
+
+mode="${2:-on}"
+case "$mode" in on|off) ;; *) echo "live-crash-mute: the second argument can only be 'off'" >&2; exit 2 ;; esac
+name="${1##*/}"
+if [[ -z "$name" || "$name" == *$'\n'* ]]; then echo "live-crash-mute: not a valid name" >&2; exit 2; fi
+
+mkdir -p "$(dirname "$MUTE_FILE")"
+touch "$MUTE_FILE"
+if [[ "$mode" == off ]]; then
+  tmp=$(mktemp "$MUTE_FILE.XXXXXX")
+  grep -vxF -- "$name" "$MUTE_FILE" > "$tmp" || true
+  mv -- "$tmp" "$MUTE_FILE"
+  echo "Unmuted: $name"
+  exit 0
+fi
+if grep -qxF -- "$name" "$MUTE_FILE"; then
+  echo "Already muted: $name"
+else
+  printf '%s\n' "$name" >> "$MUTE_FILE"
+  echo "Muted: $name (to undo: live-crash-mute '$name' off)"
+fi
+case "$name" in
+  python*|node|nodejs|bash|sh|dash|zsh|java|perl|ruby*|gjs|gjs-console|electron*)
+    echo "Note: '$name' is an interpreter: the crashes of EVERY program it runs are muted." >&2 ;;
+esac
+
+# From a notification (no terminal): say it with a notification.
+if ! [[ -t 1 ]] && command -v notify-send >/dev/null 2>&1; then
+  esc=${name//&/&amp;}; esc=${esc//</&lt;}; esc=${esc//>/&gt;}
+  case "${LANG:-}" in
+    it*) title="Notifiche silenziate"; body="I crash di $esc non verranno più notificati. Per riattivarle: live-crash-mute '$esc' off" ;;
+    *)   title="Notifications muted"; body="Crashes of $esc won't be notified any more. To undo: live-crash-mute '$esc' off" ;;
+  esac
+  notify-send --app-name=AI --icon=dialog-information "$title" "$body" || true
+fi

@@ -1,0 +1,1800 @@
+#!/usr/bin/python3
+"""live-wallpapers: the Wallpapers app. Finds a wallpaper in several photo
+services at once and sets it (/usr/local/lib/live-wallpapers: sources.py
+for the services, palette.py for the colors, store.py for what's kept,
+desktop.py for the GNOME settings).
+
+  - Discover: a search, the photo of the day, moods (searches ready to
+    run), a few museum works. "Surprise Me" opens a random wallpaper.
+  - Search: the results of every source that's on, dealt together, with
+    filters: sources, type, color, "fits my screen", "free works only",
+    order. The services that can't filter by color are filtered here, on
+    the thumbnails' own colors. A search can be saved.
+  - Preview: the wallpaper on a small desktop before it's set, for the
+    light or the dark style. Position (fill, with the framing dragged; fit;
+    center), blur and darkening are rendered into the image that's set.
+    "Match the theme" sets the GNOME accent color closest to the picture's
+    colors, and yaru-accent-sync the icons.
+  - Collection: the saved wallpapers.
+  - Automatic: a new wallpaper every hour, day, week or login, from the
+    photo of the day, the collection or a saved search: systemd user units
+    run /usr/local/lib/live-wallpapers/rotate.
+  - Sources: which services are on, Pixabay's API key, and the ones left
+    out (Unsplash, Pexels: their API terms forbid wallpaper apps).
+"""
+import copy
+import os
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+gi.require_version("Gsk", "4.0")
+gi.require_version("Graphene", "1.0")
+from gi.repository import Adw, Gdk, GLib, Graphene, Gsk, Gtk, Pango  # noqa: E402
+
+sys.path.insert(0, "/usr/local/lib/live-wallpapers")
+sys.path.insert(0, "/usr/local/lib/live-common")
+import desktop  # noqa: E402
+import livespinner  # noqa: E402
+import palette  # noqa: E402
+import sources  # noqa: E402
+import store  # noqa: E402
+from sources import Query  # noqa: E402
+
+APP_ID = "org.ubuntu.LiveWallpapers"
+PIXABAY_KEY_URL = "https://pixabay.com/api/docs/"
+# Fewer results than this after a page: the next one is asked for right away
+# (the color filter can leave few), this many times at most
+ENOUGH, MORE_PAGES = 9, 3
+
+STRINGS = {
+    "en": {
+        "app": "Wallpapers",
+        "discover": "Discover",
+        "collection": "Collection",
+        "automatic": "Automatic",
+        "sources": "Sources",
+        "surprise": "Surprise Me",
+        "surprise_none": "No source answered: try again in a while.",
+        "search_hint": "Search mountains, aurora, Hokusai…",
+        "filters": "Filters",
+        "daily": "Photo of the day · {date}",
+        "preview": "Preview",
+        "set": "Set as Wallpaper",
+        "moods": "Moods",
+        "mood_nature": "Nature", "mood_space": "Space", "mood_aurora": "Auroras",
+        "mood_city": "Cities at night", "mood_fog": "Fog", "mood_sea": "Sea",
+        "mood_dunes": "Dunes",
+        "museums": "From the museums, in the public domain",
+        "see_all": "See all",
+        "search": "Search",
+        "type": "Type",
+        "kind_photo": "Photos", "kind_painting": "Paintings",
+        "kind_illustration": "Illustrations", "kind_print": "Prints",
+        "kind_space": "Space", "kind_anime": "Anime",
+        "color": "Color",
+        "color_any": "Any color",
+        "color_pick": "Pick a color",
+        "color_red": "Red", "color_orange": "Orange", "color_yellow": "Yellow",
+        "color_green": "Green", "color_teal": "Teal", "color_blue": "Blue",
+        "color_purple": "Purple", "color_pink": "Pink", "color_brown": "Brown",
+        "color_white": "White", "color_gray": "Gray", "color_black": "Black",
+        "color_slate": "Slate",
+        "fit": "Fit my screen",
+        "fit_sub": "At least {w} × {h}, landscape",
+        "fit_chip": "Fits the screen",
+        "free": "Free works only",
+        "free_sub": "CC0 and public domain",
+        "sort": "Sort by",
+        "sort_relevance": "Relevance", "sort_popular": "Most liked",
+        "sort_latest": "Newest", "sort_random": "Random",
+        "save_search": "Save this search",
+        "save_search_name": "Name",
+        "save": "Save",
+        "cancel": "Cancel",
+        "search_saved": "Search saved: you can use it in Automatic.",
+        "from_sources": "from {n} sources",
+        "from_source": "from 1 source",
+        "loading": "Looking for wallpapers…",
+        "nothing": "Nothing Found",
+        "nothing_body": "Try other words (English works best), or fewer filters.",
+        "no_sources": "No Source to Ask",
+        "no_sources_body": "With these filters, none of the sources that are on can answer.",
+        "why_off": "off in Sources",
+        "why_key": "needs a key",
+        "why_license": "licenses not stated",
+        "why_kind": "none of this type",
+        "err_limit": "{names}: too many requests for now, try later.",
+        "err_key": "{names}: the API key was refused.",
+        "err_network": "{names}: no answer.",
+        "public_domain": "public domain",
+        "license_unknown": "license not stated",
+        "license_free": "free for any use",
+        "by": "By {name}",
+        "colors": "The wallpaper's colors",
+        "match": "Match the theme to the wallpaper",
+        "match_sub": "Accent color and Yaru icons",
+        "match_why": "{color} is the GNOME accent closest to this picture's colors.",
+        "also_light": "Use with the light style too",
+        "also_dark": "Use with the dark style too",
+        "light": "Light",
+        "dark": "Dark",
+        "fill": "Fill",
+        "fit_mode": "Fit",
+        "center": "Center",
+        "drag": "Drag the preview to choose the framing",
+        "blur": "Blur",
+        "darken": "Darken, to read the icons better",
+        "none": "none",
+        "on_screen": "On your screen, {w} × {h}",
+        "not_yet": "The real desktop only changes when you press “Set as Wallpaper”.",
+        "to_collection": "Collect",
+        "in_collection": "Collected",
+        "download": "Download",
+        "page": "Web Page",
+        "downloading": "Downloading the image…",
+        "done": "Wallpaper set.",
+        "failed": "Couldn't download the image: {error}",
+        "exported": "Saved in {folder}.",
+        "collection_empty": "Nothing Collected Yet",
+        "collection_empty_body": "The wallpapers you collect from their preview show up here, "
+                                 "ready to be set again, even without the network.",
+        "auto_title": "Change the wallpaper by itself",
+        "auto_sub": "A new wallpaper, without opening the app",
+        "auto_from": "From where",
+        "auto_daily": "Photo of the day",
+        "auto_daily_sub": "The one picked each day from the sources that are on",
+        "auto_collection": "My collection",
+        "auto_collection_sub": "The wallpapers you collected, in turn",
+        "auto_search": "A saved search",
+        "auto_search_sub": "Each time, a new wallpaper that matches it",
+        "auto_no_search": "none saved yet",
+        "auto_when": "When",
+        "auto_every": "Change",
+        "every_hourly": "Every hour", "every_daily": "Every day",
+        "every_weekly": "Every week", "every_login": "At every login",
+        "auto_metered": "No downloads on metered networks",
+        "auto_metered_sub": "The wallpaper stays as it is there",
+        "auto_now": "Change it now",
+        "auto_pair_title": "Day and night",
+        "auto_pair": "A wallpaper for the light style, one for the dark",
+        "auto_pair_sub": "A bright one by day, a dark one by night: the app picks the pair",
+        "auto_light": "Now, with the light style",
+        "auto_dark": "Now, with the dark style",
+        "auto_error": "Couldn't set the schedule: {error}",
+        "ready": "Ready to use",
+        "ready_sub": "No account needed.",
+        "src_openverse": "Creative Commons and public-domain photos and illustrations: "
+                         "Flickr, StockSnap and others",
+        "src_artic": "Public-domain paintings and prints (CC0), in high resolution",
+        "src_cleveland": "Open Access works, in the public domain (CC0)",
+        "src_nasa": "Earth, the planets and the nebulae, from NASA's image library",
+        "src_wallhaven": "Wallpapers by its users, screen-sized. Licenses not stated: "
+                         "personal use only",
+        "src_pixabay": "Photos and illustrations, with filters by color",
+        "with_key": "With a key of yours",
+        "with_key_sub": "The key is free: the service gives one to every account.",
+        "get_key": "Get a key",
+        "api_key": "API key",
+        "key_saved": "Key saved.",
+        "unavailable": "Not available",
+        "unavailable_sub": "Their API terms forbid wallpaper apps.",
+        "read_terms": "Read the terms",
+    },
+    "it": {
+        "app": "Sfondi",
+        "discover": "Scopri",
+        "collection": "Raccolta",
+        "automatic": "Automatico",
+        "sources": "Sorgenti",
+        "surprise": "Sorprendimi",
+        "surprise_none": "Nessuna sorgente ha risposto: riprova tra poco.",
+        "search_hint": "Cerca montagne, aurore, Hokusai…",
+        "filters": "Filtri",
+        "daily": "Foto del giorno · {date}",
+        "preview": "Anteprima",
+        "set": "Imposta come sfondo",
+        "moods": "Atmosfere",
+        "mood_nature": "Natura", "mood_space": "Spazio", "mood_aurora": "Aurore",
+        "mood_city": "Città di notte", "mood_fog": "Nebbia", "mood_sea": "Mare",
+        "mood_dunes": "Dune",
+        "museums": "Dai musei, in pubblico dominio",
+        "see_all": "Vedi tutti",
+        "search": "Cerca",
+        "type": "Tipo",
+        "kind_photo": "Foto", "kind_painting": "Dipinti",
+        "kind_illustration": "Illustrazioni", "kind_print": "Stampe",
+        "kind_space": "Spazio", "kind_anime": "Anime",
+        "color": "Colore",
+        "color_any": "Qualsiasi colore",
+        "color_pick": "Scegli un colore",
+        "color_red": "Rosso", "color_orange": "Arancione", "color_yellow": "Giallo",
+        "color_green": "Verde", "color_teal": "Verde acqua", "color_blue": "Blu",
+        "color_purple": "Viola", "color_pink": "Rosa", "color_brown": "Marrone",
+        "color_white": "Bianco", "color_gray": "Grigio", "color_black": "Nero",
+        "color_slate": "Ardesia",
+        "fit": "Adatta al mio schermo",
+        "fit_sub": "Almeno {w} × {h}, orizzontale",
+        "fit_chip": "A misura di schermo",
+        "free": "Solo opere libere",
+        "free_sub": "CC0 e pubblico dominio",
+        "sort": "Ordina per",
+        "sort_relevance": "Pertinenza", "sort_popular": "Più apprezzati",
+        "sort_latest": "Più recenti", "sort_random": "A caso",
+        "save_search": "Salva questa ricerca",
+        "save_search_name": "Nome",
+        "save": "Salva",
+        "cancel": "Annulla",
+        "search_saved": "Ricerca salvata: puoi usarla in Automatico.",
+        "from_sources": "da {n} sorgenti",
+        "from_source": "da 1 sorgente",
+        "loading": "Cerco gli sfondi…",
+        "nothing": "Nessun risultato",
+        "nothing_body": "Prova con altre parole (in inglese funziona meglio) o con meno filtri.",
+        "no_sources": "Nessuna sorgente a cui chiedere",
+        "no_sources_body": "Con questi filtri nessuna delle sorgenti attive può rispondere.",
+        "why_off": "spenta in Sorgenti",
+        "why_key": "serve una chiave",
+        "why_license": "licenze non dichiarate",
+        "why_kind": "non ha questo tipo",
+        "err_limit": "{names}: troppe richieste per ora, riprova più tardi.",
+        "err_key": "{names}: la chiave API è stata rifiutata.",
+        "err_network": "{names}: nessuna risposta.",
+        "public_domain": "pubblico dominio",
+        "license_unknown": "licenza non dichiarata",
+        "license_free": "libera per ogni uso",
+        "by": "Di {name}",
+        "colors": "Colori dello sfondo",
+        "match": "Abbina il tema allo sfondo",
+        "match_sub": "Colore d'accento e icone Yaru",
+        "match_why": "{color} è l'accento di GNOME più vicino ai colori di questa immagine.",
+        "also_light": "Usa anche con lo stile chiaro",
+        "also_dark": "Usa anche con lo stile scuro",
+        "light": "Chiaro",
+        "dark": "Scuro",
+        "fill": "Riempi",
+        "fit_mode": "Adatta",
+        "center": "Centra",
+        "drag": "Trascina l'anteprima per scegliere l'inquadratura",
+        "blur": "Sfocatura",
+        "darken": "Scurisci, per leggere meglio le icone",
+        "none": "nessuna",
+        "on_screen": "Così sul tuo schermo, {w} × {h}",
+        "not_yet": "Il desktop vero cambia solo quando premi «Imposta come sfondo».",
+        "to_collection": "Raccolta",
+        "in_collection": "In raccolta",
+        "download": "Scarica",
+        "page": "Pagina",
+        "downloading": "Scarico l'immagine…",
+        "done": "Sfondo impostato.",
+        "failed": "Non riesco a scaricare l'immagine: {error}",
+        "exported": "Salvata in {folder}.",
+        "collection_empty": "La raccolta è vuota",
+        "collection_empty_body": "Gli sfondi che aggiungi alla raccolta dalla loro anteprima "
+                                 "compaiono qui, pronti da rimettere, anche senza rete.",
+        "auto_title": "Cambia lo sfondo da solo",
+        "auto_sub": "Uno sfondo nuovo, senza aprire l'app",
+        "auto_from": "Da dove",
+        "auto_daily": "Foto del giorno",
+        "auto_daily_sub": "Quella scelta ogni giorno dalle sorgenti attive",
+        "auto_collection": "La mia raccolta",
+        "auto_collection_sub": "Gli sfondi che hai salvato, a rotazione",
+        "auto_search": "Una ricerca salvata",
+        "auto_search_sub": "Ogni volta uno sfondo nuovo che le corrisponde",
+        "auto_no_search": "nessuna salvata",
+        "auto_when": "Quando",
+        "auto_every": "Cambia",
+        "every_hourly": "Ogni ora", "every_daily": "Ogni giorno",
+        "every_weekly": "Ogni settimana", "every_login": "A ogni accesso",
+        "auto_metered": "Non scaricare con le reti a consumo",
+        "auto_metered_sub": "In quel caso resta lo sfondo di prima",
+        "auto_now": "Cambia adesso",
+        "auto_pair_title": "Giorno e notte",
+        "auto_pair": "Uno sfondo per lo stile chiaro, uno per lo scuro",
+        "auto_pair_sub": "Luminoso di giorno, scuro di sera: l'app li sceglie in coppia",
+        "auto_light": "Ora, con lo stile chiaro",
+        "auto_dark": "Ora, con lo stile scuro",
+        "auto_error": "Non riesco a impostare il cambio automatico: {error}",
+        "ready": "Pronte all'uso",
+        "ready_sub": "Non serve registrarsi.",
+        "src_openverse": "Foto e illustrazioni Creative Commons o di pubblico dominio: "
+                         "Flickr, StockSnap e altri",
+        "src_artic": "Dipinti e stampe in pubblico dominio (CC0), ad alta risoluzione",
+        "src_cleveland": "Opere Open Access, in pubblico dominio (CC0)",
+        "src_nasa": "La Terra, i pianeti e le nebulose, dall'archivio di immagini della NASA",
+        "src_wallhaven": "Sfondi degli utenti, a misura di schermo. Licenze non dichiarate: "
+                         "solo uso personale",
+        "src_pixabay": "Foto e illustrazioni, con filtri per colore",
+        "with_key": "Con una tua chiave",
+        "with_key_sub": "La chiave è gratuita: il servizio ne dà una a ogni account.",
+        "get_key": "Ottieni una chiave",
+        "api_key": "Chiave API",
+        "key_saved": "Chiave salvata.",
+        "unavailable": "Non disponibili",
+        "unavailable_sub": "Le condizioni d'uso delle loro API vietano le app per sfondi.",
+        "read_terms": "Leggi le condizioni",
+    },
+}
+
+CSS = """
+.wp-tile { padding: 0; border-radius: 12px; background: none; box-shadow: none;
+           outline-offset: 2px; }
+.wp-tile:hover { outline: 3px solid @accent_color; }
+.wp-scrim { border-radius: 12px;
+            background-image: linear-gradient(to top, alpha(black, 0.8), alpha(black, 0) 62%); }
+.wp-on-image { color: white; }
+.wp-hero-title { font-size: 1.7em; font-weight: 800; }
+.wp-badge { background-color: alpha(black, 0.62); color: white; border-radius: 9999px;
+            padding: 5px 12px; font-weight: 600; font-size: 0.87em; }
+.wp-osd { background-color: alpha(#3c3c40, 0.92); color: white; }
+.wp-chip { border-radius: 9999px; padding: 2px 12px; min-height: 26px; font-weight: 600;
+           font-size: 0.87em; }
+.wp-pill { background-color: alpha(currentColor, 0.1); border-radius: 9999px;
+           padding: 4px 12px; font-size: 0.87em; }
+.wp-pill.free { background-color: alpha(@success_bg_color, 0.3); font-weight: 600; }
+.wp-swatch { min-width: 26px; min-height: 26px; padding: 0; border-radius: 9999px;
+             box-shadow: none; }
+.wp-swatch:checked { box-shadow: 0 0 0 2px @window_bg_color, 0 0 0 4px @window_fg_color; }
+.wp-swatch.any { box-shadow: inset 0 0 0 2px alpha(currentColor, 0.5); background: none; }
+.wp-swatch.any:checked { box-shadow: inset 0 0 0 2px @window_fg_color; }
+.wp-aside { background-color: @sidebar_bg_color; }
+.wp-heading { font-weight: 700; font-size: 0.87em; opacity: 0.7; }
+""" + "".join(
+    f".wp-swatch.c-{name}, .wp-swatch.c-{name}:hover, .wp-swatch.c-{name}:checked "
+    f"{{ background: {color}; }}\n"
+    for name, color in {**palette.COLORS, **palette.ACCENTS}.items())
+
+
+def t(key, /, **kw):
+    lang = os.environ.get("LANG", "")[:2]
+    return STRINGS.get(lang, STRINGS["en"]).get(key, STRINGS["en"][key]).format(**kw)
+
+
+def in_thread(work, done):
+    """work() in a thread, then done(result, error) in the main loop."""
+    def run():
+        try:
+            result, error = work(), None
+        except Exception as e:  # shown to the user
+            result, error = None, getattr(e, "message", None) or str(e) or type(e).__name__
+        GLib.idle_add(lambda: done(result, error) and False)
+    threading.Thread(target=run, daemon=True).start()
+
+
+# Thumbnails come a few at a time, and those already seen stay in memory
+POOL = ThreadPoolExecutor(max_workers=6)
+LOADED = {}
+
+
+def load_image(where, done, fallback=None, max_size=None):
+    """An image as done(texture, pixels): a thumbnail's URL, or a file, read
+    no larger than max_size (width, height). The pixels are palette.py's
+    sample of it. done(None, None) when it doesn't load."""
+    if where in LOADED:
+        done(*LOADED[where])
+        return
+
+    def run():
+        try:
+            if where.startswith("/"):
+                texture = desktop.texture_from_file(where, *(max_size or (640, 640)))
+            else:
+                texture = desktop.texture(sources.thumbnail(where))
+            pixels = desktop.pixels(texture)
+        except Exception:  # not an image, no network, a quota
+            GLib.idle_add(lambda: failed() and False)
+            return
+        GLib.idle_add(lambda: loaded(texture, pixels) and False)
+
+    def loaded(texture, pixels):
+        if len(LOADED) > 400:
+            LOADED.clear()
+        LOADED[where] = (texture, pixels)
+        done(texture, pixels)
+
+    def failed():
+        if fallback:
+            load_image(fallback, done)
+        else:
+            done(None, None)
+    POOL.submit(run)
+
+
+def thumb_of(item):
+    """Where an item's thumbnail loads from: the collection's copy when there is one."""
+    saved = store.thumb_path(item)
+    return saved if os.path.exists(saved) else item.thumb
+
+
+def thumb_fallback(item):
+    # Openverse's thumbnails have a daily quota of their own: past it, the image itself
+    return item.full if item.source == "openverse" else None
+
+
+def license_label(item):
+    if item.license in ("cc0", "pixabay"):
+        return {"cc0": "CC0", "pixabay": "Pixabay"}[item.license]
+    if item.license == "pdm":
+        return t("public_domain")
+    return "CC " + item.license.upper() if item.license else t("license_unknown")
+
+
+def open_uri(window, uri):
+    def done(launcher, result):
+        try:
+            launcher.launch_finish(result)
+        except GLib.Error:
+            pass
+    Gtk.UriLauncher.new(uri).launch(window, None, done)
+
+
+# --- drawing ---------------------------------------------------------------------
+
+def _rect(x, y, width, height):
+    return Graphene.Rect().init(x, y, width, height)
+
+
+def _rounded(x, y, width, height, radius):
+    rounded = Gsk.RoundedRect()
+    rounded.init_from_rect(_rect(x, y, width, height), radius)
+    return rounded
+
+
+def _rgba(color, alpha=1.0):
+    rgba = Gdk.RGBA()
+    rgba.parse(color)
+    rgba.alpha = alpha
+    return rgba
+
+
+def _fill(snapshot, color, x, y, width, height, radius=0):
+    if radius:
+        snapshot.push_rounded_clip(_rounded(x, y, width, height, radius))
+    snapshot.append_color(color, _rect(x, y, width, height))
+    if radius:
+        snapshot.pop()
+
+
+def cover(texture, width, height, focus=(0.5, 0.5), bleed=0):
+    """Where a texture is drawn to fill width x height, cropped: `focus` (0-1
+    each way) is the part that stays in view, `bleed` how far it goes past
+    the edges (a blur fades there)."""
+    scale = max((width + 2 * bleed) / texture.get_width(),
+                (height + 2 * bleed) / texture.get_height())
+    w, h = texture.get_width() * scale, texture.get_height() * scale
+    return _rect(-bleed + (width + 2 * bleed - w) * focus[0],
+                 -bleed + (height + 2 * bleed - h) * focus[1], w, h)
+
+
+def compose(snapshot, texture, width, height, look, unit=1.0):
+    """Draws a wallpaper as the preview shows it and as it's set: `look` is
+    the Preview page's (mode, focus, blur, darken, natural size), `unit` the
+    size of a screen pixel here (1 when rendering the image that's set)."""
+    box = _rect(0, 0, width, height)
+    scaling = Gsk.ScalingFilter.TRILINEAR
+    radius = look["blur"] * width * 0.02
+    snapshot.push_clip(box)
+    if look["mode"] == "zoom":
+        where = cover(texture, width, height, look["focus"], 2 * radius)
+    else:
+        # Around an image that doesn't fill the screen: itself, blurred and dimmed
+        snapshot.push_blur(width * 0.03)
+        snapshot.append_scaled_texture(texture, scaling,
+                                       cover(texture, width, height, bleed=width * 0.06))
+        snapshot.pop()
+        snapshot.append_color(_rgba("#000000", 0.35), box)
+        ratio = texture.get_width() / texture.get_height()
+        w = min(width, height * ratio)
+        if look["mode"] == "center":  # its own pixels, when they're fewer than the screen's
+            w = min(w, look["natural"][0] * unit)
+        where = _rect((width - w) / 2, (height - w / ratio) / 2, w, w / ratio)
+    if radius:
+        snapshot.push_blur(radius)
+    snapshot.append_scaled_texture(texture, scaling, where)
+    if radius:
+        snapshot.pop()
+    if look["darken"]:
+        snapshot.append_color(_rgba("#000000", look["darken"]), box)
+    snapshot.pop()
+
+
+class Thumb(Gtk.Widget):
+    """A picture that fills its box, cropped, with rounded corners: as tall as
+    `height`, or as its width asks for at `ratio`."""
+
+    def __init__(self, ratio=1.6, width=250, height=0, radius=12, **kwargs):
+        super().__init__(**kwargs)
+        self.ratio, self.width, self.height, self.radius = ratio, width, height, radius
+        self.texture = None
+
+    def set_texture(self, texture):
+        self.texture = texture
+        self.queue_draw()
+
+    def do_get_request_mode(self):
+        return (Gtk.SizeRequestMode.CONSTANT_SIZE if self.height
+                else Gtk.SizeRequestMode.HEIGHT_FOR_WIDTH)
+
+    def do_measure(self, orientation, for_size):
+        if orientation == Gtk.Orientation.HORIZONTAL:
+            return min(160, self.width), self.width, -1, -1
+        height = self.height or round((for_size if for_size > 0 else self.width) / self.ratio)
+        return height, height, -1, -1
+
+    def do_snapshot(self, snapshot):
+        width, height = self.get_width(), self.get_height()
+        snapshot.push_rounded_clip(_rounded(0, 0, width, height, self.radius))
+        if self.texture:
+            snapshot.append_scaled_texture(self.texture, Gsk.ScalingFilter.TRILINEAR,
+                                           cover(self.texture, width, height))
+        else:
+            snapshot.append_color(_rgba("#808080", 0.18), _rect(0, 0, width, height))
+        snapshot.pop()
+
+
+class Tile(Gtk.Button):
+    """A picture to click, with a title (and a line under it) on it."""
+
+    def __init__(self, on_click, title="", subtitle="", **thumb):
+        super().__init__()
+        self.add_css_class("wp-tile")
+        self.thumb = Thumb(**thumb)
+        overlay = Gtk.Overlay(child=self.thumb)
+        if title:
+            overlay.add_overlay(Gtk.Box(css_classes=["wp-scrim"], can_target=False))
+            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.END,
+                           margin_start=12, margin_end=12, margin_bottom=9, can_target=False)
+            for line, classes in ((title, ["wp-on-image", "heading"]),
+                                  (subtitle, ["wp-on-image", "caption"])):
+                if line:
+                    text.append(Gtk.Label(label=line, xalign=0, css_classes=classes,
+                                          ellipsize=Pango.EllipsizeMode.END))
+            overlay.add_overlay(text)
+        self.set_child(overlay)
+        self.connect("clicked", lambda *_: on_click())
+
+    def load(self, where, fallback=None):
+        load_image(where, lambda texture, _pixels: self.thumb.set_texture(texture), fallback)
+
+
+class Swatches(Gtk.Widget):
+    """An image's main colors, side by side."""
+
+    def __init__(self):
+        super().__init__(height_request=34, hexpand=True)
+        self.colors = []
+
+    def set_colors(self, colors):
+        self.colors = colors
+        self.queue_draw()
+
+    def do_snapshot(self, snapshot):
+        gap, n = 8, max(1, len(self.colors))
+        width = (self.get_width() - gap * (n - 1)) / n
+        for i, color in enumerate(self.colors):
+            _fill(snapshot, _rgba(color), i * (width + gap), 0, width, self.get_height(), 9)
+
+
+class Desk(Gtk.Widget):
+    """The Preview page's small desktop: the wallpaper as compose() draws it,
+    under a top bar, the dock and a window in the style being tried."""
+    DOCK = ("#8a8a8f", "#1c1c1f", "#26385e", "#f6f5f4", "#e95420")
+
+    def __init__(self, screen, on_drag):
+        super().__init__(hexpand=True, cursor=Gdk.Cursor.new_from_name("grab"))
+        self.screen, self.on_drag = screen, on_drag
+        self.texture = None
+        self.look = {"mode": "zoom", "focus": (0.5, 0.5), "blur": 0.0, "darken": 0.0,
+                     "natural": screen}
+        self.style = "dark"
+        drag = Gtk.GestureDrag()
+        drag.connect("drag-begin", lambda *_: setattr(self, "_from", self.look["focus"]))
+        drag.connect("drag-update", self._dragged)
+        self.add_controller(drag)
+
+    def update(self, **changes):
+        for key, value in changes.items():
+            if key in self.look:
+                self.look[key] = value
+            else:
+                setattr(self, key, value)
+        self.queue_draw()
+
+    def _dragged(self, _gesture, dx, dy):
+        if not self.texture or self.look["mode"] != "zoom":
+            return
+        width, height = self.get_width(), self.get_height()
+        where = cover(self.texture, width, height)
+        slack = (where.get_width() - width, where.get_height() - height)
+        self.look["focus"] = tuple(
+            min(1.0, max(0.0, start - moved / room)) if room > 1 else 0.5
+            for start, moved, room in zip(self._from, (dx, dy), slack))
+        self.queue_draw()
+        self.on_drag()
+
+    def do_get_request_mode(self):
+        return Gtk.SizeRequestMode.HEIGHT_FOR_WIDTH
+
+    def do_measure(self, orientation, for_size):
+        if orientation == Gtk.Orientation.HORIZONTAL:
+            return 320, 780, -1, -1
+        height = round((for_size if for_size > 0 else 780) * self.screen[1] / self.screen[0])
+        return height, height, -1, -1
+
+    def _text(self, snapshot, text, size, x, y, color="#ffffff", align=0.0):
+        layout = self.create_pango_layout(text)
+        font = Pango.FontDescription()
+        font.set_weight(Pango.Weight.BOLD)
+        font.set_absolute_size(size * Pango.SCALE)
+        layout.set_font_description(font)
+        width, height = layout.get_pixel_size()
+        snapshot.save()
+        snapshot.translate(Graphene.Point().init(x - width * align, y - height / 2))
+        snapshot.append_layout(layout, _rgba(color))
+        snapshot.restore()
+        return width
+
+    def do_snapshot(self, snapshot):
+        width, height = self.get_width(), self.get_height()
+        snapshot.push_rounded_clip(_rounded(0, 0, width, height, 12))
+        if self.texture:
+            compose(snapshot, self.texture, width, height, self.look, width / self.screen[0])
+        else:
+            snapshot.append_color(_rgba("#808080", 0.18), _rect(0, 0, width, height))
+
+        # The top bar and its clock
+        bar = max(14, height * 0.045)
+        _fill(snapshot, _rgba("#000000"), 0, 0, width, bar)
+        _fill(snapshot, _rgba("#ffffff"), bar * 0.5, bar * 0.36, bar, bar * 0.28, bar * 0.14)
+        clock = GLib.DateTime.new_now_local().format("%a %-e %b  %H:%M")
+        self._text(snapshot, clock, bar * 0.5, width / 2, bar / 2, align=0.5)
+        for i in range(3):
+            _fill(snapshot, _rgba("#ffffff", 0.85), width - bar * (0.9 + i * 0.6), bar * 0.32,
+                  bar * 0.36, bar * 0.36, bar * 0.1)
+        # The dock
+        dock = height * 0.095
+        _fill(snapshot, _rgba("#141416", 0.72), 0, bar, dock, height - bar)
+        icon = dock * 0.64
+        for i, color in enumerate(self.DOCK):
+            _fill(snapshot, _rgba(color), (dock - icon) / 2,
+                  bar + dock * 0.2 + i * (icon + dock * 0.18), icon, icon, icon * 0.26)
+        # A window in the style being tried
+        light = self.style == "light"
+        w, h = width * 0.3, height * 0.4
+        x, y = width * 0.62, height * 0.32
+        window = _rounded(x, y, w, h, 9)
+        snapshot.append_outset_shadow(window, _rgba("#000000", 0.4), 0, 5, 0, 16)
+        snapshot.push_rounded_clip(window)
+        snapshot.append_color(_rgba("#fafafb" if light else "#222226"), _rect(x, y, w, h))
+        snapshot.append_color(_rgba("#ebebed" if light else "#2e2e32"), _rect(x, y, w, h * 0.16))
+        ink = "#000000" if light else "#ffffff"
+        for i, share in enumerate((0.7, 0.5, 0.62)):
+            _fill(snapshot, _rgba(ink, 0.16), x + w * 0.08, y + h * (0.3 + i * 0.16),
+                  w * share, h * 0.07, h * 0.035)
+        snapshot.pop()
+        # What it is
+        size = max(9, height * 0.026)
+        label = t("on_screen", w=self.screen[0], h=self.screen[1])
+        layout = self.create_pango_layout(label)
+        font = Pango.FontDescription()
+        font.set_weight(Pango.Weight.BOLD)
+        font.set_absolute_size(size * Pango.SCALE)
+        layout.set_font_description(font)
+        text_width = layout.get_pixel_size()[0]
+        _fill(snapshot, _rgba("#000000", 0.7), width - text_width - size * 2.6,
+              height - size * 3, text_width + size * 1.6, size * 2, size)
+        self._text(snapshot, label, size, width - size * 1.8, height - size * 2, align=1.0)
+        snapshot.pop()
+
+
+# --- small pieces ------------------------------------------------------------------
+
+def heading(text, big=False):
+    return Gtk.Label(label=text, xalign=0, css_classes=["heading"] if big else ["wp-heading"])
+
+
+def switch_line(title, subtitle, active, changed):
+    """A title, a line under it and a switch: (the box, the switch)."""
+    text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+    text.append(Gtk.Label(label=title, xalign=0, wrap=True))
+    text.append(Gtk.Label(label=subtitle, xalign=0, wrap=True,
+                          css_classes=["caption", "dim-label"]))
+    switch = Gtk.Switch(active=active, valign=Gtk.Align.CENTER)
+    switch.connect("notify::active", lambda *_: changed(switch.get_active()))
+    box = Gtk.Box(spacing=12)
+    box.append(text)
+    box.append(switch)
+    return box, switch
+
+
+def waiting(text):
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                  halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, vexpand=True)
+    box.append(livespinner.Spinner(size=32))
+    box.append(Gtk.Label(label=text, css_classes=["dim-label"]))
+    return box
+
+
+def grid():
+    return Gtk.FlowBox(homogeneous=True, column_spacing=14, row_spacing=14,
+                       min_children_per_line=2, max_children_per_line=6,
+                       selection_mode=Gtk.SelectionMode.NONE, valign=Gtk.Align.START)
+
+
+def add_to_grid(flow, widget):
+    flow.append(widget)
+    # The tile takes the keyboard focus, not the cell around it
+    widget.get_parent().set_focusable(False)
+
+
+# --- Discover ----------------------------------------------------------------------
+
+class Discover(Gtk.ScrolledWindow):
+    def __init__(self, win):
+        super().__init__(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.win = win
+        self.today = None
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=22, margin_top=20,
+                       margin_bottom=24, margin_start=32, margin_end=32)
+        self.set_child(Adw.Clamp(maximum_size=1180, child=page))
+
+        self.entry = Gtk.SearchEntry(placeholder_text=t("search_hint"), width_request=560)
+        self.entry.connect("activate", lambda *_: self._search())
+        filters = Gtk.Button(label=t("filters"))
+        filters.connect("clicked", lambda *_: self._search())
+        top = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
+        top.append(self.entry)
+        top.append(filters)
+        page.append(top)
+
+        # The photo of the day
+        self.hero = Thumb(height=310, width=600)
+        self.hero_title = Gtk.Label(xalign=0, wrap=True, lines=2,
+                                    ellipsize=Pango.EllipsizeMode.END,
+                                    css_classes=["wp-on-image", "wp-hero-title"])
+        self.hero_credit = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END,
+                                     css_classes=["wp-on-image"])
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, hexpand=True,
+                       valign=Gtk.Align.END)
+        text.append(self.hero_title)
+        text.append(self.hero_credit)
+        preview = Gtk.Button(label=t("preview"), css_classes=["pill", "wp-osd"],
+                             valign=Gtk.Align.END)
+        preview.connect("clicked", lambda *_: self.today and win.preview(self.today))
+        self.hero_set = Gtk.Button(label=t("set"), css_classes=["pill", "suggested-action"],
+                                   valign=Gtk.Align.END)
+        self.hero_set.connect("clicked", lambda *_: self.today and win.set_now(self.today))
+        bottom = Gtk.Box(spacing=8, valign=Gtk.Align.END, margin_start=24, margin_end=24,
+                         margin_bottom=20)
+        for widget in (text, preview, self.hero_set):
+            bottom.append(widget)
+        day = GLib.DateTime.new_now_local().format("%A %-e %B")
+        badge = Gtk.Label(label=t("daily", date=day), css_classes=["wp-badge"],
+                          halign=Gtk.Align.START, valign=Gtk.Align.START,
+                          margin_start=20, margin_top=18)
+        self.hero_box = Gtk.Overlay(child=self.hero)
+        self.hero_box.add_overlay(Gtk.Box(css_classes=["wp-scrim"], can_target=False))
+        self.hero_box.add_overlay(badge)
+        self.hero_box.add_overlay(bottom)
+        page.append(self.hero_box)
+
+        # The moods
+        section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        section.append(heading(t("moods"), big=True))
+        row = Gtk.Box(spacing=12, homogeneous=True)
+        self.moods = {}
+        for key, query in sources.MOODS.items():
+            tile = Tile(lambda query=query: win.search(copy.deepcopy(query)),
+                        t("mood_" + key), height=100, width=120)
+            self.moods[key] = tile
+            row.append(tile)
+        section.append(row)
+        page.append(section)
+
+        # The museums
+        section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        title = Gtk.Box()
+        title.append(heading(t("museums"), big=True))
+        see_all = Gtk.Button(label=t("see_all"), css_classes=["flat"], hexpand=True,
+                             halign=Gtk.Align.END)
+        see_all.connect("clicked", lambda *_: win.search(
+            Query("", ["painting"], free=True, sources=["artic", "cleveland"])))
+        title.append(see_all)
+        section.append(title)
+        self.museums = Gtk.Box(spacing=12, homogeneous=True)
+        section.append(self.museums)
+        page.append(section)
+        self.load()
+
+    def _search(self):
+        self.win.search(Query(self.entry.get_text().strip()))
+
+    def load(self):
+        config = self.win.config
+        in_thread(lambda: sources.daily(config), self._daily)
+        for key, tile in self.moods.items():
+            in_thread(lambda key=key: sources.mood_cover(key, config),
+                      lambda item, _error, tile=tile:
+                      item and tile.load(item.thumb, thumb_fallback(item)))
+        in_thread(lambda: sources.highlights(config), self._museums)
+
+    def _daily(self, item, _error):
+        self.today = item
+        self.hero_box.set_visible(bool(item))
+        if not item:
+            return
+        self.hero_title.set_label(item.title)
+        self.hero_credit.set_label(" · ".join(filter(None, (
+            item.creator, sources.BY_ID[item.source].name, license_label(item)))))
+        # The thumbnail first, then the image itself: it's a large picture
+        load_image(item.thumb, lambda texture, _p: texture and not self.hero.texture
+                   and self.hero.set_texture(texture), fallback=thumb_fallback(item))
+
+        def sharp(path, error):
+            if not error:
+                load_image(path, lambda texture, _p: texture and self.hero.set_texture(texture),
+                           max_size=(1600, 1600))
+        in_thread(lambda: store.download(item), sharp)
+
+    def _museums(self, items, _error):
+        for item in items or []:
+            tile = Tile(lambda item=item: self.win.preview(item), item.title,
+                        " · ".join(filter(None, (item.creator,
+                                                 sources.BY_ID[item.source].name))),
+                        height=150, width=200)
+            tile.load(item.thumb)
+            self.museums.append(tile)
+
+
+# --- Search ------------------------------------------------------------------------
+
+class Search(Adw.NavigationPage):
+    def __init__(self, win, query):
+        super().__init__(title=t("search"))
+        self.win, self.query = win, query
+        self.generation = self.page = self.pending = self.more = 0
+        self.loading = self.exhausted = False
+        self.seen = set()
+
+        self.entry = Gtk.SearchEntry(placeholder_text=t("search_hint"), width_request=440,
+                                     text=query.text)
+        self.entry.connect("activate", lambda *_: self.search())
+        header = Adw.HeaderBar(title_widget=self.entry)
+
+        self.chips = Gtk.Box(spacing=8)
+        self.count = Gtk.Label(css_classes=["caption", "dim-label"], hexpand=True,
+                               halign=Gtk.Align.END)
+        top = Gtk.Box(spacing=8)
+        top.append(self.chips)
+        top.append(self.count)
+        self.flow = grid()
+        self.scrolled = Gtk.ScrolledWindow(child=self.flow, vexpand=True,
+                                           hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.scrolled.connect("edge-reached", self._edge)
+        self.empty = Adw.StatusPage(icon_name="system-search-symbolic")
+        self.stack = Gtk.Stack(vexpand=True)
+        self.stack.add_named(waiting(t("loading")), "loading")
+        self.stack.add_named(self.scrolled, "results")
+        self.stack.add_named(self.empty, "empty")
+        results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, hexpand=True,
+                          margin_top=18, margin_start=24, margin_end=24)
+        results.append(top)
+        results.append(self.stack)
+
+        body = Gtk.Box()
+        body.append(self._filters())
+        body.append(results)
+        view = Adw.ToolbarView(content=body)
+        view.add_top_bar(header)
+        self.set_child(view)
+        self.search()
+
+    # The filters, on the left
+
+    def _filters(self):
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, margin_top=18,
+                       margin_bottom=18, margin_start=18, margin_end=18)
+        query, screen = self.query, self.win.config["screen"]
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.append(heading(t("sources")))
+        self.source_checks = {}
+        # The sources the user wants: a check shows it only while its source can answer
+        self.wanted = {source.id: not query.sources or source.id in query.sources
+                       for source in sources.SOURCES}
+        self.reading = False
+        for source in sources.SOURCES:
+            check = Gtk.CheckButton(label=source.name)
+            check.connect("toggled", self._source_toggled, source.id)
+            why = Gtk.Label(css_classes=["caption", "dim-label"], hexpand=True,
+                            halign=Gtk.Align.END)
+            row = Gtk.Box(spacing=6)
+            row.append(check)
+            row.append(why)
+            box.append(row)
+            self.source_checks[source.id] = (check, why)
+        side.append(box)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=9)
+        box.append(heading(t("type")))
+        wrap = Adw.WrapBox(child_spacing=6, line_spacing=6)
+        self.kind_toggles = {}
+        for kind in sources.KINDS:
+            toggle = Gtk.ToggleButton(label=t("kind_" + kind), active=kind in query.kinds,
+                                      css_classes=["wp-chip"])
+            toggle.connect("toggled", lambda *_: self.search())
+            self.kind_toggles[kind] = toggle
+            wrap.append(toggle)
+        box.append(wrap)
+        side.append(box)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=9)
+        title = Gtk.Box()
+        title.append(heading(t("color")))
+        self.color_name = Gtk.Label(css_classes=["caption"], hexpand=True, halign=Gtk.Align.END)
+        title.append(self.color_name)
+        box.append(title)
+        wrap = Adw.WrapBox(child_spacing=8, line_spacing=8)
+        self.color_toggles = {}
+        for name in ("", *palette.COLORS):
+            toggle = Gtk.ToggleButton(
+                active=name == query.color, tooltip_text=t("color_" + (name or "any")),
+                css_classes=["wp-swatch", "c-" + name if name else "any"])
+            if name:
+                toggle.set_group(self.color_toggles[""])
+            toggle.connect("toggled", lambda toggle: toggle.get_active() and self.search())
+            self.color_toggles[name] = toggle
+            wrap.append(toggle)
+        pick = Gtk.Button(icon_name="list-add-symbolic", tooltip_text=t("color_pick"),
+                          css_classes=["wp-swatch", "flat"])
+        pick.connect("clicked", lambda *_: self._pick_color())
+        wrap.append(pick)
+        box.append(wrap)
+        side.append(box)
+
+        row, self.fit = switch_line(t("fit"), t("fit_sub", w=screen[0], h=screen[1]),
+                                    query.fit, lambda _on: self.search())
+        side.append(row)
+        row, self.free = switch_line(t("free"), t("free_sub"), query.free,
+                                     lambda _on: self.search())
+        side.append(row)
+
+        self.sort = Gtk.DropDown.new_from_strings([t("sort_" + s) for s in sources.SORTS])
+        self.sort.set_selected(sources.SORTS.index(query.sort))
+        self.sort.connect("notify::selected", lambda *_: self.search())
+        row = Gtk.Box(spacing=12)
+        row.append(Gtk.Label(label=t("sort"), xalign=0, hexpand=True))
+        row.append(self.sort)
+        side.append(row)
+
+        save = Gtk.Button(halign=Gtk.Align.START, css_classes=["flat"],
+                          child=Adw.ButtonContent(icon_name="bookmark-new-symbolic",
+                                                  label=t("save_search")))
+        save.connect("clicked", lambda *_: self._save())
+        side.append(save)
+        return Gtk.ScrolledWindow(child=side, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                  width_request=290, hexpand=False, css_classes=["wp-aside"])
+
+    def _source_toggled(self, check, source):
+        if not self.reading:
+            self.wanted[source] = check.get_active()
+            self.search()
+
+    def _pick_color(self):
+        def done(dialog, result):
+            try:
+                color = dialog.choose_rgba_finish(result)
+            except GLib.Error:
+                return
+            pixel = tuple(round(c * 255) for c in (color.red, color.green, color.blue))
+            self.color_toggles[palette.name(pixel)].set_active(True)
+        Gtk.ColorDialog(with_alpha=False).choose_rgba(self.win, None, None, done)
+
+    def _save(self):
+        entry = Gtk.Entry(text=self.query.text or t("color_" + (self.query.color or "any")),
+                          placeholder_text=t("save_search_name"), activates_default=True)
+        dialog = Adw.AlertDialog(heading=t("save_search"), extra_child=entry,
+                                 default_response="save", close_response="cancel")
+        dialog.add_response("cancel", t("cancel"))
+        dialog.add_response("save", t("save"))
+        dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+
+        def response(_dialog, answer):
+            name = entry.get_text().strip()
+            if answer != "save" or not name:
+                return
+            config = self.win.config
+            config["searches"] = [s for s in config["searches"] if s["name"] != name]
+            config["searches"].append({"name": name, "query": self.query.to_dict()})
+            store.save_config(config)
+            self.win.auto.refresh()
+            self.win.toast(t("search_saved"))
+        dialog.connect("response", response)
+        dialog.present(self.win)
+
+    # The query, from the filters
+
+    def _read(self):
+        """The filters into self.query; the sources' checks follow them (a
+        source that can't answer says why)."""
+        config = self.win.config
+        query = Query(self.entry.get_text().strip(),
+                      [kind for kind, toggle in self.kind_toggles.items() if toggle.get_active()],
+                      next(name for name, toggle in self.color_toggles.items()
+                           if toggle.get_active()),
+                      self.fit.get_active(), self.free.get_active(),
+                      sources.SORTS[self.sort.get_selected()], [], tuple(config["screen"]))
+        able, checked = [], []
+        for source in sources.SOURCES:
+            check, why = self.source_checks[source.id]
+            reason = ("why_off" if not config["sources"].get(source.id, source.default)
+                      else "why_key" if source.needs_key and not config.get(source.id + "_key")
+                      else "why_license" if query.free and not source.free
+                      else "why_kind" if query.kinds and not set(query.kinds) & set(source.kinds)
+                      else "")
+            self.reading = True
+            check.set_sensitive(not reason)
+            check.set_active(self.wanted[source.id] and not reason)
+            self.reading = False
+            why.set_label(t(reason) if reason else "")
+            if not reason:
+                able.append(source.id)
+                if self.wanted[source.id]:
+                    checked.append(source.id)
+        # No list means every source: a saved search then follows the ones on later
+        query.sources = [] if checked == able else checked
+        self.asking = checked
+        self.query = query
+        self.color_name.set_label(t("color_" + query.color) if query.color else "")
+
+    def _chips(self):
+        while child := self.chips.get_first_child():
+            self.chips.remove(child)
+        query = self.query
+        chips = []
+        if query.color:
+            chips.append((t("color_" + query.color),
+                          lambda: self.color_toggles[""].set_active(True)))
+        for kind in query.kinds:
+            chips.append((t("kind_" + kind),
+                          lambda kind=kind: self.kind_toggles[kind].set_active(False)))
+        if query.fit:
+            chips.append((t("fit_chip"), lambda: self.fit.set_active(False)))
+        if query.free:
+            chips.append((t("free"), lambda: self.free.set_active(False)))
+        for label, remove in chips:
+            chip = Gtk.Button(css_classes=["wp-chip"], child=Adw.ButtonContent(
+                icon_name="window-close-symbolic", label=label))
+            chip.connect("clicked", lambda _b, remove=remove: remove())
+            self.chips.append(chip)
+        n = len(self.asking)
+        self.count.set_label(t("from_source") if n == 1 else t("from_sources", n=n))
+
+    # The search
+
+    def search(self, more=False):
+        if not more:
+            self._read()
+            self._chips()
+            self.generation += 1
+            self.page, self.more, self.exhausted = 1, 0, False
+            self.seen.clear()
+            self.flow.remove_all()
+            if not self.asking:
+                self._status("no_sources")
+                return
+            self.stack.set_visible_child_name("loading")
+        else:
+            self.page += 1
+        self.loading = True
+        generation, query, page = self.generation, self.query, self.page
+        if not query.sources:
+            query = copy.copy(query)
+            query.sources = self.asking
+        config = self.win.config
+        in_thread(lambda: sources.search_all(query, config, page),
+                  lambda result, _error: self._results(generation, query, result))
+
+    def _results(self, generation, query, result):
+        if generation != self.generation:
+            return
+        items, errors = result or ([], {})
+        if errors and self.page == 1:
+            for reason in sorted(set(errors.values())):
+                names = ", ".join(sources.BY_ID[s].name for s in errors if errors[s] == reason)
+                self.win.toast(t("err_" + reason, names=names))
+        items = [item for item in items if item.key not in self.seen]
+        if not items:
+            self.exhausted = True
+            self._settled()
+            return
+        self.pending = len(items)
+        for item in items:
+            self.seen.add(item.key)
+            load_image(item.thumb, lambda texture, pixels, item=item:
+                       self._loaded(generation, query, item, texture, pixels),
+                       fallback=thumb_fallback(item))
+
+    def _loaded(self, generation, query, item, texture, pixels):
+        if generation != self.generation:
+            return
+        self.pending -= 1
+        # A source that filters by color already did; for the others, here
+        by_color = (not query.color or sources.BY_ID[item.source].colors
+                    or query.color in palette.names(pixels or []))
+        if texture and by_color:
+            self.win.pixels[item.key] = pixels
+            self._card(item, texture)
+            self.stack.set_visible_child_name("results")
+        if not self.pending:
+            self._settled()
+
+    def _card(self, item, texture):
+        tile = Tile(lambda: self.win.preview(item))
+        tile.thumb.set_texture(texture)
+        caption = Gtk.Box(spacing=8)
+        # max_width_chars: a long caption is cut short, it doesn't widen the card
+        caption.append(Gtk.Label(
+            label=f"{sources.BY_ID[item.source].name} · {license_label(item)}", xalign=0,
+            hexpand=True, ellipsize=Pango.EllipsizeMode.END, max_width_chars=8,
+            css_classes=["caption", "dim-label"]))
+        if item.width:
+            caption.append(Gtk.Label(label=f"{item.width} × {item.height}",
+                                     css_classes=["caption", "dim-label"]))
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        card.append(tile)
+        card.append(caption)
+        add_to_grid(self.flow, card)
+
+    def _settled(self):
+        """A page is all in: is there enough to show?"""
+        self.loading = False
+        shown = self.flow.get_first_child() is not None
+        few = len(list(self.flow)) < ENOUGH
+        if few and not self.exhausted and self.more < MORE_PAGES:
+            self.more += 1
+            self.search(more=True)
+        elif not shown:
+            self._status("nothing")
+
+    def _status(self, key):
+        self.empty.set_title(t(key))
+        self.empty.set_description(t(key + "_body"))
+        self.stack.set_visible_child_name("empty")
+
+    def _edge(self, _scrolled, position):
+        if position == Gtk.PositionType.BOTTOM and not self.loading and not self.exhausted:
+            self.more = MORE_PAGES  # one page per scroll from here on
+            self.search(more=True)
+
+
+# --- Preview -----------------------------------------------------------------------
+
+class Preview(Adw.NavigationPage):
+    def __init__(self, win, item):
+        super().__init__(title=t("preview"))
+        self.win, self.item = win, item
+        self.path = None       # the downloaded image
+        self.applying = False  # "Set as Wallpaper" was pressed: set it once it's here
+        self.screen = tuple(win.config["screen"])
+        self.desk = Desk(self.screen, lambda: None)
+        self.desk.update(style=desktop.style(),
+                         natural=(item.width or self.screen[0], item.height or self.screen[1]))
+
+        # Left: the desktop and what changes the image
+        self.style = Adw.ToggleGroup(valign=Gtk.Align.CENTER)
+        self.style.add(Adw.Toggle(name="light", label=t("light"),
+                                  icon_name="weather-clear-symbolic"))
+        self.style.add(Adw.Toggle(name="dark", label=t("dark"),
+                                  icon_name="weather-clear-night-symbolic"))
+        self.style.set_active_name(desktop.style())
+        self.style.connect("notify::active-name", lambda *_: self._style())
+        self.mode = Adw.ToggleGroup(valign=Gtk.Align.CENTER)
+        for name, label in (("zoom", "fill"), ("fit", "fit_mode"), ("center", "center")):
+            self.mode.add(Adw.Toggle(name=name, label=t(label)))
+        self.mode.connect("notify::active-name", lambda *_: self._mode())
+        self.hint = Gtk.Label(label=t("drag"), xalign=0, wrap=True,
+                              css_classes=["caption", "dim-label"])
+        controls = Gtk.Box(spacing=20)
+        for widget in (self.style, self.mode, self.hint):
+            controls.append(widget)
+
+        sliders = Gtk.Box(spacing=28, homogeneous=True)
+        self.blur, self.blur_value = self._slider(sliders, t("blur"), 100)
+        self.darken, self.darken_value = self._slider(sliders, t("darken"), 60)
+
+        note = Gtk.Label(label=t("not_yet"), xalign=0, wrap=True, valign=Gtk.Align.END,
+                         vexpand=True, css_classes=["caption", "dim-label"])
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, hexpand=True,
+                       margin_top=24, margin_bottom=24, margin_start=28, margin_end=28)
+        for widget in (self.desk, controls, sliders, note):
+            left.append(widget)
+
+        body = Gtk.Box()
+        body.append(Gtk.ScrolledWindow(child=left, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                       hexpand=True))
+        body.append(self._details())
+        view = Adw.ToolbarView(content=body)
+        view.add_top_bar(Adw.HeaderBar())
+        self.set_child(view)
+        self._values()
+
+        pixels = win.pixels.get(item.key)
+        if pixels:
+            self._colors(pixels)
+        load_image(thumb_of(item), self._thumb, fallback=thumb_fallback(item))
+        in_thread(lambda: store.download(item, self._progress), self._downloaded)
+
+    def _slider(self, row, title, maximum):
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, maximum, 1)
+        scale.set_draw_value(False)
+        scale.connect("value-changed", lambda *_: self._values())
+        value = Gtk.Label(css_classes=["dim-label"], hexpand=True, halign=Gtk.Align.END)
+        top = Gtk.Box()
+        top.append(Gtk.Label(label=title, xalign=0))
+        top.append(value)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.append(top)
+        box.append(scale)
+        row.append(box)
+        return scale, value
+
+    def _details(self):
+        item = self.item
+        source = sources.BY_ID[item.source].name
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, margin_top=24,
+                       margin_bottom=22, margin_start=22, margin_end=22)
+
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        text.append(Gtk.Label(label=item.title or source, xalign=0, wrap=True, lines=3,
+                              ellipsize=Pango.EllipsizeMode.END, css_classes=["title-2"]))
+        if item.creator:
+            text.append(Gtk.Label(label=t("by", name=item.creator), xalign=0, wrap=True))
+        text.append(Gtk.Label(label=source, xalign=0, css_classes=["caption", "dim-label"]))
+        side.append(text)
+
+        pills = Adw.WrapBox(child_spacing=6, line_spacing=6)
+        license = license_label(item) + (" · " + t("license_free") if item.free else "")
+        pills.append(Gtk.Label(label=license,
+                               css_classes=["wp-pill"] + (["free"] if item.free else [])))
+        if item.width:
+            pills.append(Gtk.Label(label=f"{item.width} × {item.height}",
+                                   css_classes=["wp-pill"]))
+        side.append(pills)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=9)
+        box.append(heading(t("colors")))
+        self.swatches = Swatches()
+        box.append(self.swatches)
+        side.append(box)
+
+        # "Match the theme": the accent color, the closest one chosen
+        self.match = Adw.SwitchRow(title=t("match"), subtitle=t("match_sub"),
+                                   active=self.win.config["match_theme"])
+        self.match.connect("notify::active", lambda *_: self._match())
+        self.accents = {}
+        dots = Gtk.Box(homogeneous=True)
+        for name in palette.ACCENTS:
+            toggle = Gtk.ToggleButton(tooltip_text=t("color_" + name), halign=Gtk.Align.CENTER,
+                                      css_classes=["wp-swatch", "c-" + name])
+            if self.accents:
+                toggle.set_group(next(iter(self.accents.values())))
+            self.accents[name] = toggle
+            dots.append(toggle)
+        self.accents[desktop.accent()].set_active(True)
+        self.match_why = Gtk.Label(xalign=0, wrap=True, css_classes=["caption", "dim-label"])
+        self.match_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                                 margin_top=12, margin_bottom=14, margin_start=14,
+                                 margin_end=14)
+        self.match_box.append(dots)
+        self.match_box.append(self.match_why)
+        theme = Adw.PreferencesGroup()
+        theme.add(self.match)
+        theme.add(Adw.PreferencesRow(child=self.match_box, activatable=False))
+        side.append(theme)
+
+        self.both = Gtk.CheckButton(active=True)
+        side.append(self.both)
+
+        bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10,
+                         valign=Gtk.Align.END, vexpand=True)
+        self.progress = Gtk.ProgressBar(visible=False, text=t("downloading"), show_text=True)
+        bottom.append(self.progress)
+        self.set_button = Gtk.Button(label=t("set"), css_classes=["pill", "suggested-action"])
+        self.set_button.connect("clicked", lambda *_: self._set())
+        bottom.append(self.set_button)
+        more = Gtk.Box(spacing=8, homogeneous=True)
+        self.collect = self._action(more, "", "", self._collect)
+        self._action(more, "folder-download-symbolic", t("download"), self._export)
+        self._action(more, "web-browser-symbolic", t("page"),
+                     lambda: open_uri(self.win, item.page)).set_sensitive(bool(item.page))
+        bottom.append(more)
+        side.append(bottom)
+        self._collected()
+        self._style()
+        self._match()
+        return Gtk.ScrolledWindow(child=side, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                  width_request=344, hexpand=False, css_classes=["wp-aside"])
+
+    @staticmethod
+    def _action(row, icon, label, clicked):
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4,
+                          margin_bottom=4)
+        content.append(Gtk.Image(icon_name=icon))
+        content.append(Gtk.Label(label=label, css_classes=["caption"]))
+        button = Gtk.Button(child=content)
+        button.connect("clicked", lambda *_: clicked())
+        row.append(button)
+        return button
+
+    # What the controls change
+
+    def _values(self):
+        blur, darken = self.blur.get_value(), self.darken.get_value()
+        self.blur_value.set_label(f"{blur:.0f}%" if blur else t("none"))
+        self.darken_value.set_label(f"{darken:.0f}%" if darken else t("none"))
+        self.desk.update(blur=blur / 100, darken=darken / 100)
+
+    def _mode(self):
+        mode = self.mode.get_active_name()
+        self.desk.update(mode=mode)
+        self.desk.set_cursor(Gdk.Cursor.new_from_name("grab" if mode == "zoom" else "default"))
+        self.hint.set_visible(mode == "zoom")
+
+    def _style(self):
+        style = self.style.get_active_name()
+        self.desk.update(style=style)
+        self.both.set_label(t("also_light" if style == "dark" else "also_dark"))
+
+    def _match(self):
+        on = self.match.get_active()
+        self.match_box.set_sensitive(on)
+        if on != self.win.config["match_theme"]:
+            self.win.config["match_theme"] = on
+            store.save_config(self.win.config)
+
+    def _colors(self, pixels):
+        self.swatches.set_colors(palette.palette(pixels))
+        accent = palette.accent(pixels)
+        self.accents[accent].set_active(True)
+        self.match_why.set_label(t("match_why", color=t("color_" + accent)))
+
+    def _collected(self):
+        kept = store.in_collection(self.item)
+        content = self.collect.get_child()
+        content.get_first_child().set_from_icon_name(
+            "starred-symbolic" if kept else "non-starred-symbolic")
+        content.get_last_child().set_label(t("in_collection" if kept else "to_collection"))
+
+    def _collect(self):
+        item, keep = self.item, not store.in_collection(self.item)
+
+        def done(_result, error):
+            if error:
+                self.win.toast(t("failed", error=error))
+            self._collected()
+            self.win.collection.refresh()
+        in_thread(lambda: store.collect(item, keep), done)
+
+    def _export(self):
+        folder = os.path.join(
+            GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_PICTURES)
+            or os.path.expanduser("~"), t("app"))
+
+        def done(path, error):
+            self.win.toast(t("failed", error=error) if error else
+                           t("exported", folder=os.path.dirname(path).replace(
+                               os.path.expanduser("~"), "~")))
+        in_thread(lambda: store.export(self.item, folder), done)
+
+    # The image: the thumbnail at once, then the downloaded one
+
+    def _thumb(self, texture, pixels):
+        if texture and not self.desk.texture:
+            self.desk.update(texture=texture)
+        if pixels and self.item.key not in self.win.pixels:
+            self.win.pixels[self.item.key] = pixels
+            self._colors(pixels)
+
+    def _progress(self, fraction):
+        GLib.idle_add(lambda: self.progress.set_fraction(fraction) and False)
+
+    def _downloaded(self, path, error):
+        if error:
+            self.applying = False
+            self.progress.set_visible(False)
+            self.set_button.set_sensitive(True)
+            self.win.toast(t("failed", error=error))
+            return
+        # No larger than twice the screen: enough to zoom into, light to draw
+
+        def ready(texture, _pixels):
+            if texture:
+                self.desk.update(texture=texture)
+            self.path = path
+            if self.applying:
+                self._apply()
+        load_image(path, ready, max_size=(2 * self.screen[0], 2 * self.screen[1]))
+
+    def _set(self):
+        self.set_button.set_sensitive(False)
+        self.applying = True
+        if self.path:
+            self._apply()
+        else:
+            self.progress.set_visible(True)
+
+    def _apply(self):
+        """Sets the wallpaper: the downloaded image as it is, or one rendered
+        with the page's position, blur and darkening."""
+        look = self.desk.look
+        plain = (look["mode"] == "zoom" and look["focus"] == (0.5, 0.5)
+                 and not look["blur"] and not look["darken"])
+        path = self.path if plain else self._render()
+        style = self.style.get_active_name()
+        both = self.both.get_active()
+        desktop.set_wallpaper(path, light=both or style == "light",
+                              dark=both or style == "dark")
+        if self.match.get_active():
+            desktop.set_accent(next(name for name, toggle in self.accents.items()
+                                    if toggle.get_active()))
+        store.remember(self.item)
+        store.prune(desktop.wallpapers().values())
+        self.applying = False
+        self.progress.set_visible(False)
+        self.set_button.set_sensitive(True)
+        self.win.auto.refresh()
+        self.win.toast(t("done"))
+
+    def _render(self):
+        look = self.desk.look
+        width, height = self.screen
+        snapshot = Gtk.Snapshot()
+        compose(snapshot, self.desk.texture, width, height, look)
+        texture = self.get_native().get_renderer().render_texture(
+            snapshot.to_node(), _rect(0, 0, width, height))
+        path = store.rendered_path(self.item, tuple(sorted(look.items())))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return desktop.save(texture, path)
+
+
+# --- Collection --------------------------------------------------------------------
+
+class Collection(Gtk.Stack):
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.flow = grid()
+        self.flow.set_margin_top(24)
+        self.flow.set_margin_bottom(24)
+        self.flow.set_margin_start(32)
+        self.flow.set_margin_end(32)
+        self.add_named(Gtk.ScrolledWindow(child=self.flow,
+                                          hscrollbar_policy=Gtk.PolicyType.NEVER), "grid")
+        self.add_named(Adw.StatusPage(icon_name="starred-symbolic", title=t("collection_empty"),
+                                      description=t("collection_empty_body")), "empty")
+        self.refresh()
+
+    def refresh(self):
+        self.flow.remove_all()
+        items = store.collection()
+        for item in items:
+            tile = Tile(lambda item=item: self.win.preview(item), item.title,
+                        sources.BY_ID[item.source].name)
+            tile.load(thumb_of(item))
+            add_to_grid(self.flow, tile)
+        self.set_visible_child_name("grid" if items else "empty")
+
+
+# --- Automatic ---------------------------------------------------------------------
+
+class Automatic(Adw.PreferencesPage):
+    EVERY = ("hourly", "daily", "weekly", "login")
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.filling = True  # the rows are being set from the config, not by the user
+        auto = win.config["auto"]
+
+        self.enabled = Adw.SwitchRow(title=t("auto_title"), subtitle=t("auto_sub"),
+                                     active=auto["enabled"])
+        self.enabled.connect("notify::active", lambda *_: self._changed())
+        group = Adw.PreferencesGroup()
+        group.add(self.enabled)
+        self.add(group)
+
+        group = Adw.PreferencesGroup(title=t("auto_from"))
+        self.froms = {}
+        for key in ("daily", "collection", "search"):
+            check = Gtk.CheckButton(active=auto["from"] == key, valign=Gtk.Align.CENTER)
+            if self.froms:
+                check.set_group(self.froms["daily"])
+            check.connect("toggled", lambda check: check.get_active() and self._changed())
+            row = Adw.ActionRow(title=t("auto_" + key), subtitle=t(f"auto_{key}_sub"),
+                                activatable_widget=check)
+            row.add_prefix(check)
+            if key == "search":
+                self.searches = Gtk.DropDown(valign=Gtk.Align.CENTER)
+                self.searches.connect("notify::selected", lambda *_: self._changed())
+                self.no_search = Gtk.Label(label=t("auto_no_search"), css_classes=["dim-label"])
+                row.add_suffix(self.searches)
+                row.add_suffix(self.no_search)
+            self.froms[key] = check
+            group.add(row)
+        self.add(group)
+
+        group = Adw.PreferencesGroup(title=t("auto_when"))
+        self.every = Adw.ComboRow(
+            title=t("auto_every"),
+            model=Gtk.StringList.new([t("every_" + every) for every in self.EVERY]))
+        self.every.set_selected(self.EVERY.index(auto["every"]))
+        self.every.connect("notify::selected", lambda *_: self._changed())
+        group.add(self.every)
+        self.metered = Adw.SwitchRow(title=t("auto_metered"), subtitle=t("auto_metered_sub"),
+                                     active=auto["metered"])
+        self.metered.connect("notify::active", lambda *_: self._changed())
+        group.add(self.metered)
+        self.now = Adw.ButtonRow(title=t("auto_now"))
+        self.now.connect("activated", lambda *_: self._now())
+        group.add(self.now)
+        self.add(group)
+
+        group = Adw.PreferencesGroup(title=t("auto_pair_title"))
+        self.pair = Adw.SwitchRow(title=t("auto_pair"), subtitle=t("auto_pair_sub"),
+                                  active=auto["pair"])
+        self.pair.connect("notify::active", lambda *_: self._changed())
+        group.add(self.pair)
+        pictures = Gtk.Box(spacing=14, homogeneous=True, margin_top=14, margin_bottom=16,
+                           margin_start=16, margin_end=16)
+        self.current = {}
+        for which, icon in (("light", "weather-clear-symbolic"),
+                            ("dark", "weather-clear-night-symbolic")):
+            self.current[which] = Thumb(height=108, width=200, radius=9)
+            caption = Gtk.Box(spacing=7)
+            caption.append(Gtk.Image(icon_name=icon))
+            caption.append(Gtk.Label(label=t("auto_" + which), css_classes=["caption"]))
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            box.append(self.current[which])
+            box.append(caption)
+            pictures.append(box)
+        group.add(Adw.PreferencesRow(child=pictures, activatable=False))
+        self.add(group)
+        self.refresh()
+
+    def refresh(self):
+        """The saved searches and the wallpapers in use, as they are now."""
+        self.filling = True
+        config = self.win.config
+        names = [search["name"] for search in config["searches"]]
+        self.searches.set_model(Gtk.StringList.new(names))
+        self.searches.set_visible(bool(names))
+        self.no_search.set_visible(not names)
+        self.froms["search"].set_sensitive(bool(names))
+        if config["auto"]["search"] in names:
+            self.searches.set_selected(names.index(config["auto"]["search"]))
+        for which, path in desktop.wallpapers().items():
+            if path:
+                load_image(path, lambda texture, _p, which=which:
+                           self.current[which].set_texture(texture))
+        self.filling = False
+
+    def _changed(self):
+        if self.filling:
+            return
+        config = self.win.config
+        searches = [search["name"] for search in config["searches"]]
+        selected = self.searches.get_selected()
+        config["auto"] = {
+            "enabled": self.enabled.get_active(),
+            "from": next(key for key, check in self.froms.items() if check.get_active()),
+            "search": searches[selected] if selected < len(searches) else "",
+            "every": self.EVERY[self.every.get_selected()],
+            "metered": self.metered.get_active(),
+            "pair": self.pair.get_active(),
+        }
+        store.save_config(config)
+        auto = config["auto"]
+        error = desktop.schedule(auto["every"] if auto["enabled"] else None)
+        if error:
+            self.win.toast(t("auto_error", error=error))
+
+    def _now(self):
+        """One change right away, whether or not the schedule is on."""
+        config = copy.deepcopy(self.win.config)
+        was = config["auto"]["enabled"]
+        self.now.set_sensitive(False)
+
+        def work():
+            import subprocess
+            if not was:  # rotate does nothing while it's off
+                on = copy.deepcopy(config)
+                on["auto"]["enabled"] = True
+                store.save_config(on)
+            try:
+                return subprocess.run(["/usr/local/lib/live-wallpapers/rotate"],
+                                      capture_output=True, text=True)
+            finally:
+                if not was:
+                    store.save_config(config)
+
+        def done(result, error):
+            self.now.set_sensitive(True)
+            failed = error or (result.returncode and result.stderr.strip().splitlines()[-1:])
+            if failed:
+                self.win.toast(t("failed", error=error or failed[0]))
+            else:
+                self.win.toast(t("done"))
+            self.refresh()
+        in_thread(work, done)
+
+
+# --- Sources -----------------------------------------------------------------------
+
+class Sources(Adw.NavigationPage):
+    def __init__(self, win):
+        super().__init__(title=t("sources"))
+        self.win = win
+        config = win.config
+        page = Adw.PreferencesPage()
+
+        group = Adw.PreferencesGroup(title=t("ready"), description=t("ready_sub"))
+        for source in sources.SOURCES:
+            if not source.needs_key:
+                group.add(self._switch(source))
+        page.add(group)
+
+        group = Adw.PreferencesGroup(title=t("with_key"), description=t("with_key_sub"))
+        for source in sources.SOURCES:
+            if not source.needs_key:
+                continue
+            row = self._switch(source)
+            get = Gtk.Button(label=t("get_key"), valign=Gtk.Align.CENTER)
+            get.connect("clicked", lambda *_: open_uri(win, PIXABAY_KEY_URL))
+            row.add_suffix(get)
+            group.add(row)
+            key = Adw.PasswordEntryRow(title=t("api_key"), show_apply_button=True,
+                                       text=config.get(source.id + "_key", ""))
+            key.connect("apply", self._key, source)
+            group.add(key)
+        page.add(group)
+
+        group = Adw.PreferencesGroup(title=t("unavailable"), description=t("unavailable_sub"))
+        for name, terms in sources.UNAVAILABLE:
+            row = Adw.ActionRow(title=name, css_classes=["dim-label"])
+            read = Gtk.Button(label=t("read_terms"), valign=Gtk.Align.CENTER,
+                              css_classes=["flat"])
+            read.connect("clicked", lambda _b, terms=terms: open_uri(win, terms))
+            row.add_suffix(read)
+            group.add(row)
+        page.add(group)
+
+        view = Adw.ToolbarView(content=page)
+        view.add_top_bar(Adw.HeaderBar())
+        self.set_child(view)
+
+    def _switch(self, source):
+        config = self.win.config
+        row = Adw.SwitchRow(title=source.name, subtitle=t("src_" + source.id),
+                            active=config["sources"].get(source.id, source.default))
+
+        def changed(*_):
+            config["sources"][source.id] = row.get_active()
+            store.save_config(config)
+        row.connect("notify::active", changed)
+        return row
+
+    def _key(self, row, source):
+        self.win.config[source.id + "_key"] = row.get_text().strip()
+        store.save_config(self.win.config)
+        self.win.toast(t("key_saved"))
+
+
+# --- the window --------------------------------------------------------------------
+
+class Window(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, default_width=1180, default_height=840,
+                         title=t("app"), icon_name=APP_ID)
+        self.config = store.load_config()
+        self.pixels = {}  # item key -> its thumbnail's pixels, for the Preview page
+        self._measure()
+        threading.Thread(target=sources.sweep, daemon=True).start()
+
+        self.nav = Adw.NavigationView()
+        self.toasts = Adw.ToastOverlay(child=self.nav)
+        self.set_content(self.toasts)
+
+        self.collection = Collection(self)
+        self.auto = Automatic(self)
+        stack = Adw.ViewStack()
+        stack.add_titled_with_icon(Discover(self), "discover", t("discover"),
+                                   "find-location-symbolic")
+        stack.add_titled_with_icon(self.collection, "collection", t("collection"),
+                                   "starred-symbolic")
+        stack.add_titled_with_icon(self.auto, "automatic", t("automatic"),
+                                   "preferences-system-time-symbolic")
+        header = Adw.HeaderBar(title_widget=Adw.ViewSwitcher(
+            stack=stack, policy=Adw.ViewSwitcherPolicy.WIDE))
+        self.surprise = Gtk.Button(child=Adw.ButtonContent(
+            icon_name="media-playlist-shuffle-symbolic", label=t("surprise")))
+        self.surprise.connect("clicked", lambda *_: self._surprise())
+        header.pack_start(self.surprise)
+        srcs = Gtk.Button(icon_name="emblem-system-symbolic", tooltip_text=t("sources"))
+        srcs.connect("clicked", lambda *_: self.nav.push(Sources(self)))
+        header.pack_end(srcs)
+        view = Adw.ToolbarView(content=stack)
+        view.add_top_bar(header)
+        self.nav.add(Adw.NavigationPage(title=t("app"), child=view))
+
+    def _measure(self):
+        """The largest monitor's size in pixels, kept for rotate too."""
+        sizes = []
+        monitors = self.get_display().get_monitors()
+        for i in range(monitors.get_n_items()):
+            monitor = monitors.get_item(i)
+            geometry, scale = monitor.get_geometry(), monitor.get_scale()
+            sizes.append([round(geometry.width * scale), round(geometry.height * scale)])
+        if sizes and max(sizes, key=lambda s: s[0] * s[1]) != self.config["screen"]:
+            self.config["screen"] = max(sizes, key=lambda s: s[0] * s[1])
+            store.save_config(self.config)
+
+    def toast(self, message):
+        self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(message), timeout=5))
+
+    def search(self, query):
+        query.screen = tuple(self.config["screen"])
+        self.nav.push(Search(self, query))
+
+    def preview(self, item):
+        self.nav.push(Preview(self, item))
+
+    def set_now(self, item):
+        """The item as the wallpaper of both styles, as it is."""
+        def done(path, error):
+            if error:
+                self.toast(t("failed", error=error))
+                return
+            desktop.set_wallpaper(path)
+            pixels = self.pixels.get(item.key) or LOADED.get(item.thumb, (None, None))[1]
+            if self.config["match_theme"] and pixels:
+                desktop.set_accent(palette.accent(pixels))
+            store.remember(item)
+            store.prune(desktop.wallpapers().values())
+            self.auto.refresh()
+            self.toast(t("done"))
+        in_thread(lambda: store.download(item), done)
+
+    def _surprise(self):
+        self.surprise.set_sensitive(False)
+
+        def done(item, _error):
+            self.surprise.set_sensitive(True)
+            if item:
+                self.preview(item)
+            else:
+                self.toast(t("surprise_none"))
+        in_thread(lambda: sources.surprise(self.config), done)
+
+
+class App(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID)
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        provider = Gtk.CssProvider()
+        provider.load_from_string(CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    def do_activate(self):
+        (self.get_active_window() or Window(self)).present()
+
+
+if __name__ == "__main__":
+    sys.exit(App().run(sys.argv))

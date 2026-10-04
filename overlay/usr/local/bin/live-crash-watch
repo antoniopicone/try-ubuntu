@@ -1,0 +1,254 @@
+#!/usr/bin/python3
+"""live-crash-watch: tells the user when one of their programs crashes, and
+hands the crash to their AI agent on request.
+
+It follows the journal for systemd-coredump's messages (the MESSAGE_ID in
+systemd-coredump(8)), keeps the current user's, and shows a notification
+with "Diagnose" (live-agent-crash <pid>: the default agent, in a terminal,
+with the diagnose-crash skill) and "Mute" (live-crash-mute <program>). Only
+with an agent installed: without one there's nothing to offer.
+
+A systemd user service (live-crash-watch.service, on for every user). It
+never reads the cores itself: the agent does, when the user asks.
+
+For tests:
+  --from-file FILE   journal entries as JSON lines (journalctl -o json)
+                     instead of following the journal
+  --dry-run          print what it would notify instead
+  --no-check         skip the kernel.core_pattern check
+"""
+import argparse
+import datetime
+import html
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+COREDUMP_MESSAGE_ID = "fc2e22bc6ee647b6b90729ab34a250b1"
+CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+                          "live-ai")
+MUTE_FILE = os.path.join(CONFIG_DIR, "crash-mute")
+RATE_LIMIT_SECONDS = 60      # the same program: one notification a minute at most
+MAX_PENDING = 5              # notifications with actions waiting for a click
+
+STRINGS = {
+    "en": {
+        "title": "{name} crashed",
+        "body": "{signal} at {time} (PID {pid}).",
+        "body_notime": "{signal} (PID {pid}).",
+        "diagnose": "Diagnose",
+        "mute": "Mute",
+        "hint": " Diagnose hands it to your AI agent.",
+        "hint_cli": " To diagnose it: live-agent-crash {pid}",
+    },
+    "it": {
+        "title": "{name} si è chiuso per un errore",
+        "body": "{signal} alle {time} (PID {pid}).",
+        "body_notime": "{signal} (PID {pid}).",
+        "diagnose": "Diagnostica",
+        "mute": "Silenzia",
+        "hint": " Diagnostica lo passa al tuo agente AI.",
+        "hint_cli": " Per diagnosticarlo: live-agent-crash {pid}",
+    },
+}
+
+
+def t(key, /, **kw):
+    lang = os.environ.get("LANG", "")[:2]
+    return STRINGS.get(lang, STRINGS["en"]).get(key, STRINGS["en"][key]).format(**kw)
+
+
+def log(msg):
+    print(f"live-crash-watch: {msg}", file=sys.stderr, flush=True)
+
+
+def field(entry, name):
+    """A journal field as a string. journalctl -o json gives values that
+    aren't UTF-8 as arrays of bytes, and repeated fields as arrays."""
+    value = entry.get(name)
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        if value and all(isinstance(x, int) for x in value):
+            return bytes(value).decode("utf-8", errors="replace")
+        return str(value[-1]) if value else ""
+    return str(value)
+
+
+def clean(text, limit=80):
+    """Text the crashed program chose: no control characters, bounded."""
+    text = "".join(ch if ch.isprintable() else " " for ch in text).strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def mute_key(exe, comm):
+    """As live-crash-mute does: the executable's file name, else the comm."""
+    return os.path.basename(exe) if exe else comm
+
+
+def muted_names():
+    try:
+        with open(MUTE_FILE, encoding="utf-8") as fh:
+            return {line.strip() for line in fh if line.strip() and not line.startswith("#")}
+    except FileNotFoundError:
+        return set()
+
+
+def crash_time(entry):
+    """COREDUMP_TIMESTAMP, the moment of the crash (coredumpctl list's TIME
+    is when the dump was saved, which can be much later)."""
+    try:
+        ts = int(field(entry, "COREDUMP_TIMESTAMP")) / 1_000_000
+    except ValueError:
+        return ""
+    return datetime.datetime.fromtimestamp(ts).astimezone().strftime("%H:%M:%S")
+
+
+def has_agent():
+    return subprocess.run(["live-agent", "--has-agent"], capture_output=True).returncode == 0
+
+
+def core_pattern_ok():
+    try:
+        with open("/proc/sys/kernel/core_pattern", encoding="utf-8") as fh:
+            pattern = fh.read().strip()
+    except OSError as e:
+        log(f"can't read kernel.core_pattern: {e}")
+        return False
+    if "systemd-coredump" not in pattern:
+        log(f"cores don't go to systemd-coredump (core_pattern = {pattern!r})")
+        return False
+    return True
+
+
+class Watcher:
+    def __init__(self, dry_run):
+        self.dry_run = dry_run
+        self.uid = str(os.getuid())
+        self.last_seen = {}
+        self.pending = 0
+        self.lock = threading.Lock()
+
+    def handle(self, entry):
+        if field(entry, "MESSAGE_ID") != COREDUMP_MESSAGE_ID:
+            return
+        if field(entry, "COREDUMP_UID") != self.uid:
+            return
+        pid = field(entry, "COREDUMP_PID")
+        if not pid.isdigit():
+            return
+        exe, comm = field(entry, "COREDUMP_EXE"), field(entry, "COREDUMP_COMM")
+        key = mute_key(exe, comm)
+        if not key:
+            return
+        if key in muted_names():
+            self.report("muted", key, pid)
+            return
+        now = time.monotonic()
+        last = self.last_seen.get(key)
+        self.last_seen[key] = now
+        if last is not None and now - last < RATE_LIMIT_SECONDS:
+            self.report("rate-limited", key, pid)
+            return
+        if not self.dry_run and not has_agent():
+            return
+
+        signal = clean(field(entry, "COREDUMP_SIGNAL_NAME")
+                       or f"signal {field(entry, 'COREDUMP_SIGNAL')}", 20)
+        when = crash_time(entry)
+        summary = t("title", name=clean(key))
+        body = (t("body", signal=signal, time=when, pid=pid) if when
+                else t("body_notime", signal=signal, pid=pid))
+        if self.dry_run:
+            self.report("notify", key, pid, summary=summary, body=body, mute_arg=exe or comm)
+            return
+        with self.lock:
+            with_actions = self.pending < MAX_PENDING
+            if with_actions:
+                self.pending += 1
+        threading.Thread(target=self.notify, args=(summary, body, pid, exe or comm, with_actions),
+                         daemon=True).start()
+
+    def report(self, action, key, pid, **extra):
+        if self.dry_run:
+            parts = [f"action={action}", f"key={key}", f"pid={pid}"]
+            parts += [f"{k}={v}" for k, v in extra.items()]
+            print(" | ".join(parts), flush=True)
+
+    def notify(self, summary, body, pid, mute_arg, with_actions):
+        cmd = ["notify-send", "--app-name=AI", "--icon=dialog-warning"]
+        if with_actions:
+            cmd += [f"--action=diagnose={t('diagnose')}", f"--action=mute={t('mute')}"]
+            text = body + t("hint")
+        else:
+            text = body + t("hint_cli", pid=pid)
+        # GNOME reads a subset of markup in the body: escape it.
+        cmd += [html.escape(summary), html.escape(text)]
+        action = ""
+        try:
+            action = subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+        except OSError as e:
+            log(f"notify-send: {e}")
+        finally:
+            if with_actions:
+                with self.lock:
+                    self.pending -= 1
+        if action == "diagnose":
+            spawn(["live-agent-crash", pid])
+        elif action == "mute":
+            spawn(["live-crash-mute", mute_arg])
+
+
+def spawn(argv):
+    if shutil.which(argv[0]) is None:
+        log(f"{argv[0]} isn't on PATH")
+        return
+    subprocess.Popen(argv, start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def entries_from(stream):
+    for line in stream:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except ValueError:
+            log(f"not a journal entry, skipped: {line[:80]!r}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--from-file")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-check", action="store_true")
+    args = parser.parse_args()
+    watcher = Watcher(dry_run=args.dry_run)
+
+    if args.from_file:
+        with open(args.from_file, encoding="utf-8") as fh:
+            for entry in entries_from(fh):
+                watcher.handle(entry)
+        return 0
+    if not args.no_check and not core_pattern_ok():
+        return 0  # a clean exit: Restart=on-failure doesn't loop
+    proc = subprocess.Popen(
+        ["journalctl", "--follow", "--lines=0", "--output=json", "--quiet",
+         f"MESSAGE_ID={COREDUMP_MESSAGE_ID}"],
+        stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+    for entry in entries_from(proc.stdout):
+        try:
+            watcher.handle(entry)
+        except Exception as e:  # noqa: BLE001 - one bad entry mustn't stop the watch
+            log(f"handling an entry: {e!r}")
+    log("journalctl ended")
+    return 1  # systemd restarts it
+
+
+if __name__ == "__main__":
+    sys.exit(main())

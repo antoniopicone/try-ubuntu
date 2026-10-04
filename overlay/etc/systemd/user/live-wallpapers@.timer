@@ -1,0 +1,13 @@
+[Unit]
+Description=A new wallpaper, %i (see the Wallpapers app)
+
+[Timer]
+# %i is hourly, daily or weekly: the Wallpapers app enables the one chosen
+# there. A change missed while logged out happens at the next login.
+OnCalendar=%i
+Persistent=true
+RandomizedDelaySec=2min
+Unit=live-wallpapers.service
+
+[Install]
+WantedBy=timers.target

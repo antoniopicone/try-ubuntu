@@ -17,6 +17,9 @@ which encrypts the backups on this computer before they leave it, twice
 in the folder are opened with their recovery key. "Later" skips it all: the
 app stays in the app grid.
 
+At the end of the first run (done, or "Later") it opens the AI app
+(live-ai --first-run), the last step.
+
 When the chosen folder already has backups (an earlier install, another
 computer), it offers to restore the newest one first (restore.py): what
 comes back, counted by type, and what it replaces. Once set up it shows the
@@ -84,6 +87,7 @@ STRINGS = {
         "cancel": "Cancel",
         "back": "Back",
         "close": "Close",
+        "continue_ai": "Continue with AI",
         "samba_title": "Network Folder",
         "samba_body": "The computer or NAS that shares the folder. Without a user name you "
                       "connect as a guest.",
@@ -237,6 +241,7 @@ STRINGS = {
         "cancel": "Annulla",
         "back": "Indietro",
         "close": "Chiudi",
+        "continue_ai": "Continua con l'AI",
         "samba_title": "Cartella di rete",
         "samba_body": "Il computer o il NAS che condivide la cartella. Senza nome utente "
                       "accedi come ospite.",
@@ -377,6 +382,14 @@ STRINGS = {
 def t(key, /, **kw):
     lang = os.environ.get("LANG", "")[:2]
     return STRINGS.get(lang, STRINGS["en"]).get(key, STRINGS["en"][key]).format(**kw)
+
+
+def open_ai_first_run():
+    """The first run's last step: the AI app (live-ai), when the image has it."""
+    try:
+        Gio.Subprocess.new(["live-ai", "--first-run"], Gio.SubprocessFlags.NONE)
+    except GLib.Error:
+        pass
 
 
 def _set_up_files(config, previous):
@@ -640,6 +653,12 @@ class BackupWindow(Adw.ApplicationWindow):
     def _later(self):
         if os.path.exists(AUTOSTART):
             os.remove(AUTOSTART)
+        self._close_first_run()
+
+    def _close_first_run(self):
+        """Closes; at the first run, the AI app comes next (the last step)."""
+        if self.first_run:
+            open_ai_first_run()
         self.close()
 
     def _pick(self, provider):
@@ -1383,8 +1402,8 @@ class BackupWindow(Adw.ApplicationWindow):
         self.done_status = status = Adw.StatusPage(
             icon_name="object-select-symbolic", title=t("done_title"),
             description=t("done_body"), vexpand=True)
-        close = self._button(t("close"), suggested=True)
-        close.connect("clicked", lambda *_: self.close())
+        close = self._button(t("continue_ai") if self.first_run else t("close"), suggested=True)
+        close.connect("clicked", lambda *_: self._close_first_run())
         status.set_child(close)
         return status
 
@@ -1501,8 +1520,10 @@ class BackupApp(Adw.Application):
     def do_activate(self):
         window = self.get_active_window()
         if window is None:
-            # First run with the backups already set up: nothing to ask.
+            # First run with the backups already set up: nothing to ask,
+            # straight on to the AI app.
             if self.first_run and cloud.load_config():
+                open_ai_first_run()
                 return
             window = BackupWindow(self, self.first_run)
         window.present()
