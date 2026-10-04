@@ -185,7 +185,7 @@ last page doesn't log out: it asks to remove the USB stick and offers
 | Filesystem | btrfs with the subvolumes `@` → `/`, `@home` → `/home`, `@var` → `/var`, `@snapshots` → `/.snapshots` (flat layout, `compress=zstd:1`). **snapper** manages `/` (snapshot #1 is the image as built) and `/home` (every hour: *Previous Versions* in Files) |
 | Desktop | a minimal **GNOME 50**: Shell, Settings, the vanilla GNOME session, GDM (see [The desktop](#the-desktop)) |
 | Theme | dark style with GNOME's blue accent, Adwaita Sans, Yaru icons, and **one of Ubuntu's stock wallpapers, picked at random at each build** |
-| Apps | **ghostty** (JetBrains Mono Nerd Font, Catppuccin Mocha; OpenGL in software under QEMU's virgl, which lacks the OpenGL 4.3 it needs), with **Ptyxis** when it can't start, **Nautilus** (with *Open in Ghostty* and *Previous Versions*), **Brave Origin** (in the desktop's language and light/dark style), GNOME Software (with **Flatpak** and Flathub), Calculator, Papers (PDF), Fonts, Text Editor, Disks, Resources, Extensions, **Cloud Config** (Google Drive, OneDrive, Dropbox, Nextcloud and iCloud Drive in Files), **Cloud Backup** (hourly, end-to-end encrypted backups of your home folder with restic, and restore, to one of those clouds, Samba or SFTP), **Wallpapers** (a wallpaper from several photo services at once, with filters, a preview on the desktop and an automatic change) |
+| Apps | **ghostty** (JetBrains Mono Nerd Font, Catppuccin Mocha; OpenGL in software on the live system under QEMU's virgl, which lacks the OpenGL 4.3 it needs; once installed on a disk it uses the GPU), with **Ptyxis** when it can't start, **Nautilus** (with *Open in Ghostty* and *Previous Versions*), **Brave Origin** (in the desktop's language and light/dark style), GNOME Software (with **Flatpak** and Flathub), Calculator, Papers (PDF), Fonts, Text Editor, Disks, Resources, Extensions, **Cloud Config** (Google Drive, OneDrive, Dropbox, Nextcloud and iCloud Drive in Files), **Cloud Backup** (hourly, end-to-end encrypted backups of your home folder with restic, and restore, to one of those clouds, Samba or SFTP), **Wallpapers** (a wallpaper from several photo services at once, with filters, a preview on the desktop and an automatic change) |
 | Fonts | Adwaita Sans; Liberation, **Carlito** and **Caladea** (metric-compatible with Arial/Times New Roman/Courier New and Calibri/Cambria, so Office documents keep their layout); JetBrains Mono; **JetBrains Mono Nerd Font** (GNOME's monospace font and Ghostty's) and **Hack Nerd Font Mono** |
 | Network | NetworkManager (via netplan, as on Ubuntu Desktop) |
 | QEMU integration | sound (virtio-sound, PipeWire), the clipboard shared with the QEMU window (**spice-vdagent**), the host's shared folder (9p + **bindfs**, see [Running](#running)) |
@@ -782,17 +782,25 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
 - **Wallpapers** ([live-wallpapers](overlay/usr/local/bin/live-wallpapers),
   icon [assets/wallpapers-app.svg](assets/wallpapers-app.svg)) finds a
   wallpaper in several photo services at once and sets it. It's in the app
-  grid ("Sfondi" in Italian).
+  grid ("Sfondi" in Italian), and it's what "Change Background…" in the
+  desktop's right-click menu opens: GNOME Shell starts the app
+  `gnome-background-panel.desktop` for it, and
+  [usr/local/share/applications/gnome-background-panel.desktop](overlay/usr/local/share/applications/gnome-background-panel.desktop)
+  (first in `XDG_DATA_DIRS`) is Wallpapers' instead of Settings'. Without
+  Wallpapers installed (`TryExec`) that file is ignored and Settings' own
+  opens. Settings keeps its own Appearance panel.
   - **The services**
     ([sources.py](overlay/usr/local/lib/live-wallpapers/sources.py)), each
     one HTTP API, asked together and their results dealt like cards:
 
     | Service | Key | What it has | Its own filters |
     |---|---|---|---|
-    | [Openverse](https://openverse.org) | no (20 searches a minute, 200 a day, 1000 thumbnails a day) | Creative Commons and public-domain photos, illustrations and artworks: Flickr, StockSnap, Wikimedia Commons… | type, wide, large, license |
+    | [Openverse](https://openverse.org) | no (20 searches a minute, 200 a day, 1000 thumbnails a day) | Creative Commons and public-domain photos, illustrations and artworks: Flickr, StockSnap, Wikimedia Commons… Of Flickr, StockSnap and rawpixel it only has a preview about 1000 px wide: they're left out with "Fit my screen" and on screens over 2048 px wide | type, wide, large, license |
+| [Wikimedia Commons](https://commons.wikimedia.org/w/api.php) | no | the photos its community chose as featured or quality ones, JPEG, at least Full HD; the largest are asked scaled to the screen's width (1920 or 3840 px: its server scales to a few widths only) | order |
     | [Art Institute of Chicago](https://api.artic.edu/docs/) | no | public-domain (CC0) paintings and prints, up to 3000 px wide | type |
     | [Cleveland Museum of Art](https://openaccess-api.clevelandart.org/) | no | Open Access (CC0) paintings and prints, 3400 px | type |
     | [NASA](https://images.nasa.gov) | no | its image library | |
+| [OpenDesktop](https://api.opendesktop.org) (the KDE Store, gnome-look.org, Pling) | no | the wallpapers its users made, many about Linux and its desktops. Each says its own license, or none; a file's size is read from its name ("4K", "2560x1440"), so it can be unknown. Its download links last two days: the app asks for a fresh one when it downloads | order |
     | [Wallhaven](https://wallhaven.cc/help/api) | no (45 requests a minute) | wallpapers its users upload, screen-sized | category, color, size, ratio, order |
     | [Pixabay](https://pixabay.com/api/docs/) | the user's own, free | photos and illustrations, 1280 px without an approved key | type, color, order |
 
@@ -1139,8 +1147,11 @@ git tag v1.0.0 && git push origin v1.0.0
     them a source is skipped until the next day, with a message
   - Pixabay gives images up to 1280 px wide without an approved key, so
     "Fit my screen" leaves it out on larger screens
-  - Unsplash and Pexels can't be added (their API terms); The Met and
-    Wikimedia Commons could, and aren't yet
+  - Unsplash and Pexels can't be added (their API terms); The Met could,
+    and isn't yet
+  - OpenDesktop's licenses are the authors' own and often unstated, and a
+    file's size comes from its name: "Fit my screen" lets through the ones
+    whose size is unknown
 - apfs-fuse only reads APFS: Mac disks can't be written to.
 - AI: Claude Desktop is a beta and ChatGPT's app a preview on Linux. Gemini
   CLI isn't offered: since June 2026 it needs a paid API key or a Code

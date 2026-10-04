@@ -303,6 +303,12 @@ BRAVE_ORIGIN_DIR="$ROOTFS/etc/skel/.config/BraveSoftware/Brave-Origin" \
   sh "$OVERLAY/usr/local/bin/brave-origin-setup"
 grep -q '"first_run_finished":true' "$ROOTFS/etc/skel/.config/BraveSoftware/Brave-Origin/Local State" \
   || { echo "Brave Origin's profile in /etc/skel isn't set up" >&2; exit 1; }
+# "Change Background…" in the desktop's right-click menu starts
+# gnome-background-panel.desktop: usr/local/share/applications has one that
+# opens Wallpapers, and comes first in XDG_DATA_DIRS. It has to override
+# Settings' own, which must exist.
+[[ -f "$ROOTFS/usr/share/applications/gnome-background-panel.desktop" ]] \
+  || { echo "Settings' gnome-background-panel.desktop is gone: the right-click override has nothing to replace" >&2; exit 1; }
 in_chroot useradd -m -s /usr/bin/zsh -G sudo,video,render,input "$LIVE_USER"
 echo "$LIVE_USER:$LIVE_PASSWORD" | in_chroot chpasswd
 

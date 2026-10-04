@@ -1,7 +1,7 @@
 """store: what Wallpapers keeps on this computer.
 
-  ~/.config/live-wallpapers/config.json   the sources that are on, Pixabay's
-                                          key, the saved searches, the
+  ~/.config/live-wallpapers/config.json   the sources that are on, the API
+                                          keys, the saved searches, the
                                           automatic change, the screen's size
   ~/.local/share/live-wallpapers/
       collection.json                     the wallpapers the user saved
@@ -80,7 +80,7 @@ def load_config():
 
 def save_config(config):
     _write(CONFIG, config)
-    os.chmod(CONFIG, 0o600)  # Pixabay's key
+    os.chmod(CONFIG, 0o600)  # the API keys
 
 
 def saved_search(config, name):
@@ -139,8 +139,10 @@ def download(item, progress=None):
     if os.path.exists(path):
         return path
     os.makedirs(IMAGES, exist_ok=True)
-    request = urllib.request.Request(item.full, headers=sources.headers_for(item.full))
     try:
+        source = sources.BY_ID.get(item.source)
+        url = source.fresh(item) if source else item.full
+        request = urllib.request.Request(url, headers=sources.headers_for(url))
         with urllib.request.urlopen(request, timeout=30) as response, \
                 open(path + ".part", "wb") as f:
             total = int(response.headers.get("Content-Length") or 0)

@@ -2,13 +2,20 @@
 
   - Openverse: Creative Commons and public-domain images from Flickr,
     StockSnap, Wikimedia Commons and others. Anonymous: 20 searches a
-    minute, 200 a day, 1000 thumbnails a day
+    minute, 200 a day, 1000 thumbnails a day. Of Flickr, StockSnap and
+    rawpixel it only has a preview about 1000 pixels wide: they're left out
+    on the screens too large for it
   - Art Institute of Chicago, Cleveland Museum of Art: their public-domain
     (CC0) works, no key
   - NASA: its image library, no key
   - Wallhaven: wallpapers uploaded by its users, no key for the safe ones
     (45 requests a minute). It doesn't say whose they are or under which
     license, so it's off until the user turns it on
+  - Wikimedia Commons: the photos its community chose as featured or
+    quality ones, no key. The largest come scaled to the screen's width
+  - OpenDesktop (the KDE Store, gnome-look.org, Pling): the wallpapers its
+    users made, many about Linux and its desktops, no key. Each says its
+    own license, or none; the files' sizes are read from their names
   - Pixabay: needs the user's own (free) API key
 
 Unsplash and Pexels aren't here: their API terms forbid wallpaper apps.
@@ -20,9 +27,11 @@ cards. No GTK here: rotate (the automatic change) uses it too.
 """
 import datetime
 import hashlib
+import html
 import json
 import os
 import random
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -204,6 +213,7 @@ class Source:
     needs_key = False
     colors = False         # filters by color itself
     default = True         # on until the user turns it off
+    key_url = ""           # where the user gets an API key
 
     def usable(self, query, config):
         """Can this search be asked here?"""
@@ -216,12 +226,35 @@ class Source:
     def search(self, query, page, config):
         raise NotImplementedError
 
+    def fresh(self, item):
+        """Where the item's full image downloads from today, for the
+        services whose links expire."""
+        return item.full
+
 
 class Openverse(Source):
     id, name = "openverse", "Openverse"
     kinds = ("photo", "illustration", "painting", "print")
     CATEGORIES = {"photo": "photograph", "illustration": "illustration",
                   "painting": "digitized_artwork", "print": "digitized_artwork"}
+    # Of these it has no original, only a preview this wide (its width and
+    # height are the original's all the same): a blur on a larger screen
+    PREVIEWS = ("flickr", "stocksnap", "rawpixel")
+    PREVIEW_WIDTH = 1024
+
+    def _size(self, r):
+        """The size of the image `url` downloads, which isn't always the
+        one it says: (width, height)."""
+        width, height = r.get("width") or 0, r.get("height") or 0
+        # cdn.stocksnap.io/img-thumbs/960w/..., images.rawpixel.com/editor_1024/...
+        found = re.search(r"/(\d{3,4})w/|/editor_(\d{3,4})/", r["url"])
+        if not found or not width or not height:
+            return width, height
+        if found.group(1):  # that wide
+            scale = int(found.group(1)) / width
+        else:  # its longer side is that long
+            scale = int(found.group(2)) / max(width, height)
+        return (round(width * scale), round(height * scale)) if scale < 1 else (width, height)
 
     def search(self, query, page, config):
         params = {"q": query.text or "landscape", "page": page, "page_size": 20}
@@ -232,12 +265,14 @@ class Openverse(Source):
             params["license"] = "cc0,pdm"
         if query.fit:
             params.update(aspect_ratio="wide", size="large")
+        if query.fit or query.screen[0] > 2 * self.PREVIEW_WIDTH:
+            params["excluded_source"] = ",".join(self.PREVIEWS)
         data = get_json(_url("https://api.openverse.org/v1/images/", params))
         kinds = {"illustration": "illustration", "digitized_artwork": "painting"}
         return [Item(self.id, r["id"], r.get("title") or "", r.get("creator") or "",
                      r.get("license") or "", r.get("thumbnail") or r["url"], r["url"],
-                     r.get("foreign_landing_url") or "", r.get("width") or 0,
-                     r.get("height") or 0, kinds.get(r.get("category"), "photo"))
+                     r.get("foreign_landing_url") or "", *self._size(r),
+                     kinds.get(r.get("category"), "photo"))
                 for r in data.get("results", []) if r.get("url")]
 
 
@@ -369,6 +404,7 @@ class Pixabay(Source):
     free = False  # Pixabay's own license
     needs_key = True
     colors = True
+    key_url = "https://pixabay.com/api/docs/"
     COLORS = {"teal": "turquoise", "purple": "lilac"}  # the others have the filter's names
     LANGS = ("cs da de en es fr id it hu nl no pl pt ro sk fi sv tr vi th bg ru el ja ko "
              "zh").split()
@@ -403,7 +439,115 @@ class Pixabay(Source):
         return items
 
 
-SOURCES = [Openverse(), Artic(), Cleveland(), Nasa(), Wallhaven(), Pixabay()]
+class Commons(Source):
+    id, name = "commons", "Wikimedia Commons"
+    kinds = ("photo", "space")
+    API = "https://commons.wikimedia.org/w/api.php"
+    # Only the pictures its community chose: featured ones, quality ones
+    CHOSEN = "haswbstatement:P6731=Q63348049|P6731=Q63348069"
+    SORTS = {"latest": "create_timestamp_desc", "random": "random"}
+    # Its server scales to a few widths only: these two are among them
+    WIDTHS = (1920, 3840)
+    LICENSES = (("cc0", "cc0"), ("pd", "pdm"), ("cc-by-sa", "by-sa"), ("cc-by", "by"))
+
+    def search(self, query, page, config):
+        least = query.screen if query.fit else (1920, 1080)
+        params = {"action": "query", "format": "json", "formatversion": 2,
+                  "generator": "search", "gsrnamespace": 6, "gsrlimit": 20,
+                  "gsroffset": (page - 1) * 20,
+                  "gsrsort": self.SORTS.get(query.sort, "relevance"),
+                  "gsrsearch": "%s filemime:image/jpeg filew:>%d fileh:>%d %s" % (
+                      query.text or "landscape", least[0] - 1, least[1] - 1, self.CHOSEN),
+                  "prop": "imageinfo", "iiprop": "url|size|extmetadata", "iiurlwidth": 500,
+                  "iiextmetadatafilter": "License|Artist"}
+        data = get_json(_url(self.API, params))
+        target = self.WIDTHS[query.screen[0] > self.WIDTHS[0]]
+        items = []
+        for p in sorted(data.get("query", {}).get("pages", []), key=lambda p: p["index"]):
+            info = (p.get("imageinfo") or [{}])[0]
+            if not info.get("thumburl") or not info.get("width"):
+                continue
+            width, height, full = info["width"], info["height"], info["url"]
+            if width > target:  # the originals can be 50 MB: one as wide as the screen
+                full = info["thumburl"].replace("/500px-", f"/{target}px-")
+                width, height = target, round(height * target / width)
+            meta = {k: v.get("value") or "" for k, v in (info.get("extmetadata") or {}).items()}
+            license = meta.get("License", "")
+            items.append(Item(self.id, str(p["pageid"]),
+                              p["title"].split(":", 1)[-1].rsplit(".", 1)[0],
+                              # The author is a piece of HTML, a link to a user's page
+                              " ".join(html.unescape(re.sub(
+                                  r"<[^>]+>", "", meta.get("Artist", ""))).split())[:80],
+                              next((ours for theirs, ours in self.LICENSES
+                                    if license.startswith(theirs)), ""),
+                              info["thumburl"], full, info.get("descriptionurl") or "",
+                              width, height, "photo"))
+        return items
+
+
+class OpenDesktop(Source):
+    id, name = "opendesktop", "OpenDesktop"
+    kinds = ("illustration", "photo")
+    API = "https://api.opendesktop.org/ocs/v1/content/data"
+    CATEGORY = 295  # "Wallpapers", with what's under it: Abstract, Linux/Tux, Ubuntu...
+    SORTS = {"latest": "new", "popular": "down"}
+    LICENSES = (("cc0", "cc0"), ("cc-by-sa", "by-sa"), ("cc-by-nc", "by-nc"), ("cc-by", "by"))
+    # What a file's name says of its size: "... 4K.jpg", "...-4000x2255.jpg", "... 1440P.jpg"
+    NAMED = {"8k": (7680, 4320), "5k": (5120, 2880), "4k": (3840, 2160), "uhd": (3840, 2160),
+             "2160p": (3840, 2160), "1440p": (2560, 1440), "qhd": (2560, 1440),
+             "1080p": (1920, 1080), "fhd": (1920, 1080), "720p": (1280, 720)}
+
+    def search(self, query, page, config):
+        params = {"categories": self.CATEGORY, "search": query.text, "page": page - 1,
+                  "pagesize": 20, "sortmode": self.SORTS.get(query.sort, "high"),
+                  "format": "json"}
+        data = get_json(_url(self.API, params))
+        return [item for item in map(self._item, data.get("data") or []) if item]
+
+    def _size(self, name):
+        found = re.search(r"(\d{3,5})\s*[x×]\s*(\d{3,5})", name)
+        if found:
+            return int(found.group(1)), int(found.group(2))
+        words = re.findall(r"[a-z0-9]+", name.lower())
+        return next((self.NAMED[word] for word in words if word in self.NAMED), (0, 0))
+
+    def _files(self, c):
+        """A work's images, the largest first: [(width, height, name, link)].
+        A work has several files (sizes, variants), some of them archives."""
+        files = []
+        for n in range(1, 30):
+            link, name = c.get(f"downloadlink{n}"), c.get(f"downloadname{n}") or ""
+            if not link:
+                break
+            if "mimetype=image/jpeg" in (c.get(f"downloadtags{n}") or "") or \
+                    "mimetype=image/png" in (c.get(f"downloadtags{n}") or ""):
+                size = self._size(name + " " + str(c.get(f"download_version{n}") or ""))
+                files.append((size, int(c.get(f"downloadsize{n}") or 0), name, link))
+        files.sort(key=lambda f: (f[0][0] * f[0][1], f[1]), reverse=True)
+        # The links end with the file's name as it is, spaces and all
+        return [(size[0], size[1], name, urllib.parse.quote(link, safe=":/%"))
+                for size, _kb, name, link in files]
+
+    def _item(self, c):
+        files = self._files(c)
+        if not files or not c.get("previewpic1"):
+            return None
+        width, height, _name, link = files[0]
+        tags = (c.get("tags") or "").split(",")
+        return Item(self.id, str(c["id"]), c.get("name") or "", c.get("personid") or "",
+                    next((ours for theirs, ours in self.LICENSES if theirs in tags), ""),
+                    c["previewpic1"], link, c.get("detailpage") or "", width, height,
+                    "illustration")
+
+    def fresh(self, item):
+        # Its links to the files last two days
+        data = get_json(f"{self.API}/{item.id}?format=json", ttl=HOUR)
+        files = self._files((data.get("data") or [{}])[0])
+        return files[0][3] if files else item.full
+
+
+SOURCES = [Openverse(), Commons(), Artic(), Cleveland(), Nasa(), OpenDesktop(), Wallhaven(),
+           Pixabay()]
 BY_ID = {source.id: source for source in SOURCES}
 # Left out, and why (shown under "Sources"): name, the terms that say so
 UNAVAILABLE = [
@@ -467,9 +611,9 @@ MOODS = {
     "dunes": Query("sand dunes desert", ["photo"]),
 }
 # The photo of the day comes from one of these, in turn
-DAILY = [("nasa", "nebula"), ("artic", ""), ("openverse", "mountain landscape"),
+DAILY = [("nasa", "nebula"), ("artic", ""), ("commons", "mountain landscape"),
          ("cleveland", "landscape"), ("openverse", "aurora borealis"), ("artic", "landscape"),
-         ("nasa", "galaxy"), ("openverse", "ocean coast")]
+         ("nasa", "galaxy"), ("commons", "ocean coast")]
 # "Surprise me" searches one of these (and the moods)
 SURPRISES = ["waterfall", "milky way", "autumn forest", "snow mountain", "tropical beach",
              "canyon", "volcano", "lavender field", "northern lights", "coral reef",
@@ -477,8 +621,12 @@ SURPRISES = ["waterfall", "milky way", "autumn forest", "snow mountain", "tropic
              "impressionism", "ukiyo-e landscape", "saturn", "earth from orbit", "galaxy"]
 
 
-def _landscape(items):
-    return [item for item in items if item.width > item.height]
+def _landscape(items, config):
+    """The landscape ones, and of those the ones wide enough for the screen
+    (Full HD at least) when there are any."""
+    items = [item for item in items if item.width > item.height]
+    enough = min(config["screen"][0], 1920)
+    return [item for item in items if item.width >= enough] or items
 
 
 def _free_query(text, config, source=""):
@@ -494,7 +642,8 @@ def daily(config, day=None):
     def pick():
         for turn in range(len(DAILY)):
             source, text = DAILY[(day.toordinal() + turn) % len(DAILY)]
-            items = _landscape(search_all(_free_query(text, config, source), config)[0])
+            items = _landscape(search_all(_free_query(text, config, source), config)[0],
+                               config)
             if items:
                 return items[day.toordinal() // len(DAILY) % len(items)].to_dict()
         return None
@@ -509,7 +658,7 @@ def highlights(config, day=None, n=4):
     def pick():
         query = Query("", ["painting"], free=True, sources=["artic", "cleveland"],
                       screen=tuple(config["screen"]))
-        items = _landscape(search_all(query, config)[0])
+        items = _landscape(search_all(query, config)[0], config)
         random.Random(day.toordinal()).shuffle(items)
         return [item.to_dict() for item in items[:n]]
     return [Item.from_dict(item) for item in cached(f"highlights-{day}", 48 * HOUR, pick) or []]
@@ -523,7 +672,7 @@ def mood_cover(key, config):
     def pick():
         items = _landscape(search_all(
             Query(query.text, query.kinds, free=True, screen=tuple(config["screen"])),
-            config)[0])
+            config)[0], config)
         return items[0].to_dict() if items else None
     item = cached(f"mood-{key}", 7 * 24 * HOUR, pick)
     return Item.from_dict(item) if item else None
@@ -535,7 +684,7 @@ def surprise(config):
     random.shuffle(texts)
     for text in texts[:4]:
         items = _landscape(search_all(_free_query(text, config), config,
-                                      random.randint(1, 3))[0])
+                                      random.randint(1, 3))[0], config)
         if items:
             return random.choice(items)
     return None

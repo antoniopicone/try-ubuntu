@@ -1,0 +1,19 @@
+[Desktop Entry]
+# GNOME Shell's "Change Background…" in the desktop's right-click menu
+# starts the app with this id (js/ui/backgroundMenu.js). This one, which
+# comes first in XDG_DATA_DIRS, opens Wallpapers instead of Settings'
+# Appearance panel. Without Wallpapers installed (TryExec: no live-wallpapers
+# in the PATH) this file is ignored, and Settings' own is used. Settings
+# itself is untouched either way (its own menu entry and its Appearance panel).
+Type=Application
+Name=Change Background
+Name[it]=Cambia sfondo
+Comment=Find a wallpaper in several photo services, and set it
+Comment[it]=Trova uno sfondo tra più servizi di foto, e impostalo
+TryExec=live-wallpapers
+Exec=live-wallpapers
+Icon=org.ubuntu.LiveWallpapers
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+OnlyShowIn=GNOME;

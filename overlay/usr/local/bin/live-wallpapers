@@ -46,7 +46,6 @@ import store  # noqa: E402
 from sources import Query  # noqa: E402
 
 APP_ID = "org.ubuntu.LiveWallpapers"
-PIXABAY_KEY_URL = "https://pixabay.com/api/docs/"
 # Fewer results than this after a page: the next one is asked for right away
 # (the color filter can leave few), this many times at most
 ENOUGH, MORE_PAGES = 9, 3
@@ -169,13 +168,17 @@ STRINGS = {
         "ready": "Ready to use",
         "ready_sub": "No account needed.",
         "src_openverse": "Creative Commons and public-domain photos and illustrations: "
-                         "Flickr, StockSnap and others",
+                         "Wikimedia Commons, Flickr and others",
         "src_artic": "Public-domain paintings and prints (CC0), in high resolution",
         "src_cleveland": "Open Access works, in the public domain (CC0)",
         "src_nasa": "Earth, the planets and the nebulae, from NASA's image library",
         "src_wallhaven": "Wallpapers by its users, screen-sized. Licenses not stated: "
                          "personal use only",
         "src_pixabay": "Photos and illustrations, with filters by color",
+        "src_commons": "The photos its community chose as featured or quality ones, "
+                       "in high resolution",
+        "src_opendesktop": "Wallpapers by the users of the KDE Store and gnome-look.org: "
+                           "Linux, abstract, digital art. Each with its own license",
         "with_key": "With a key of yours",
         "with_key_sub": "The key is free: the service gives one to every account.",
         "get_key": "Get a key",
@@ -302,13 +305,17 @@ STRINGS = {
         "ready": "Pronte all'uso",
         "ready_sub": "Non serve registrarsi.",
         "src_openverse": "Foto e illustrazioni Creative Commons o di pubblico dominio: "
-                         "Flickr, StockSnap e altri",
+                         "Wikimedia Commons, Flickr e altri",
         "src_artic": "Dipinti e stampe in pubblico dominio (CC0), ad alta risoluzione",
         "src_cleveland": "Opere Open Access, in pubblico dominio (CC0)",
         "src_nasa": "La Terra, i pianeti e le nebulose, dall'archivio di immagini della NASA",
         "src_wallhaven": "Sfondi degli utenti, a misura di schermo. Licenze non dichiarate: "
                          "solo uso personale",
         "src_pixabay": "Foto e illustrazioni, con filtri per colore",
+        "src_commons": "Le foto che la sua comunità ha scelto come in vetrina o di qualità, "
+                       "ad alta risoluzione",
+        "src_opendesktop": "Sfondi degli utenti di KDE Store e gnome-look.org: Linux, "
+                           "astratti, arte digitale. Ognuno con la sua licenza",
         "with_key": "Con una tua chiave",
         "with_key_sub": "La chiave è gratuita: il servizio ne dà una a ogni account.",
         "get_key": "Ottieni una chiave",
@@ -1654,7 +1661,7 @@ class Sources(Adw.NavigationPage):
                 continue
             row = self._switch(source)
             get = Gtk.Button(label=t("get_key"), valign=Gtk.Align.CENTER)
-            get.connect("clicked", lambda *_: open_uri(win, PIXABAY_KEY_URL))
+            get.connect("clicked", lambda _b, source=source: open_uri(win, source.key_url))
             row.add_suffix(get)
             group.add(row)
             key = Adw.PasswordEntryRow(title=t("api_key"), show_apply_button=True,

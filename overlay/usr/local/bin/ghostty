@@ -6,9 +6,11 @@
 # Ghostty needs OpenGL 4.3. On a Mac, QEMU's virgl renders on OpenGL ES
 # (ANGLE on Metal), and the guest's virgl driver offers less than that:
 # Ghostty then can't draw. llvmpipe has 4.5 and is enough for a terminal;
-# the rest of the desktop keeps the GPU. On real hardware, or any other
-# GPU, nothing changes. LIBGL_ALWAYS_SOFTWARE=0 in the environment keeps
-# the GPU for Ghostty too.
+# the rest of the desktop keeps the GPU. Only on the live system: once it's
+# installed on a disk (/etc/try-ubuntu/installed), Ghostty uses the GPU
+# like any other app. On real hardware, or any other GPU, nothing changes.
+# LIBGL_ALWAYS_SOFTWARE=0 in the environment keeps the GPU for Ghostty on the
+# live system too.
 #
 # Started by systemd (the unit is Type=notify-reload): no fallback and no
 # wrapping, see below. Otherwise, fallback: when Ghostty fails within its first seconds (no OpenGL, a
@@ -18,13 +20,15 @@
 #
 # /usr/bin/ghostty is this script (build-rootfs.sh diverts the package's
 # binary): the .desktop file, D-Bus and systemd start that path.
-for driver in /sys/class/drm/card*/device/driver; do
-  link=$(readlink "$driver") || continue
-  if [ "${link##*/}" = virtio_gpu ]; then
-    export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE-1}"
-    break
-  fi
-done
+if [ ! -e /etc/try-ubuntu/installed ]; then
+  for driver in /sys/class/drm/card*/device/driver; do
+    link=$(readlink "$driver") || continue
+    if [ "${link##*/}" = virtio_gpu ]; then
+      export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE-1}"
+      break
+    fi
+  done
+fi
 
 # Started by systemd as the service's main process (the .desktop file is
 # DBusActivatable, so that's the dock too): Ghostty has to replace this
