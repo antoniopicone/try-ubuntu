@@ -124,11 +124,14 @@ fi
 echo "==> Builder image ($arch)"
 # --platform, always: the local ubuntu:26.04 may be the other
 # architecture's after a build of it.
-podman build -q --platform "linux/$arch" -t "$image" -f "$project_dir/Containerfile" \
+# --network host, here and in builder: a bridge needs nft, which podman only
+# recommends, and its traffic is dropped by a host firewall that doesn't
+# forward (ufw), so the first apt-get resolves nothing.
+podman build -q --network host --platform "linux/$arch" -t "$image" -f "$project_dir/Containerfile" \
   "$project_dir" >/dev/null
 if [[ $host_arch != "$arch" ]]; then
   # The ISO step runs natively (see below): the host's builder too
-  podman build -q --platform "linux/$host_arch" -t "$(builder_image "$host_arch")" \
+  podman build -q --network host --platform "linux/$host_arch" -t "$(builder_image "$host_arch")" \
     -f "$project_dir/Containerfile" "$project_dir" >/dev/null
 fi
 podman volume exists "$cache_volume" || podman volume create "$cache_volume" >/dev/null
@@ -144,7 +147,7 @@ mkdir -p "$dist_dir"
 # builder PLATFORM IMAGE STEPS...: the build steps in a builder container
 builder() {
   local platform=$1 builder_image=$2; shift 2
-  podman run --rm --privileged --platform "linux/$platform" \
+  podman run --rm --privileged --network host --platform "linux/$platform" \
     -v /dev:/dev \
     -v "$cache_volume:/cache:dev,suid" \
     -v "$project_dir:/src:ro" \
