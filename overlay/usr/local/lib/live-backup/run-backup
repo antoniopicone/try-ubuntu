@@ -7,7 +7,8 @@ with the recovery key is the session's. restic writes into the encrypted
 folder "vault:" of the destination "cloud:" (cloud.py: rclone, whose OAuth
 tokens it renews by itself). For iCloud Drive the destination is the
 icloud-linux mount (~/iCloud), started here if it isn't, and the job waits
-for icloudd to upload what it wrote. The result goes to
+for icloudd to upload what it wrote: an upload iCloud refuses (no room
+left) is a failed backup. The result goes to
 ~/.local/state/live-backup/status.json, read by the Cloud Backup app; a failure
 is also a notification. While it runs, its progress is in
 ~/.local/state/live-backup/progress.json (restic's status, every second),
@@ -38,12 +39,20 @@ MESSAGES = {
            "no_password": "The keyring is locked: the recovery key isn't available.",
            "old_config": "These backups were set up by an older version: open Cloud Backup "
                          "and choose where they go again.",
-           "icloud": "iCloud Drive isn't available: open Cloud Backup and sign in again."},
+           "icloud": "iCloud Drive isn't available: open Cloud Backup and sign in again.",
+           "icloud_full": "iCloud is full: this backup is on this computer only. Free some "
+                          "space on iCloud or get a larger plan.",
+           "icloud_refused": "iCloud refuses the upload ({reason}): this backup is on this "
+                             "computer only."},
     "it": {"failed": "Backup non riuscito",
            "no_password": "Il portachiavi è bloccato: la chiave di recupero non è disponibile.",
            "old_config": "Questi backup sono stati configurati da una versione precedente: "
                          "apri Cloud Backup e scegli di nuovo dove salvarli.",
-           "icloud": "iCloud Drive non è disponibile: apri Cloud Backup e accedi di nuovo."},
+           "icloud": "iCloud Drive non è disponibile: apri Cloud Backup e accedi di nuovo.",
+           "icloud_full": "Lo spazio su iCloud è esaurito: questo backup è solo su questo "
+                          "computer. Libera spazio su iCloud o passa a un piano più grande.",
+           "icloud_refused": "iCloud rifiuta il caricamento ({reason}): questo backup è solo "
+                             "su questo computer."},
 }
 
 
@@ -172,6 +181,12 @@ def main():
                            capture_output=True)
         except OSError:
             pass  # the backup is in the mount: icloudd uploads it anyway
+        # ...unless iCloud refuses it: icloudd only logs that, and sync
+        # doesn't wait for the uploads it retries
+        reason = providers.icloud_refused(config["repo"])
+        if reason:
+            finish(status, False, t("icloud_full") if reason.startswith("QUOTA_EXCEEDED")
+                   else t("icloud_refused").format(reason=reason[:100]))
     finish(status, True)
 
 

@@ -736,7 +736,13 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
     [build-icloud-linux.sh](scripts/build-icloud-linux.sh)), which then
     mounts iCloud Drive in `~/iCloud` (in the Files sidebar too). The
     password isn't kept: when Apple asks to sign in again, every few
-    weeks, a backup fails with a notification.
+    weeks, a backup fails with a notification. icloudd only logs what it
+    can't sync and retries forever, so
+    [live-icloud-watch](overlay/usr/local/bin/live-icloud-watch), a user
+    service on for everyone, follows its journal and shows a notification
+    when iCloud is full (nothing uploads until there's room), signed out,
+    or refuses an upload: once a day per problem, and not for network
+    errors, which pass by themselves.
 - **Cloud Backup** ([live-backup](overlay/usr/local/bin/live-backup)) asks
   where to keep your data, documents and preferences safe:
   - **one of your clouds**, those Cloud Config connected. The backups use
@@ -812,7 +818,8 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
     once a day). restic reaches every destination through rclone, the
     upstream 1.75 build (Ubuntu 26.04's 1.60 hangs reading from SFTP, so a
     restore would never finish). For iCloud it writes into the mount and
-    waits for icloudd to upload. A failure is
+    waits for icloudd to upload; uploads iCloud refuses (no room left)
+    make it a failed backup. A failure is
     a notification. The app shows the last backup, and can start one,
     change the folder or stop them.
   - **Restoring** ([restore.py](overlay/usr/local/lib/live-backup/restore.py)):

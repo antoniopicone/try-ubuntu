@@ -398,6 +398,33 @@ def icloud_problem():
     return None
 
 
+def icloud_refused(repo):
+    """iCloud's reason for refusing the uploads under `repo` (a path in the
+    mount), or None: "QUOTA_EXCEEDED: Quota exceeded" for a full iCloud.
+    icloudd only logs a refused upload and tries it again later, so the
+    files whose last try was refused are still on this computer only.
+    Network errors don't count: they pass by themselves."""
+    run = subprocess.run(["systemctl", "--user", "show", "-p", "InvocationID", "--value",
+                          ICLOUD_SERVICE], capture_output=True, text=True).stdout.strip()
+    if not run:
+        return None
+    log = subprocess.run(["journalctl", "--user", f"_SYSTEMD_INVOCATION_ID={run}", "-o", "cat",
+                          "--no-pager", "--grep", "failed to sync|file-sync-complete"],
+                         capture_output=True, text=True).stdout
+    prefix = "/" + repo.strip("/") + "/"
+    refused = {}
+    for line in log.splitlines():
+        line = re.sub(r"\x1b\[[\d;]*m", "", line)
+        done = re.search(r"file-sync-complete path='(.*)' size=", line)
+        if done:
+            refused.pop(done[1], None)
+            continue
+        failed = re.search(r"failed to sync (.+?): iCloud error (.*)$", line)
+        if failed and failed[1].startswith(prefix):
+            refused[failed[1]] = failed[2]
+    return next(iter(refused.values()), None)
+
+
 def icloud_start(timeout=90, restart=False):
     """Start the icloud-linux service (restart: so that it takes the session
     just signed in) and wait for the mount; SignInError if it has no

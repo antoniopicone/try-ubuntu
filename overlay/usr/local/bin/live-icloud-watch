@@ -1,0 +1,150 @@
+#!/usr/bin/python3
+"""live-icloud-watch: tells the user when iCloud Drive can't keep ~/iCloud in
+sync.
+
+icloudd (icloud-linux) only logs its failures, and retries them forever: a
+full iCloud looks like a mount that works, where nothing written ever
+arrives. This follows icloud.service's journal and shows a notification
+for:
+
+  - a full iCloud (QUOTA_EXCEEDED): nothing uploads until there's room
+  - a daemon started without a session (it serves its cache only)
+  - any other upload iCloud refuses, with its reason
+
+Network errors aren't shown (they come with every Wi-Fi drop, and icloudd
+recovers from them by itself), nor are local ones (a file gone before its
+upload). The same problem is one notification a day at most.
+
+A systemd user service (live-icloud-watch.service, on for every user):
+without icloud-linux set up there's no journal to follow, and it waits.
+
+For tests:
+  --from-file FILE   icloudd's log lines (journalctl -o cat) instead of
+                     following the journal
+  --dry-run          print what it would notify instead
+"""
+import argparse
+import html
+import os
+import re
+import subprocess
+import sys
+import time
+
+ICLOUD_SERVICE = "icloud.service"
+RATE_LIMIT_SECONDS = 24 * 3600   # the same problem: one notification a day at most
+ANSI = re.compile(r"\x1b\[[\d;]*m")
+UNAUTHENTICATED = re.compile(r"starting UNAUTHENTICATED: (.*?)\. The cache")
+UPLOAD_FAILED = re.compile(r" ERROR \S+ failed to sync (.+)$")
+
+STRINGS = {
+    "en": {
+        "quota": "iCloud is full",
+        "quota_body": "Files added or changed in the iCloud folder aren't uploaded. Free some "
+                      "space on iCloud or get a larger plan: the uploads resume by themselves.",
+        "signin": "iCloud Drive is signed out",
+        "signin_body": "The iCloud folder shows what was already on this computer only. Open "
+                       "Cloud Backup and sign in again. ({reason})",
+        "upload": "iCloud Drive can't upload a file",
+        "upload_body": "{name}: {reason}",
+    },
+    "it": {
+        "quota": "Lo spazio su iCloud è esaurito",
+        "quota_body": "I file aggiunti o modificati nella cartella iCloud non vengono caricati. "
+                      "Libera spazio su iCloud o passa a un piano più grande: i caricamenti "
+                      "riprendono da soli.",
+        "signin": "iCloud Drive è disconnesso",
+        "signin_body": "La cartella iCloud mostra solo quello che era già su questo computer. "
+                       "Apri Cloud Backup e accedi di nuovo. ({reason})",
+        "upload": "iCloud Drive non riesce a caricare un file",
+        "upload_body": "{name}: {reason}",
+    },
+}
+
+
+def t(key, /, **kw):
+    lang = os.environ.get("LANG", "")[:2]
+    return STRINGS.get(lang, STRINGS["en"])[key].format(**kw)
+
+
+def log(msg):
+    print(f"live-icloud-watch: {msg}", file=sys.stderr, flush=True)
+
+
+def clean(text, limit=120):
+    """Text from the log (file names, iCloud's words): no control characters,
+    bounded."""
+    text = "".join(ch if ch.isprintable() else " " for ch in text).strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def problem(line):
+    """(key, summary, body) for a log line worth a notification, else None.
+    The key is what the rate limit goes by."""
+    line = ANSI.sub("", line.rstrip("\n"))
+    m = UNAUTHENTICATED.search(line)
+    if m:
+        return "signin", t("signin"), t("signin_body", reason=clean(m[1]))
+    m = UPLOAD_FAILED.search(line)
+    if not m:
+        return None
+    if "QUOTA_EXCEEDED" in line:
+        return "quota", t("quota"), t("quota_body")
+    # "<path>: iCloud error <CODE>: <words>"
+    path, refused, reason = m[1].partition(": iCloud error ")
+    if not refused:
+        return None
+    return (f"upload:{reason.split(':')[0]}", t("upload"),
+            t("upload_body", name=clean(path.rsplit("/", 1)[-1], 60), reason=clean(reason)))
+
+
+class Watcher:
+    def __init__(self, dry_run):
+        self.dry_run = dry_run
+        self.last_seen = {}
+
+    def handle(self, line):
+        found = problem(line)
+        if not found:
+            return
+        key, summary, body = found
+        now = time.monotonic()
+        last = self.last_seen.get(key)
+        if last is not None and now - last < RATE_LIMIT_SECONDS:
+            return
+        self.last_seen[key] = now
+        if self.dry_run:
+            print(f"key={key} | summary={summary} | body={body}", flush=True)
+            return
+        # GNOME reads a subset of markup in the body: escape it.
+        try:
+            subprocess.run(["notify-send", "--app-name=iCloud Drive", "--icon=dialog-warning",
+                            html.escape(summary), html.escape(body)], capture_output=True)
+        except OSError as e:
+            log(f"notify-send: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--from-file")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    watcher = Watcher(dry_run=args.dry_run)
+
+    if args.from_file:
+        with open(args.from_file, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                watcher.handle(line)
+        return 0
+    # The last lines too: a problem that began before the login is still one
+    proc = subprocess.Popen(["journalctl", "--user", "-u", ICLOUD_SERVICE, "-f", "-n", "200",
+                             "-o", "cat", "--no-pager"],
+                            stdout=subprocess.PIPE, text=True, errors="replace")
+    for line in proc.stdout:
+        watcher.handle(line)
+    log(f"journalctl ended ({proc.wait()})")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

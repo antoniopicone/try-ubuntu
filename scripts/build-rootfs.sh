@@ -323,6 +323,11 @@ in_chroot systemctl set-default graphical.target
 in_chroot systemctl --global enable live-crash-watch.service
 [[ -L "$ROOTFS/etc/systemd/user/graphical-session.target.wants/live-crash-watch.service" ]] \
   || { echo "live-crash-watch.service is not enabled" >&2; exit 1; }
+# iCloud Drive's failures as notifications, for every user (live-icloud-watch:
+# silent without icloud-linux set up)
+in_chroot systemctl --global enable live-icloud-watch.service
+[[ -L "$ROOTFS/etc/systemd/user/graphical-session.target.wants/live-icloud-watch.service" ]] \
+  || { echo "live-icloud-watch.service is not enabled" >&2; exit 1; }
 # Cores go to systemd-coredump, where coredumpctl and the agents find them
 grep -rqs 'systemd-coredump' "$ROOTFS/usr/lib/sysctl.d/" \
   || { echo "systemd-coredump doesn't handle the cores" >&2; exit 1; }

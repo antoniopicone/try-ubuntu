@@ -1,0 +1,13 @@
+[Unit]
+Description=Notifications when iCloud Drive can't sync (live-icloud-watch)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/live-icloud-watch
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target
