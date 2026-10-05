@@ -512,6 +512,15 @@ started by install.sh):
 | `.kernel-<iso>/` | kernel, initramfs and `limine.conf` extracted from the ISO for nested virtualization, refreshed when the ISO changes |
 | `.app-<arch>/try-ubuntu.app` | macOS: the app bundle QEMU is started from, so that its window is "try-ubuntu" in the Dock, with its own icon ([assets/try-ubuntu-app.svg](assets/try-ubuntu-app.svg), as `try-ubuntu.icns`), not "qemu-system-aarch64" with a Unix executable's. It holds a hard link to QEMU and links to its libraries and ROMs, and is made again when QEMU or the icon changes |
 
+On Linux the same name and icon come from a desktop entry,
+`~/.local/share/applications/try-ubuntu.desktop`, which `run-qemu.sh`
+writes: the desktop matches it to the window by QEMU's app ID, `qemu`
+(`StartupWMClass`), and shows "try-ubuntu" with
+[assets/try-ubuntu-app.svg](assets/try-ubuntu-app.svg) in the dock, the
+overview and the window switcher. QEMU's ID is the same for every VM, so
+the user's other QEMU windows get that name and icon too; it's not a
+launcher (`NoDisplay`), and deleting the file undoes it.
+
 | Option | |
 |---|---|
 | `--arch arm\|x86` | the ISO's architecture (default: from its name, `ubuntu-live-amd64*` being x86). x86 runs in `qemu-system-x86_64` on a q35 machine with OVMF: kvm on an x86 Linux host, hvf on an Intel Mac, emulated elsewhere. Its persistent disk and UEFI variables are `persist-amd64.qcow2` and `efivars-amd64.fd` |

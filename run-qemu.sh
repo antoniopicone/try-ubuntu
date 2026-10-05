@@ -361,6 +361,33 @@ else
   serial_args=(-chardev "vc,id=serial0,logfile=$serial_log" -serial chardev:serial0)
 fi
 
+# On Linux the desktop names a window's app, and picks its icon, from the
+# desktop entry matching the window's app ID (WM_CLASS on X11), and QEMU's
+# GTK window is always "qemu": so a desktop entry of the user's claims that
+# ID, as "try-ubuntu" with its own icon (assets/try-ubuntu-app.svg;
+# install.sh puts it next to this script). It's for the dock, the overview
+# and the window switcher only (no launcher), and any other QEMU window of
+# this user gets the same name and icon. Written before the probes below:
+# the desktop has to have read it by the time the window is there. Written
+# again only when it changes.
+if [[ $(uname -s) == Linux && -z "$vnc" ]] && ((!headless)); then
+  icon=qemu
+  for f in "$project_dir/assets/try-ubuntu-app.svg" "$project_dir/try-ubuntu-app.svg"; do
+    [[ -f "$f" ]] && { icon=$f; break; }
+  done
+  entry="${XDG_DATA_HOME:-$HOME/.local/share}/applications/try-ubuntu.desktop"
+  entry_text="[Desktop Entry]
+Type=Application
+Name=try-ubuntu
+Icon=$icon
+StartupWMClass=qemu
+NoDisplay=true"
+  if [[ "$(cat "$entry" 2>/dev/null)" != "$entry_text" ]]; then
+    mkdir -p "$(dirname "$entry")" && printf '%s\n' "$entry_text" > "$entry" ||
+      echo "Can't write $entry: the window stays \"qemu\"." >&2
+  fi
+fi
+
 # What this QEMU can do: devices, displays, audio backends, chardev backends.
 qemu_devices=$("$qemu" -device help 2>/dev/null || true)
 qemu_displays=$("$qemu" -display help 2>/dev/null || true)

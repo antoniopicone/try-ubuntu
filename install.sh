@@ -505,7 +505,8 @@ purge_downloads() {
   note "in $dist"
   rm -rf "$dist"/*.iso "$dist"/*.iso.*.part "$dist"/*.release \
     "$dist/qemu-macos-arm64" "$dist"/qemu-linux-* "$dist"/.qemu.* "$dist"/.kernel-* "$dist"/.app-* \
-    "$DIR/run-qemu.sh" "$DIR/try-ubuntu.icns"
+    "$DIR/run-qemu.sh" "$DIR/try-ubuntu.icns" "$DIR/try-ubuntu-app.svg" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/applications/try-ubuntu.desktop"
 }
 
 install_qemu() {
@@ -868,11 +869,13 @@ main() {
   curl -fsSL -o "$DIR/run-qemu.sh" "https://raw.githubusercontent.com/$REPO/$tag/run-qemu.sh" ||
     die "can't download run-qemu.sh"
   chmod +x "$DIR/run-qemu.sh"
-  # The Dock icon of QEMU's window on a Mac (run-qemu.sh does without it too)
-  [ "$(uname -s)" != Darwin ] ||
-    curl -fsSL -o "$DIR/try-ubuntu.icns" \
-      "https://raw.githubusercontent.com/$REPO/$tag/assets/try-ubuntu.icns" 2>/dev/null ||
-    rm -f "$DIR/try-ubuntu.icns"
+  # The icon of QEMU's window in the Dock on a Mac, in the dock and the
+  # overview on Linux (run-qemu.sh does without it too)
+  app_icon=try-ubuntu-app.svg
+  [ "$(uname -s)" != Darwin ] || app_icon=try-ubuntu.icns
+  curl -fsSL -o "$DIR/$app_icon" \
+    "https://raw.githubusercontent.com/$REPO/$tag/assets/$app_icon" 2>/dev/null ||
+    rm -f "$DIR/$app_icon"
 
   # Not the release's build, should an earlier run have left one here
   [ "$system_qemu" = 0 ] || set -- --qemu "$(command -v "$qemu")" "$@"
