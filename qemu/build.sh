@@ -26,6 +26,9 @@
 #
 # It runs on macOS 15 or newer; nested virtualization needs macOS 26 and an
 # M3 or newer.
+#
+# On Linux this runs build-linux.sh instead: the same QEMU for Linux
+# desktops (dist/qemu-linux-<arch>), built in a podman container.
 set -euo pipefail
 
 usage() {
@@ -41,6 +44,7 @@ EOF
 
 qemu_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 project_dir=$(dirname "$qemu_dir")
+[[ $(uname -s) != Linux ]] || exec "$qemu_dir/build-linux.sh" "$@"
 out_dir="$project_dir/dist"
 cache_dir=""
 keep_work=0
@@ -66,48 +70,27 @@ die() { printf '\033[31m[qemu] error:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # --- Pinned sources ---------------------------------------------------------
 
-# QEMU 11.1.1 (the commit Try Omarchy builds), and the submodules the
-# gitlab archive leaves out.
-qemu_version=11.1.1
-qemu_commit=c3d48b7d1e89604920e5b81b91140c2ad39a1943
-keycodemap_commit=f5772a62ec52591ff6870b7e8ef32482371f22c6
-dtc_commit=b6910bec11614980a21e46fbccc35934b671bd81
+# QEMU, virglrenderer, spice-protocol and the build tools: what the build
+# for Linux uses too
+. "$qemu_dir/sources.sh"
 
-# virglrenderer 1.3.0 with startergo's macOS patches (tap v1.0.42), built
+# virglrenderer gets startergo's macOS patches (tap v1.0.42) and is built
 # here for macOS 15 (the tap's bottle needs 26); ANGLE and libepoxy bottles
 # from startergo's taps.
-virgl_version=1.3.0
 virgl_tap_version=1.0.42
 angle_version=1.0.16
 epoxy_version=1.0.5
 
-# SPICE's protocol headers (header-only): QEMU's qemu-vdagent needs them.
-spice_protocol_version=0.14.5
-
-# Build tools: meson, ninja and PyYAML (virglrenderer's generated tables),
-# and the wheels QEMU's offline venv needs.
-meson_version=1.9.0
 ninja_version=1.13.0
-pyyaml_version=6.0.3
 
 # name  url  sha256  (the file is saved as the url's last component)
 sources() {
+  common_sources
   cat <<EOF
-qemu-$qemu_commit.tar.gz	https://gitlab.com/qemu-project/qemu/-/archive/$qemu_commit/qemu-$qemu_commit.tar.gz	7563781d7dec46f11509801e027f852597235d29ca7afa44a07ed9d8b108b8cd
-keycodemapdb-$keycodemap_commit.tar.gz	https://gitlab.com/qemu-project/keycodemapdb/-/archive/$keycodemap_commit/keycodemapdb-$keycodemap_commit.tar.gz	d014b53382dbb17b8196ad12f50de7f20d0ef1b9f7d54b0be51a6cbb14209195
-dtc-$dtc_commit.tar.gz	https://git.kernel.org/pub/scm/utils/dtc/dtc.git/snapshot/dtc-$dtc_commit.tar.gz	e115f987eec23a1ba25150a46ced1675de3716072d3b4905afb3a9cda0f007c7
-virglrenderer-$virgl_version.tar.gz	https://gitlab.freedesktop.org/virgl/virglrenderer/-/archive/$virgl_version/virglrenderer-$virgl_version.tar.gz	065bc56e89e6f631f96101cd62eba0748e48eb888b434edc86e89d05395e76f3
 homebrew-virglrenderer-$virgl_tap_version.tar.gz	https://codeload.github.com/startergo/homebrew-virglrenderer/tar.gz/refs/tags/v$virgl_tap_version	950273fbba46905b6112ee2bd0598c1da706c25319a7347058cbc52f04ba96dd
 angle-$angle_version.arm64_sequoia.bottle.tar.gz	https://github.com/startergo/homebrew-angle/releases/download/v$angle_version/angle-$angle_version.arm64_sequoia.bottle.tar.gz	29fe2175b157a65f12879f9a12b5c8f94d0a76fafdf41ff009a2fdb4e9df525c
 libepoxy-$epoxy_version.arm64_sequoia.bottle.tar.gz	https://github.com/startergo/homebrew-libepoxy/releases/download/v$epoxy_version/libepoxy-$epoxy_version.arm64_sequoia.bottle.tar.gz	109384a1d37edf207a9b9f3d8950710c00767635b3c7ff295e3af83611876ef2
-spice-protocol-$spice_protocol_version.tar.xz	https://www.spice-space.org/download/releases/spice-protocol-$spice_protocol_version.tar.xz	baf58449f6e89d19f475899ad5fb9196fdc46c03cc53233f4e39cf2978f9cff7
-meson-$meson_version.tar.gz	https://github.com/mesonbuild/meson/releases/download/$meson_version/meson-$meson_version.tar.gz	cd27277649b5ed50d19875031de516e270b22e890d9db65ed9af57d18ebc498d
 ninja-$ninja_version-py3-none-macosx_10_9_universal2.whl	https://files.pythonhosted.org/packages/3c/74/d02409ed2aa865e051b7edda22ad416a39d81a84980f544f8de717cab133/ninja-$ninja_version-py3-none-macosx_10_9_universal2.whl	fa2a8bfc62e31b08f83127d1613d10821775a0eb334197154c4d6067b7068ff1
-pyyaml-$pyyaml_version.tar.gz	https://files.pythonhosted.org/packages/05/8e/961c0007c59b8dd7729d542c61a4d537767a59645b82a0b521206e1e25c2/pyyaml-$pyyaml_version.tar.gz	d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f
-setuptools-84.0.0-py3-none-any.whl	https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl	51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670
-wheel-0.48.0-py3-none-any.whl	https://files.pythonhosted.org/packages/2e/29/69cfbb602cd91690c55d38ba9fe53e6a7e76a6fa647bf38f19c138d25449/wheel-0.48.0-py3-none-any.whl	3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab
-packaging-26.3-py3-none-any.whl	https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl	d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
-pip-26.2.1-py3-none-any.whl	https://files.pythonhosted.org/packages/f3/6e/1736e5b4ae2b778ef2f81c47d797de9f891d4d8acb047a24ca37a60294dd/pip-26.2.1-py3-none-any.whl	71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e
 EOF
 }
 
@@ -170,23 +153,7 @@ done
 
 # --- Downloads --------------------------------------------------------------
 
-sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
-
-# fetch FILE SHA256 CURL-ARGS...: into the cache, unless it's there already.
-fetch() {
-  local file="$cache_dir/$1" sha=$2; shift 2
-  if [[ -f "$file" && $(sha256 "$file") == "$sha" ]]; then return; fi
-  log "Downloading $(basename "$file")"
-  curl -fL --silent --show-error --proto '=https' --tlsv1.2 --retry 3 \
-    --retry-all-errors --connect-timeout 20 -o "$file.part" "$@"
-  [[ $(sha256 "$file.part") == "$sha" ]] || {
-    rm -f "$file.part"; die "checksum mismatch for $(basename "$file")"; }
-  mv "$file.part" "$file"
-}
-
-while IFS=$'\t' read -r file url sha; do
-  fetch "$file" "$sha" "$url"
-done < <(sources)
+fetch_all < <(sources)
 
 # Bottles are ghcr.io blobs: an anonymous token per formula.
 while IFS=$'\t' read -r formula version root sha; do

@@ -7,9 +7,12 @@
 #   curl -fsSL .../install.sh | sh -s -- --lang de_DE --no-persist
 #   curl -fsSL .../install.sh | sh -s -- --rebuild
 #   curl -fsSL .../install.sh | sh -s -- --arch x86 --on-usb
+#   curl -fsSL .../install.sh | sh -s -- --system-qemu
 #
-# --arch arm|x86: the ISO's architecture (default: arm, i.e. arm64). An x86
-# ISO runs emulated (slow) on Apple Silicon, accelerated on an x86 host.
+# --arch arm|x86: the ISO's architecture (default: arm, i.e. arm64). An ISO
+# runs accelerated on a computer of its own architecture (an x86 ISO on an
+# x86 Linux, an arm64 one on Apple Silicon or an arm64 Linux), and emulated
+# (slow) on the other.
 #
 # Without --on-usb, arguments go to run-qemu.sh unchanged, except --rebuild:
 # it deletes what this script downloaded and the caches (the ISO, the QEMU
@@ -27,13 +30,20 @@
 # firmware): this builds the real-computer flavour locally instead
 # (build.sh --hardware: the generic kernel, all of linux-firmware), from the
 # release's sources (or the checkout this script is in), with podman (many
-# hours for x86 on Apple Silicon, emulated). Then it lists the USB disks, asks which one to erase, asks
+# hours for the other architecture, emulated: x86 on Apple Silicon, through
+# qemu-user on Linux). Then it lists the USB disks, asks which one to erase, asks
 # again, and writes the ISO to it. Other arguments go to build.sh (--xkb it).
 # The computer must boot it with Secure Boot off (Limine isn't signed).
 #
-# QEMU: on Apple Silicon, the release's build for arm64 ISOs (qemu/build.sh:
-# GPU acceleration and nested virtualization), in $TRY_UBUNTU_DIR/dist;
-# otherwise Homebrew's on a Mac, the distribution's on Linux.
+# QEMU: the release's build (qemu/build.sh), in $TRY_UBUNTU_DIR/dist. On
+# Apple Silicon, for arm64 ISOs (GPU acceleration and nested
+# virtualization); on Linux, x86 or arm64, for ISOs of both architectures
+# (GPU acceleration; nothing to install, no root). Otherwise Homebrew's on
+# a Mac, and the distribution's on a Linux where the release's doesn't
+# start (it needs glibc 2.35 and the desktop's libraries: GTK 3...).
+# --system-qemu: never the release's build, always Homebrew's or the
+# distribution's (installed with apt, dnf or pacman, with its GTK window,
+# OpenGL, virtio GPU and sound modules).
 #
 # On a terminal it shows the logo and its steps as a list: a dot for those
 # to come, a spinner for the one running, a tick for those done. What the
@@ -438,18 +448,39 @@ linux_firmware_found() {
   return 1
 }
 
-# The release's QEMU for Apple Silicon (see qemu/build.sh), unless this
-# release's is already there. Returns 1 when the release has none.
+# The distribution's QEMU, with what run-qemu.sh shows the desktop with: the
+# firmware, a GTK window and the virtio GPU with OpenGL (Fedora and Arch
+# have them as packages of their own).
+linux_qemu_complete() {
+  has "$qemu" && linux_firmware_found || return 1
+  gpu=virtio-gpu-gl-pci
+  [ "$arch" = amd64 ] && gpu=virtio-vga-gl
+  "$qemu" -display help 2>/dev/null | grep -qx gtk || return 1
+  "$qemu" -device help 2>/dev/null | grep -q "name \"$gpu\""
+}
+
+# The release's QEMU for this computer (see qemu/build.sh), unless this
+# release's is already there: Apple Silicon's runs arm64 ISOs, Linux's
+# both. Returns 1 when the release has none, or when it doesn't start here
+# (Linux's uses the desktop's libraries).
 install_qemu_release() {
-  qemu_tgz=qemu-macos-arm64.tar.gz
+  case "$os:$host" in
+    Darwin:arm64)
+      [ "$arch" = arm64 ] || return 1
+      qemu_rt=qemu-macos-arm64 qemu_for='Apple Silicon' ;;
+    Linux:*) qemu_rt=qemu-linux-$host qemu_for="Linux ($host)" ;;
+    *) return 1 ;;
+  esac
+  qemu_tgz=$qemu_rt.tar.gz
   printf '%s\n' "$sums" | grep -q " \*\{0,1\}$qemu_tgz\$" || return 1
-  qemu_stamp="$dist/qemu-macos-arm64.release"
-  if [ -x "$dist/qemu-macos-arm64/bin/qemu-system-aarch64" ] &&
-     [ "$(cat "$qemu_stamp" 2>/dev/null || true)" = "$tag" ]; then
-    note "the release's build for Apple Silicon, already here"
+  qemu_stamp="$dist/$qemu_rt.release"
+  if [ "$(cat "$qemu_stamp" 2>/dev/null || true)" = "$tag" ]; then
+    # Downloaded already: without it, it didn't start here
+    [ -x "$dist/$qemu_rt/bin/$qemu" ] || return 1
+    note "the release's build for $qemu_for, already here"
     return 0
   fi
-  note "the release's build for Apple Silicon"
+  note "the release's build for $qemu_for"
   tmp=$(mktemp -d "$dist/.qemu.XXXXXX")
   curl -fL $meter -o "$tmp/$qemu_tgz" "$base/$qemu_tgz" </dev/null || {
     rm -rf "$tmp"; die "QEMU download failed; run this again"; }
@@ -457,10 +488,15 @@ install_qemu_release() {
     rm -rf "$tmp"; die "checksum mismatch for $qemu_tgz; run this again"
   fi
   tar -xzf "$tmp/$qemu_tgz" -C "$tmp"
-  rm -rf "$dist/qemu-macos-arm64"
-  mv "$tmp/qemu-macos-arm64" "$dist/qemu-macos-arm64"
-  rm -rf "$tmp"
+  rm -rf "$dist/$qemu_rt"
   printf '%s\n' "$tag" > "$qemu_stamp"
+  if ! "$tmp/$qemu_rt/bin/$qemu" --version >&2; then
+    rm -rf "$tmp"
+    warn "the release's QEMU doesn't start on this system: using the distribution's"
+    return 1
+  fi
+  mv "$tmp/$qemu_rt" "$dist/$qemu_rt"
+  rm -rf "$tmp"
 }
 
 # --rebuild: everything downloaded from the releases, and the caches. Not
@@ -468,16 +504,16 @@ install_qemu_release() {
 purge_downloads() {
   note "in $dist"
   rm -rf "$dist"/*.iso "$dist"/*.iso.*.part "$dist"/*.release \
-    "$dist/qemu-macos-arm64" "$dist"/.qemu.* "$dist"/.kernel-* "$dist"/.app-* \
+    "$dist/qemu-macos-arm64" "$dist"/qemu-linux-* "$dist"/.qemu.* "$dist"/.kernel-* "$dist"/.app-* \
     "$DIR/run-qemu.sh" "$DIR/try-ubuntu.icns"
 }
 
 install_qemu() {
   qemu=qemu-system-aarch64
   [ "$arch" = amd64 ] && qemu=qemu-system-x86_64
+  if [ "$system_qemu" = 0 ] && install_qemu_release; then return 0; fi
   case "$os" in
     Darwin)
-      [ "$arch" = arm64 ] && [ "$host" = arm64 ] && install_qemu_release && return 0
       if has "$qemu"; then
         note "already installed"
         return 0
@@ -486,7 +522,7 @@ install_qemu() {
       note "brew install qemu"
       brew install qemu ;;
     Linux)
-      if has "$qemu" && linux_firmware_found; then
+      if linux_qemu_complete; then
         note "already installed"
         return 0
       fi
@@ -498,17 +534,26 @@ install_qemu() {
         else
           sudo_run apt-get install -y qemu-system-arm qemu-efi-aarch64 qemu-utils qemu-system-gui
         fi
+      # Fedora and Arch split QEMU up: the window, OpenGL, the sound
+      # systems and each flavour of the virtio GPU are packages
       elif has dnf; then
+        set -- qemu-img qemu-ui-gtk qemu-ui-opengl qemu-audio-pipewire qemu-audio-pa qemu-audio-alsa
         if [ "$arch" = amd64 ]; then
-          sudo_run dnf install -y qemu-system-x86 edk2-ovmf qemu-img qemu-ui-gtk
+          sudo_run dnf install -y qemu-system-x86 edk2-ovmf "$@" \
+            qemu-device-display-virtio-vga qemu-device-display-virtio-vga-gl
         else
-          sudo_run dnf install -y qemu-system-aarch64 edk2-aarch64 qemu-img qemu-ui-gtk
+          sudo_run dnf install -y qemu-system-aarch64 edk2-aarch64 "$@" \
+            qemu-device-display-virtio-gpu-pci qemu-device-display-virtio-gpu-pci-gl
         fi
       elif has pacman; then
+        set -- qemu-img qemu-ui-gtk qemu-ui-opengl qemu-audio-pipewire qemu-audio-pa qemu-audio-alsa \
+          qemu-hw-display-virtio-gpu qemu-hw-display-virtio-gpu-pci \
+          qemu-hw-display-virtio-gpu-gl qemu-hw-display-virtio-gpu-pci-gl
         if [ "$arch" = amd64 ]; then
-          sudo_run pacman -S --needed --noconfirm qemu-system-x86 edk2-ovmf qemu-img qemu-ui-gtk
+          sudo_run pacman -S --needed --noconfirm qemu-system-x86 edk2-ovmf "$@" \
+            qemu-hw-display-virtio-vga qemu-hw-display-virtio-vga-gl
         else
-          sudo_run pacman -S --needed --noconfirm qemu-system-aarch64 edk2-aarch64 qemu-img qemu-ui-gtk
+          sudo_run pacman -S --needed --noconfirm qemu-system-aarch64 edk2-aarch64 "$@"
         fi
       else
         die "install $qemu and its UEFI firmware (edk2/OVMF/AAVMF) with your package manager, then run this again"
@@ -537,7 +582,9 @@ get_sources() {
 }
 
 # podman, with a machine able to build (on a Mac: rootful, for loop
-# devices; room and memory for compiling GNOME).
+# devices; room and memory for compiling GNOME). For an ISO of the other
+# architecture its containers are emulated: the podman machine can, a Linux
+# needs qemu-user registered with binfmt_misc.
 get_podman() {
   case "$os" in
     Darwin)
@@ -554,12 +601,28 @@ get_podman() {
       podman machine inspect --format '{{.State}}' 2>/dev/null | grep -qx running ||
         podman machine start ;;
     Linux)
-      has podman && return
-      say "Installing podman"
-      if has apt-get; then sudo_run apt-get update -qq && sudo_run apt-get install -y podman
-      elif has dnf; then sudo_run dnf install -y podman
-      elif has pacman; then sudo_run pacman -S --needed --noconfirm podman
-      else die "install podman with your package manager, then run this again"; fi ;;
+      if ! has podman; then
+        say "Installing podman"
+        if has apt-get; then sudo_run apt-get update -qq && sudo_run apt-get install -y podman
+        elif has dnf; then sudo_run dnf install -y podman
+        elif has pacman; then sudo_run pacman -S --needed --noconfirm podman
+        else die "install podman with your package manager, then run this again"; fi
+      fi
+      emulator=qemu-aarch64
+      [ "$arch" = amd64 ] && emulator=qemu-x86_64
+      if [ "$arch" != "$host" ] && ! ls /proc/sys/fs/binfmt_misc/"$emulator"* >/dev/null 2>&1; then
+        say "Installing qemu-user (to run $arch containers)"
+        if has apt-get; then
+          # qemu-user-static became qemu-user and qemu-user-binfmt (Debian 13, Ubuntu 25.04)
+          sudo_run apt-get update -qq
+          if apt-cache show qemu-user-binfmt >/dev/null 2>&1; then sudo_run apt-get install -y qemu-user-binfmt
+          else sudo_run apt-get install -y qemu-user-static; fi
+        elif has dnf; then sudo_run dnf install -y qemu-user-static
+        elif has pacman; then sudo_run pacman -S --needed --noconfirm qemu-user-static qemu-user-static-binfmt
+        else die "install qemu-user-static (binfmt_misc) with your package manager, then run this again"; fi
+        ls /proc/sys/fs/binfmt_misc/"$emulator"* >/dev/null 2>&1 ||
+          sudo_run systemctl restart systemd-binfmt.service || true
+      fi ;;
   esac
 }
 
@@ -676,9 +739,10 @@ on_usb() {
 }
 
 main() {
-  # --rebuild, --arch and --on-usb are ours; everything else goes to
-  # run-qemu.sh (or with --on-usb to build.sh; after --, to QEMU, untouched).
-  rebuild=0 passthrough=0 on_usb=0 arch_opt=arm expect_arch=0
+  # --rebuild, --arch, --on-usb and --system-qemu are ours; everything else
+  # goes to run-qemu.sh (or with --on-usb to build.sh; after --, to QEMU,
+  # untouched).
+  rebuild=0 passthrough=0 on_usb=0 arch_opt=arm expect_arch=0 system_qemu=0
   for arg do
     shift
     if [ "$expect_arch" = 1 ]; then
@@ -688,6 +752,7 @@ main() {
     case "$passthrough:$arg" in
       0:--rebuild) rebuild=1 ;;
       0:--on-usb) on_usb=1 ;;
+      0:--system-qemu) system_qemu=1 ;;
       0:--arch) expect_arch=1 ;;
       0:--arch=*) arch_opt=${arg#--arch=} ;;
       0:--) passthrough=1; set -- "$@" "$arg" ;;
@@ -809,12 +874,16 @@ main() {
       "https://raw.githubusercontent.com/$REPO/$tag/assets/try-ubuntu.icns" 2>/dev/null ||
     rm -f "$DIR/try-ubuntu.icns"
 
+  # Not the release's build, should an earlier run have left one here
+  [ "$system_qemu" = 0 ] || set -- --qemu "$(command -v "$qemu")" "$@"
+
   step
   note "$tag, close the window to quit"
   finish go
   # Under curl | sh stdin is the script: QEMU's serial console (--headless,
-  # --serial) needs the terminal.
-  if { : </dev/tty; } 2>/dev/null; then
+  # --serial) needs the terminal. In a subshell: without a terminal, dash
+  # exits on the failed redirection.
+  if ( : </dev/tty ) 2>/dev/null; then
     exec bash "$DIR/run-qemu.sh" --iso "$dist/$iso" --arch "$arch_opt" "$@" </dev/tty 3>&-
   fi
   exec bash "$DIR/run-qemu.sh" --iso "$dist/$iso" --arch "$arch_opt" "$@" 3>&-

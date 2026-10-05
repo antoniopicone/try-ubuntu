@@ -1,6 +1,7 @@
 # On a version tag (v*), builds the live ISOs (QEMU flavour) on native arm64
-# and x86 runners and
-# QEMU for Apple Silicon (qemu/build.sh) on a macOS one, and publishes them,
+# and x86 runners,
+# QEMU for Apple Silicon (qemu/build.sh) on a macOS one and QEMU for Linux
+# (the same script, arm64 and x86) on Linux ones, and publishes them,
 # with their SHA256SUMS, as a GitHub release. install.sh downloads from the
 # latest release.
 name: Release
@@ -129,7 +130,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: dist/.cache/qemu
-          key: qemu-archives-${{ hashFiles('qemu/build.sh') }}
+          key: qemu-archives-${{ hashFiles('qemu/build.sh', 'qemu/sources.sh') }}
           restore-keys: qemu-archives-
 
       - name: Build
@@ -152,8 +153,56 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  qemu-linux:
+    name: QEMU (Linux ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      QEMU: qemu-linux-${{ matrix.arch }}.tar.gz
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install podman
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman
+
+      # The pinned downloads; build-linux.sh checks each one's sha256 anyway.
+      - uses: actions/cache@v4
+        with:
+          path: dist/.cache/qemu
+          key: qemu-linux-archives-${{ hashFiles('qemu/build-linux.sh', 'qemu/sources.sh') }}
+          restore-keys: qemu-linux-archives-
+
+      # In a container (qemu/Containerfile), rootless: no loop devices here.
+      - name: Build
+        run: ./qemu/build.sh
+
+      - name: Checksum
+        run: |
+          cd dist
+          sha256sum "$QEMU" > "$QEMU.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-linux-${{ matrix.arch }}
+          path: |
+            dist/${{ env.QEMU }}
+            dist/${{ env.QEMU }}.sha256
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
   release:
-    needs: [iso, qemu]
+    needs: [iso, qemu, qemu-linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -173,5 +222,6 @@ jobs:
           files: |
             dist/*.iso
             dist/qemu-macos-arm64.tar.gz
+            dist/qemu-linux-*.tar.gz
             dist/SHA256SUMS
           generate_release_notes: true

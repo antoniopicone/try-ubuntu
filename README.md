@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
 ```
 
 Options after `sh -s --` go to [run-qemu.sh](run-qemu.sh), except
-`--rebuild`, `--arch` and `--on-usb`:
+`--rebuild`, `--arch`, `--on-usb` and `--system-qemu`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh -s -- --lang de_DE --no-persist
@@ -37,15 +37,22 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
 - **Which ISO**: `--arch arm` (the default) or `--arch x86`. The releases
   have `ubuntu-live-arm64.iso` and `ubuntu-live-amd64.iso`. An ISO runs
   with hardware acceleration on a host of its own architecture (hvf on
-  Apple Silicon or an Intel Mac, kvm on Linux), and emulated (TCG, slow)
-  on the other.
-- **QEMU**: on Apple Silicon, the release's own build (see
-  [QEMU for Apple Silicon](#qemu-for-apple-silicon)), with GPU acceleration
-  and nested virtualization; nothing gets installed system-wide. On an Intel
-  Mac it's Homebrew's (`brew install qemu`), and on Linux it's installed with
-  apt (Debian, Ubuntu), dnf (Fedora) or pacman (Arch), together with the
-  UEFI firmware (AAVMF or OVMF; this uses sudo). x86 ISOs always use the
-  system's `qemu-system-x86_64` (Homebrew's on a Mac).
+  Apple Silicon or an Intel Mac, kvm on an x86 or arm64 Linux), and
+  emulated (TCG, slow) on the other.
+- **QEMU**: the release's own build, with GPU acceleration; nothing gets
+  installed system-wide. On Apple Silicon it runs arm64 ISOs, with nested
+  virtualization (see [QEMU for Apple Silicon](#qemu-for-apple-silicon));
+  on Linux, x86 or arm64, it runs ISOs of both architectures (see
+  [QEMU for Linux](#qemu-for-linux)). Elsewhere it's the system's: Homebrew's
+  on an Intel Mac and for x86 ISOs on Apple Silicon (`brew install qemu`).
+  On a Linux where the release's build doesn't start (a glibc older than
+  2.35, no GTK 3), QEMU is installed with apt (Debian, Ubuntu), dnf (Fedora)
+  or pacman (Arch), together with the UEFI firmware (AAVMF or OVMF; this
+  uses sudo). `--system-qemu` always does that, and never uses the
+  release's build: on Fedora and Arch it installs the packages QEMU is
+  split into there (the GTK window, OpenGL, the virtio GPU with and without
+  OpenGL, PipeWire, PulseAudio and ALSA), so the desktop renders on the GPU
+  with the distribution's QEMU too.
 - **Files**: the ISO, the persistent disk and `run-qemu.sh` go in
   `~/.local/share/try-ubuntu` (set `TRY_UBUNTU_DIR` to change it). The ISO
   is checked against the release's `SHA256SUMS`, and an interrupted
@@ -60,7 +67,7 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
   its own ISO, so it's moved aside to `persist-<tag>.qcow2` (see
   [How the live btrfs works](#how-the-live-btrfs-works)).
 - **Starting over**: `--rebuild` deletes what the script downloaded and the
-  caches (the ISO, partial downloads, QEMU for Apple Silicon, `run-qemu.sh`,
+  caches (the ISO, partial downloads, the release's QEMU, `run-qemu.sh`,
   and the kernel `run-qemu.sh` extracts from the ISO for nested
   virtualization), then downloads them again from the latest release. The
   persistent disks and the UEFI variables (`efivars.fd`) stay. A persistent
@@ -73,9 +80,9 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
 
 ```bash
 ./build.sh --xkb it          # → dist/ubuntu-live-arm64.iso (~1.4 GB)
-./build.sh --arch x86        # → dist/ubuntu-live-amd64.iso (emulated on Apple Silicon: slow)
+./build.sh --arch x86        # → dist/ubuntu-live-amd64.iso (emulated on an arm64 host: slow)
 ./build.sh --hardware        # → dist/ubuntu-live-arm64-hardware.iso, for real computers
-./qemu/build.sh              # macOS: → dist/qemu-macos-arm64 (optional, GPU + nested virtualization)
+./qemu/build.sh              # → dist/qemu-macos-arm64 or dist/qemu-linux-<arch> (optional: GPU, nested virtualization on a Mac)
 ./run-qemu.sh                # boot it in a window (--serial: serial console in the terminal too)
 ./run-qemu.sh --lang de_DE   # boot in German instead of the host's language
 ./run-qemu.sh --no-persist   # RAM only (by default changes and snapshots go to a persistent disk)
@@ -87,10 +94,20 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
 survives reboots. After `./build.sh` makes a new ISO, the next
 `./run-qemu.sh` moves the old disk aside and starts a new one.
 
-From a checkout, `run-qemu.sh` looks for QEMU in `dist/qemu-macos-arm64`,
-which only `./qemu/build.sh` creates there (install.sh downloads it to
-`~/.local/share/try-ubuntu/dist`, not to the checkout). Without it, it uses the
-QEMU on `PATH` (e.g. Homebrew's), and GNOME renders in software.
+On Linux, `build.sh` needs root (`sudo ./build.sh`, with the same
+options): rootless podman can't make the rootfs's device nodes or
+loop-mount the ISO's btrfs image. The ISO and `dist/` are handed back to
+you at the end. An ISO of the other architecture (`--arch x86` on arm64,
+the default arm64 on x86) builds emulated, with qemu-user registered in
+binfmt_misc (`qemu-user-binfmt` or `qemu-user-static`; `install.sh
+--on-usb` installs it). `qemu/build.sh` needs neither root nor emulation.
+
+From a checkout, `run-qemu.sh` looks for QEMU in `dist/qemu-macos-arm64`
+(`dist/qemu-linux-<arch>` on Linux), which only `./qemu/build.sh` creates
+there (install.sh downloads it to `~/.local/share/try-ubuntu/dist`, not to
+the checkout). Without it, it uses the QEMU on `PATH` (e.g. Homebrew's):
+on a Mac GNOME then renders in software, on Linux only when that QEMU has
+no `virtio-gpu-gl` or no GTK window.
 
 On first boot the live user (`ubuntu`) logs in by itself and the welcome
 app takes over: it creates your user and logs out to GDM (see
@@ -113,8 +130,11 @@ app takes over: it creates your user and logs out to GDM (see
    ISO is over GitHub's 2 GiB limit for a release asset, hence the local
    build. It uses the release's sources (or the checkout install.sh is run
    from) and podman. On a Mac, install.sh installs podman with Homebrew and
-   creates a rootful machine if there's none. For x86 on Apple Silicon everything
-   runs emulated (qemu-user in the podman machine), so it takes many
+   creates a rootful machine if there's none. On Linux it installs podman
+   with apt, dnf or pacman and runs the build with sudo. For the other
+   architecture (x86 on Apple Silicon or an arm64 Linux, arm64 on an x86
+   Linux) everything runs emulated (qemu-user: in the podman machine, or
+   installed and registered with binfmt_misc on Linux), so it takes many
    hours. Later builds reuse the cache. In an emulated build, the ISO
    step runs in a native container on the same cache, since qemu-user
    can't pass btrfs's ioctls (snapshot, resize) on. The checks that run
@@ -383,7 +403,9 @@ files install.sh keeps, pass
 ## Build
 
 `build.sh` runs everything in a privileged **podman** container
-(`ubuntu:26.04`, native arm64 on the podman machine on Apple Silicon):
+(`ubuntu:26.04`, of the ISO's architecture: native arm64 on the podman
+machine on Apple Silicon, native for its own architecture on Linux, where
+it needs root):
 
 1. [scripts/build-gnome.sh](scripts/build-gnome.sh) rebuilds the GNOME
    packages with local fixes (see [The desktop](#the-desktop)), if any.
@@ -423,8 +445,8 @@ with the GPU-enabled QEMU), a USB keyboard and tablet on an xHCI controller
 (the `virt` machine has no input devices of its own), the persistent disk
 on virtio-blk, virtio-rng, and user networking with SSH on
 `localhost:2222` (`ssh -p 2222 ubuntu@localhost`). On Apple Silicon it
-takes the QEMU in `dist/qemu-macos-arm64` when it's there (see below),
-otherwise the one on `PATH`.
+takes the QEMU in `dist/qemu-macos-arm64` when it's there, on Linux the one
+in `dist/qemu-linux-<arch>` (see below), otherwise the one on `PATH`.
 
 When that QEMU has them (the one from `qemu/build.sh` and Homebrew's do),
 the guest also gets the following. When it doesn't, run-qemu.sh says
@@ -464,12 +486,12 @@ started by install.sh):
 | Option | |
 |---|---|
 | `--arch arm\|x86` | the ISO's architecture (default: from its name, `ubuntu-live-amd64*` being x86). x86 runs in `qemu-system-x86_64` on a q35 machine with OVMF: kvm on an x86 Linux host, hvf on an Intel Mac, emulated elsewhere. Its persistent disk and UEFI variables are `persist-amd64.qcow2` and `efivars-amd64.fd` |
-| *(none)* | the ISO in a Cocoa window. With `dist/qemu-macos-arm64`, the desktop renders on the Mac's GPU (virtio-gpu-gl) and the guest has `/dev/kvm` where the Mac allows it; with any other QEMU, it renders in software (llvmpipe) on a virtio-gpu |
+| *(none)* | the ISO in a window (Cocoa on a Mac, GTK on Linux). With `dist/qemu-macos-arm64`, the desktop renders on the Mac's GPU (virtio-gpu-gl) and the guest has `/dev/kvm` where the Mac allows it. On Linux it renders on the computer's GPU with any QEMU that has virtio-gpu-gl and GTK (the one in `dist/qemu-linux-<arch>`, most distributions'), when there's a GPU (`/dev/dri/renderD*`). Otherwise it renders in software (llvmpipe) on a virtio-gpu |
 | `--lang LOCALE` | language of the live session, e.g. `it_IT` or `de` (default: the host's, see below) |
 | `--vnc :1` | graphics over VNC at `127.0.0.1:5901` instead of a window (software rendering) |
 | `--no-gpu` | software rendering (llvmpipe) even with the GPU-enabled QEMU |
 | `--no-nested` | no virtualization extensions in the guest, and the Limine menu back (with nested virtualization the kernel boots directly, see below) |
-| `--qemu PATH` | the `qemu-system-aarch64` to use |
+| `--qemu PATH` | the `qemu-system-aarch64` (`qemu-system-x86_64` for an x86 ISO) to use |
 | `--headless` | no graphics at all: login on the serial console |
 | `--serial` | with a window, attach the serial console to the terminal instead of the window's text console |
 | `--persist[=FILE]` | the persistent qcow2 disk, **on by default** (`dist/persist.qcow2`, 32G, created on first use; replaced by a new one, the old one kept, when the ISO changes) |
@@ -483,9 +505,9 @@ started by install.sh):
 With a window the terminal stays quiet: the guest's serial console is
 attached to it only with `--headless` or `--serial`, multiplexed with the
 monitor (`Ctrl-A X` quits QEMU, `Ctrl-A C` opens the monitor). Otherwise
-it's a text console in the window itself: **Ctrl-Opt-2** (or the View
-menu) shows it, Ctrl-Opt-1 goes back to the desktop, and the same keys
-work over VNC. It has a login prompt (`ttyAMA0`) and the kernel's
+it's a text console in the window itself: **Ctrl-Opt-2** (**Ctrl-Alt-2**
+on Linux, or the View menu) shows it, Ctrl-Opt-1 goes back to the desktop,
+and the same keys work over VNC. It has a login prompt (`ttyAMA0`) and the kernel's
 messages, so when the desktop doesn't come up (the window says *Display
 output is not active*) you can still log in and look around, e.g.
 `journalctl -b -p err`. Either way, everything the serial console prints
@@ -543,6 +565,43 @@ relocated next to the binaries and everything is ad-hoc signed, QEMU with
 the `com.apple.security.hypervisor` entitlement. It runs on macOS 15 or
 newer. Releases ship it as `qemu-macos-arm64.tar.gz`, which install.sh
 downloads.
+
+### QEMU for Linux
+
+On Linux, [qemu/build.sh](qemu/build.sh) runs
+[qemu/build-linux.sh](qemu/build-linux.sh), which builds the same QEMU
+11.1.1 (the same pinned sources, without the Macs' patches: those are for
+Cocoa and HVF) for the computer it runs on, x86 or arm64:
+
+- **both targets**: `qemu-system-aarch64` and `qemu-system-x86_64`, plus
+  `qemu-img`. Each has TCG, and the one of the computer's architecture has
+  KVM: an ISO of that architecture runs accelerated, the other emulated
+- **GPU**: the guest's Mesa virgl driver → `virtio-gpu-gl-pci`
+  (`virtio-vga-gl` on x86) → **virglrenderer** 1.3.0 → the host's OpenGL,
+  in a GTK window (`-display gtk,gl=on`). The guest resolution follows the
+  window. run-qemu.sh turns it on when the computer has a GPU
+  (`/dev/dri/renderD*`); `--no-gpu` goes back to software rendering, e.g.
+  where the host's drivers don't get along with it
+- **nested virtualization**: on x86, KVM passes the CPU's own extensions
+  on (`-cpu host`), so the guest has `/dev/kvm` when the host's
+  `kvm_intel` or `kvm_amd` module has `nested` on (the default). Not on
+  arm64
+- PulseAudio and ALSA (`virtio-sound`; PipeWire plays it through its
+  PulseAudio server), 9p (`--shared-folder`), `qemu-vdagent` (the shared
+  clipboard), a VNC server, and the edk2 firmware of both architectures
+
+It builds in a rootless podman container
+([qemu/Containerfile](qemu/Containerfile), Ubuntu 22.04) without network:
+the sources are downloaded first, pinned by sha256, and the build
+dependencies are that image's packages. It takes a few minutes. The
+result, in `dist/qemu-linux-<arch>` (`amd64` or `arm64`), bundles
+virglrenderer and libslirp next to the binaries. Everything else is the
+desktop's: glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36), GTK 3,
+Mesa (EGL, GBM), the PulseAudio client library and ALSA's. It needs no
+root and installs nothing. Releases ship it as `qemu-linux-amd64.tar.gz`
+and `qemu-linux-arm64.tar.gz`. install.sh downloads the one for the
+computer, checks that it starts, and otherwise installs the
+distribution's QEMU.
 
 ### The host's language
 
@@ -1121,8 +1180,12 @@ git tag v1.0.0 && git push origin v1.0.0
   delete the `gnome50-repo-*` caches (Actions → Caches).
 - It builds `qemu-macos-arm64.tar.gz` with `./qemu/build.sh` on a
   `macos-15` runner, caching the downloads.
+- It builds `qemu-linux-arm64.tar.gz` and `qemu-linux-amd64.tar.gz` with
+  the same `./qemu/build.sh`, on `ubuntu-24.04-arm` and `ubuntu-24.04`
+  (rootless podman), caching the downloads.
 - It publishes a release with `ubuntu-live-arm64.iso`, `ubuntu-live-amd64.iso`,
-  `qemu-macos-arm64.tar.gz` and `SHA256SUMS`.
+  `qemu-macos-arm64.tar.gz`, `qemu-linux-arm64.tar.gz`,
+  `qemu-linux-amd64.tar.gz` and `SHA256SUMS`.
   A release asset can be at most 2 GiB, and the build fails if the ISO is
   bigger. [install.sh](install.sh) downloads from there.
 
@@ -1146,7 +1209,7 @@ git tag v1.0.0 && git push origin v1.0.0
   virtio-sound and no firmware for real hardware (Wi-Fi, non-virtio
   GPUs): it's aimed at VMs. For real computers, `build.sh --hardware`
   (what `install.sh --on-usb` builds).
-- With the QEMU from `qemu/build.sh`, sound is output only (no
+- With the QEMU from `qemu/build.sh` on a Mac, sound is output only (no
   microphone), and `--vnc` doesn't work (no VNC server in it): use
   Homebrew's with `--qemu`.
 - Wallpapers:

@@ -8,11 +8,12 @@
 # real computers (the generic kernel, all of linux-firmware, CPU microcode:
 # what install.sh --on-usb writes to a USB stick).
 #
-# Runs on macOS (Apple Silicon) through podman: the build happens inside a
-# privileged Ubuntu container of the ISO's architecture. arm64 is native on
-# Apple Silicon; amd64 (--arch x86) runs emulated in the podman machine
-# (qemu-user), which is slow. Also works
-# on a Linux host with podman, natively for its own architecture.
+# Runs on macOS (Apple Silicon) and on Linux (x86 or arm64) through podman:
+# the build happens inside a privileged Ubuntu container of the ISO's
+# architecture. The computer's own architecture is native (arm64 on Apple
+# Silicon); the other runs emulated (qemu-user: in the podman machine on a
+# Mac, registered with binfmt_misc on Linux), which is slow. On Linux it
+# needs root (sudo ./build.sh): the ISO step uses loop devices.
 set -euo pipefail
 
 usage() {
@@ -82,13 +83,24 @@ case $arch in
   amd64) mirror=http://archive.ubuntu.com/ubuntu ;;
 esac
 
+# Rootless podman can't create the rootfs's device nodes, nor loop-mount
+# the btrfs image (on a Mac the podman machine is rootful).
+if [[ $(uname -s) == Linux ]] && (($(id -u) != 0)); then
+  echo "On Linux the build needs root: sudo $0 ..." >&2
+  exit 1
+fi
+
 if ((clean)); then
   podman volume rm -f "$cache_volume" >/dev/null && echo "Build cache removed ($arch)."
   exit 0
 fi
 
 command -v podman >/dev/null || {
-  echo "podman is required: brew install podman && podman machine init --now" >&2
+  if [[ $(uname -s) == Darwin ]]; then
+    echo "podman is required: brew install podman && podman machine init --now" >&2
+  else
+    echo "podman is required: install it with your package manager" >&2
+  fi
   exit 1
 }
 if [[ $(uname -s) == Darwin ]] && ! podman machine inspect --format '{{.State}}' 2>/dev/null | grep -qx running; then
@@ -98,7 +110,14 @@ fi
 host_arch=$(podman info --format '{{.Host.Arch}}')
 if [[ $host_arch != "$arch" ]]; then
   # qemu-user through binfmt_misc: the podman machine has it, a Linux host
-  # needs qemu-user-static (or podman build fails on the first RUN)
+  # needs it installed (or podman build fails on the first RUN)
+  emulator=qemu-aarch64
+  [[ $arch == amd64 ]] && emulator=qemu-x86_64
+  if [[ $(uname -s) == Linux ]] && ! compgen -G "/proc/sys/fs/binfmt_misc/$emulator*" >/dev/null; then
+    echo "Building $arch on $host_arch needs qemu-user registered with binfmt_misc:" >&2
+    echo "install qemu-user-binfmt or qemu-user-static (install.sh --on-usb does)" >&2
+    exit 1
+  fi
   echo "==> Building $arch on $host_arch: emulated, it takes a long time"
 fi
 
@@ -150,6 +169,12 @@ else
   # only, so it runs natively, on the same cache.
   builder "$arch" "$image" gnome apfs icloud rootfs
   builder "$host_arch" "$(builder_image "$host_arch")" iso
+fi
+
+# Under sudo, the ISO and dist/ go back to whoever ran it: run-qemu.sh
+# keeps the VM's state there.
+if [[ -n "${SUDO_UID:-}" ]]; then
+  chown "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$dist_dir" "$dist_dir/$iso_name"
 fi
 
 echo

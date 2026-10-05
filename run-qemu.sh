@@ -8,7 +8,11 @@
 # (dist/qemu-macos-arm64, which install.sh downloads from the release): the
 # desktop then renders on the Mac's GPU (virtio-gpu-gl, VirGL -> ANGLE ->
 # Metal) and, on macOS 26 with an M3 or newer, the guest gets nested
-# virtualization (/dev/kvm). Any other QEMU (Homebrew's, the distro's) works
+# virtualization (/dev/kvm). On Linux it uses the one from qemu/build.sh
+# too (dist/qemu-linux-<arch>, for ISOs of both architectures), and the
+# desktop renders on the computer's GPU with any QEMU that has virtio-gpu-gl
+# and a GTK window (VirGL -> the host's OpenGL). Any other QEMU (Homebrew's,
+# the distro's) works
 # too, with the desktop rendered in software (llvmpipe). The live session starts in
 # the host's language, taken from the shell's locale (LC_ALL, LC_MESSAGES,
 # LANG; on macOS the system's when those are unset) and passed to the guest
@@ -16,11 +20,13 @@
 # The guest's serial console goes to this terminal only with --headless or
 # --serial (Ctrl-A X quits QEMU, Ctrl-A C toggles the QEMU monitor); with a
 # window the terminal stays quiet and the serial console is a text console
-# in the window (Ctrl-Opt-2, back with Ctrl-Opt-1). Either way it's logged
+# in the window (Ctrl-Opt-2, back with Ctrl-Opt-1; Ctrl-Alt on Linux). Either
+# way it's logged
 # to dist/serial.log. By default the guest gets half of the
 # host's CPUs and a third of its RAM (at least 4 GiB).
 # When QEMU has them (the one from qemu/build.sh, Homebrew's), the guest
-# also gets sound (virtio-sound, through CoreAudio on macOS), the clipboard
+# also gets sound (virtio-sound, through CoreAudio on macOS, PipeWire,
+# PulseAudio or ALSA on Linux), the clipboard
 # shared with the window (qemu-vdagent, for the guest's spice-vdagent) and,
 # with --shared-folder, a folder of the host (9p).
 set -euo pipefail
@@ -40,15 +46,16 @@ Usage: ./run-qemu.sh [options]
   --cpus N       guest vCPUs (default: half of the host's CPUs)
   --headless     no window: serial console only (login on ttyAMA0)
   --serial       attach the serial console to this terminal instead of the
-                 window's text console (Ctrl-Opt-2; always the terminal
-                 with --headless)
+                 window's text console (Ctrl-Opt-2, Ctrl-Alt-2 on Linux;
+                 always the terminal with --headless)
   --vnc DISPLAY  graphics over VNC instead of a window (e.g. :1 -> port 5901;
                  no GPU acceleration)
   --no-gpu       render the desktop in software even when QEMU could use
                  the host's GPU
   --no-nested    don't expose virtualization extensions (EL2) to the guest
-  --qemu PATH    qemu-system-aarch64 to use (default: the one built by
-                 qemu/build.sh, if any, else the one on PATH)
+  --qemu PATH    qemu-system-aarch64 (qemu-system-x86_64 for an x86 ISO) to
+                 use (default: the one built by qemu/build.sh, if any, else
+                 the one on PATH)
   --persist[=FILE]  keep changes (and snapper snapshots) across reboots on a
                  qcow2 disk. On by default (dist/persist.qcow2, 32G, created
                  on first use); it only works with the ISO build that set it up
@@ -128,13 +135,26 @@ fi
 # else the system's.
 qemu_name=qemu-system-aarch64
 [[ $arch == amd64 ]] && qemu_name=qemu-system-x86_64
-bundled="$project_dir/dist/qemu-macos-arm64/bin/qemu-system-aarch64"
-if [[ -z "$qemu" && $arch == arm64 && -x "$bundled" && $(uname -s) == Darwin && $(uname -m) == arm64 ]]; then
+bundled=""
+case "$(uname -s):$(uname -m)" in
+  Darwin:arm64)  bundled="$project_dir/dist/qemu-macos-arm64/bin/qemu-system-aarch64" ;;
+  Linux:x86_64)  bundled="$project_dir/dist/qemu-linux-amd64/bin/$qemu_name" ;;
+  Linux:aarch64) bundled="$project_dir/dist/qemu-linux-arm64/bin/$qemu_name" ;;
+esac
+# The Macs' only runs arm64 ISOs; Linux's uses the desktop's libraries
+# (GTK 3...), so it's left alone where it doesn't start.
+if [[ -z "$qemu" && -n "$bundled" && -x "$bundled" ]] &&
+   [[ $arch == arm64 || $(uname -s) == Linux ]] && "$bundled" --version >/dev/null 2>&1; then
   qemu=$bundled
 fi
 [[ -n "$qemu" ]] || qemu=$(command -v "$qemu_name" || true)
 [[ -n "$qemu" && -x "$qemu" ]] || {
-  echo "$qemu_name not found (macOS: brew install qemu$([[ $arch == arm64 ]] && echo ", or ./qemu/build.sh"))" >&2; exit 1; }
+  if [[ $(uname -s) == Darwin ]]; then
+    echo "$qemu_name not found (brew install qemu$([[ $arch == arm64 ]] && echo ", or ./qemu/build.sh"))" >&2
+  else
+    echo "$qemu_name not found (./qemu/build.sh, or your distribution's QEMU)" >&2
+  fi
+  exit 1; }
 
 # Defaults from the host: half of its CPUs, a third of its RAM (min 4 GiB).
 if [[ -z "$cpus" ]]; then
@@ -220,7 +240,8 @@ fi
 persist_args=()
 if [[ -n "$persist" ]]; then
   iso_id=$(cut -d' ' -f1 "$iso.sha256" 2>/dev/null || true)
-  [[ -n "$iso_id" ]] || iso_id=$(stat -f '%z-%m' "$iso" 2>/dev/null || stat -c '%s-%Y' "$iso")
+  # GNU's stat first: its -f is about the file system, and prints it
+  [[ -n "$iso_id" ]] || iso_id=$(stat -c '%s-%Y' "$iso" 2>/dev/null || stat -f '%z-%m' "$iso")
   if [[ -f "$persist" ]]; then
     disk_id=$(cat "$persist.iso" 2>/dev/null || true)
     # No record (a disk from before this check): btrfs writes to the disk at
@@ -318,7 +339,7 @@ fi
 # Serial console on the terminal only when asked (always with --headless):
 # otherwise the guest's boot and console output would flood it. Without it,
 # it's a text console in the window (View menu, or Ctrl-Opt-2 and back with
-# Ctrl-Opt-1; the same keys over VNC): a login prompt and the kernel's
+# Ctrl-Opt-1, Ctrl-Alt on Linux; the same keys over VNC): a login prompt and the kernel's
 # messages even when the desktop doesn't come up. Either way it's also
 # logged to dist/serial.log (overwritten at every boot).
 serial_log="$(dirname "$vars")/serial.log"
@@ -329,8 +350,9 @@ else
   serial_args=(-chardev "vc,id=serial0,logfile=$serial_log" -serial chardev:serial0)
 fi
 
-# What this QEMU can do: devices, audio backends, chardev backends.
+# What this QEMU can do: devices, displays, audio backends, chardev backends.
 qemu_devices=$("$qemu" -device help 2>/dev/null || true)
+qemu_displays=$("$qemu" -display help 2>/dev/null || true)
 qemu_audio=$("$qemu" -audiodev help 2>/dev/null || true)
 qemu_chardevs=$("$qemu" -machine none -chardev help 2>/dev/null || true)
 has_device() { grep -qF "name \"$1\"" <<<"$qemu_devices"; }
@@ -338,17 +360,27 @@ has_device() { grep -qF "name \"$1\"" <<<"$qemu_devices"; }
 # GPU acceleration (VirGL) needs a QEMU with virtio-gpu-gl-pci and an
 # OpenGL display: on macOS that's the one from qemu/build.sh, whose Cocoa
 # window renders through ANGLE (OpenGL ES) on Metal. It follows the window's
-# size and the display's refresh rate.
-if ((gpu)) && [[ $arch == arm64 && -z "$vnc" && $(uname -s) == Darwin ]] && has_device virtio-gpu-gl-pci; then
-  gpu=1
-else
-  gpu=0
+# size and the display's refresh rate. On Linux it's GTK's window, on a
+# computer with a GPU to render on (a DRM render node); the guest's
+# resolution follows the window there too. x86's virtio-vga-gl is the same
+# device with a VGA side, for the firmware's and Limine's screens.
+gpu_device=virtio-gpu-gl-pci
+[[ $arch == amd64 ]] && gpu_device=virtio-vga-gl
+gl_display=""
+if ((gpu)) && [[ -z "$vnc" ]] && has_device "$gpu_device"; then
+  if [[ $(uname -s) == Darwin && $arch == arm64 ]]; then
+    gl_display=cocoa,gl=es,zoom-to-fit=on,left-command-key=on
+  elif [[ $(uname -s) == Linux ]] && grep -qx gtk <<<"$qemu_displays" &&
+       compgen -G '/dev/dri/renderD*' >/dev/null; then
+    gl_display=gtk,gl=on
+  fi
 fi
+[[ -n "$gl_display" ]] || gpu=0
 
 if ((headless)); then
   display=(-display none)
 elif ((gpu)); then
-  display=(-device virtio-gpu-gl-pci -display cocoa,gl=es,zoom-to-fit=on,left-command-key=on)
+  display=(-device "$gpu_device" -display "$gl_display")
 else
   display=(-device virtio-gpu-pci)
   [[ $arch == amd64 ]] && display=(-device virtio-vga)
