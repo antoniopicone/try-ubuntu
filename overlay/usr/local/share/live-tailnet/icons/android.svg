@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- A device of the tailnet in Files (android): live-tailnet sets it on the folder -->
+  <rect x="19" y="5" width="26" height="54" rx="6" fill="#f6f5f4" stroke="#5e5c64" stroke-width="2.500" stroke-linejoin="round"/><path d="M28 10h8" stroke="#5e5c64" stroke-width="2.500" stroke-linecap="round"/><g transform="translate(23 26) scale(1)"><path fill="#3d3846" d="M0 12a9 9 0 0 1 18 0z"/><path stroke="#3d3846" stroke-width="1.6" stroke-linecap="round" d="M4.200 4.800 2.600 2M13.800 4.800 15.400 2"/><circle cx="5.400" cy="8" r="1.100" fill="#f6f5f4"/><circle cx="12.600" cy="8" r="1.100" fill="#f6f5f4"/></g>
+  <circle cx="54" cy="54" r="7" fill="#26a269" stroke="#ffffff" stroke-width="2.500"/>
+</svg>

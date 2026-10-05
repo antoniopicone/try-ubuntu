@@ -234,8 +234,9 @@ packages=(
   # Flatpak (Flathub is added below; GNOME Software's plugin comes with the
   # desktop)
   flatpak
-  # FUSE, for apfs-fuse (installed below; Mac disks, read-only)
-  fuse3
+  # FUSE, for apfs-fuse (installed below; Mac disks, read-only) and for
+  # live-tailnet (the Tailscale network's devices in Files), in Python
+  fuse3 python3-pyfuse3
   # fonts: metric-compatible with Arial/Times/Courier (Liberation) and with
   # Calibri/Cambria (Carlito/Caladea), so Office documents keep their
   # layout; JetBrains Mono. Hack Nerd Font is installed below.
@@ -328,6 +329,13 @@ in_chroot systemctl --global enable live-crash-watch.service
 in_chroot systemctl --global enable live-icloud-watch.service
 [[ -L "$ROOTFS/etc/systemd/user/graphical-session.target.wants/live-icloud-watch.service" ]] \
   || { echo "live-icloud-watch.service is not enabled" >&2; exit 1; }
+# The Tailscale network's devices in Files, for every user (live-tailnet:
+# ~/Tailscale is there only on a tailnet)
+in_chroot systemctl --global enable live-tailnet.service
+[[ -L "$ROOTFS/etc/systemd/user/graphical-session.target.wants/live-tailnet.service" ]] \
+  || { echo "live-tailnet.service is not enabled" >&2; exit 1; }
+in_chroot python3 -c 'import pyfuse3, trio' \
+  || { echo "live-tailnet's pyfuse3 is missing" >&2; exit 1; }
 # Cores go to systemd-coredump, where coredumpctl and the agents find them
 grep -rqs 'systemd-coredump' "$ROOTFS/usr/lib/sysctl.d/" \
   || { echo "systemd-coredump doesn't handle the cores" >&2; exit 1; }

@@ -9,7 +9,7 @@
 #   curl -fsSL .../install.sh | sh -s -- --arch x86 --on-usb
 #   curl -fsSL .../install.sh | sh -s -- --system-qemu
 #
-# --arch arm|x86: the ISO's architecture (default: arm, i.e. arm64). An ISO
+# --arch arm|x86: the ISO's architecture (default: this computer's). An ISO
 # runs accelerated on a computer of its own architecture (an x86 ISO on an
 # x86 Linux, an arm64 one on Apple Silicon or an arm64 Linux), and emulated
 # (slow) on the other.
@@ -742,7 +742,7 @@ main() {
   # --rebuild, --arch, --on-usb and --system-qemu are ours; everything else
   # goes to run-qemu.sh (or with --on-usb to build.sh; after --, to QEMU,
   # untouched).
-  rebuild=0 passthrough=0 on_usb=0 arch_opt=arm expect_arch=0 system_qemu=0
+  rebuild=0 passthrough=0 on_usb=0 arch_opt='' expect_arch=0 system_qemu=0
   for arg do
     shift
     if [ "$expect_arch" = 1 ]; then
@@ -759,12 +759,6 @@ main() {
       *) set -- "$@" "$arg" ;;
     esac
   done
-  case "$arch_opt" in
-    arm|arm64|aarch64) arch=arm64 arch_opt=arm ;;
-    x86|x86_64|amd64) arch=amd64 arch_opt=x86 ;;
-    *) die "--arch is arm or x86, not '$arch_opt'" ;;
-  esac
-
   os=$(uname -s)
   case "$os" in
     Darwin|Linux) ;;
@@ -774,6 +768,12 @@ main() {
     arm64|aarch64) host=arm64 ;;
     x86_64|amd64)  host=amd64 ;;
     *) die "unsupported CPU: $(uname -m)" ;;
+  esac
+  # This computer's architecture, unless --arch says otherwise
+  case "${arch_opt:-$host}" in
+    arm|arm64|aarch64) arch=arm64 arch_opt=arm ;;
+    x86|x86_64|amd64) arch=amd64 arch_opt=x86 ;;
+    *) die "--arch is arm or x86, not '$arch_opt'" ;;
   esac
   has curl || die "curl is required"
   has bash || die "bash is required (run-qemu.sh and build.sh are bash scripts)"

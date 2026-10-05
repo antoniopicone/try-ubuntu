@@ -1,0 +1,534 @@
+#!/usr/bin/python3
+"""live-tailnet: the devices of the user's Tailscale network as a folder,
+~/Tailscale, for Files: one folder per device, and a file copied into a
+device's folder is sent to it with Taildrop.
+
+A FUSE filesystem (pyfuse3), of the type "fuse.tailnet": the patched Files
+shows it in the sidebar with the VPN icon and doesn't offer to unmount it
+(patches/gnome/nautilus/cloud-mounts.patch). It's mounted while this computer
+is on a tailnet, and not otherwise.
+
+  - The devices come from `tailscale status --json`, read every few
+    seconds, and from `tailscale whois` (the system's and Tailscale's
+    versions, once an hour). Each folder gets its system's icon, a grey one
+    when the device is offline (metadata::custom-icon, which Files reads).
+  - A new file in a device's folder is the standard input of
+    `tailscale file cp - <device>:`: nothing is kept here, and the copy's
+    progress in Files is the transfer's. A failed transfer is a failed copy
+    (the error comes at the file's close) and a notification. The sent
+    files stay listed for a moment, for the copy to finish with them.
+  - Folders can't be sent (Taildrop sends files), nor anything to a device
+    that is offline or someone else's: those folders are read-only.
+
+What Files' extension shows (the properties, the menus:
+/usr/share/nautilus-python/extensions/live-tailnet.py) is in
+$XDG_RUNTIME_DIR/live-tailnet/devices.json, written here.
+
+A systemd user service (live-tailnet.service, on for every user).
+
+For tests: LIVE_TAILNET_TAILSCALE is the tailscale command to run instead,
+--mount the folder, --no-notify and --no-icons leave the desktop alone.
+"""
+import argparse
+import errno
+import json
+import os
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+import pyfuse3
+import trio
+
+TAILSCALE = os.environ.get("LIVE_TAILNET_TAILSCALE", "/usr/bin/tailscale")
+MOUNT = os.path.expanduser("~/Tailscale")
+STATE_DIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "live-tailnet")
+STATE = os.path.join(STATE_DIR, "devices.json")
+ICONS = "/usr/local/share/live-tailnet/icons"
+POLL_SECONDS = 10            # tailscale status
+WHOIS_SECONDS = 3600         # a device's versions
+LINGER_SECONDS = 20          # a sent file stays listed
+NOTIFY_AFTER_SECONDS = 2     # one notification for the files sent together
+TAILDROP_AVAILABLE = 1       # ipnstate.TaildropTargetAvailable
+
+STRINGS = {
+    "en": {
+        "sent_one": "Sent {file} to {device}",
+        "sent_many": "Sent {count} files to {device}",
+        "failed_one": "{file} wasn't sent to {device}",
+        "failed_many": "{count} files weren't sent to {device}",
+    },
+    "it": {
+        "sent_one": "{file} inviato a {device}",
+        "sent_many": "{count} file inviati a {device}",
+        "failed_one": "{file} non è stato inviato a {device}",
+        "failed_many": "{count} file non sono stati inviati a {device}",
+    },
+}
+
+
+def t(key, /, **kw):
+    lang = os.environ.get("LANG", "")[:2]
+    return STRINGS.get(lang, STRINGS["en"])[key].format(**kw)
+
+
+def log(msg):
+    print(f"live-tailnet: {msg}", file=sys.stderr, flush=True)
+
+
+def tailscale(*args, timeout=15):
+    """A tailscale command's JSON output, or None."""
+    try:
+        out = subprocess.run([TAILSCALE, *args], capture_output=True, text=True, timeout=timeout)
+        return json.loads(out.stdout) if out.returncode == 0 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def kind(system, model):
+    """Which icon: the shape says the device, its mark the system."""
+    system, model = system.lower(), model.lower()
+    if system == "ios":
+        return "ipad" if model.startswith("ipad") else "iphone"
+    return {"ipados": "ipad", "android": "android", "macos": "mac", "windows": "windows",
+            "linux": "linux"}.get(system, "server")
+
+
+class Device:
+    def __init__(self, inode):
+        self.inode = inode
+        self.name = ""
+        self.info = {}
+        self.whois = {}
+        self.whois_time = 0
+        self.icon = None        # the one set on the folder
+        self.created = time.time_ns()
+
+    @property
+    def can_receive(self):
+        return self.info.get("taildrop", False)
+
+
+class Sent:
+    """A file on its way to a device, then for a moment the record of it."""
+
+    def __init__(self, inode, device, name):
+        self.inode, self.device, self.name = inode, device, name
+        self.size = 0
+        self.time = time.time_ns()
+        self.proc = None
+        self.error = None
+        self.done = None        # time.monotonic() once it ended
+
+    def start(self, address):
+        self.size, self.error, self.done = 0, None, None
+        self.time = time.time_ns()
+        self.proc = subprocess.Popen(
+            [TAILSCALE, "file", "cp", "--update-interval=0", "--name", self.name, "-", f"{address}:"],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+    def write(self, data):
+        self.proc.stdin.write(data)
+
+    def finish(self):
+        """Close tailscale's input and wait for it: the error, or None."""
+        proc, self.proc = self.proc, None
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        err = proc.stderr.read().decode(errors="replace").strip()
+        if proc.wait() != 0:
+            self.error = (err.splitlines() or [f"tailscale file cp: {proc.returncode}"])[-1]
+        self.done = time.monotonic()
+        return self.error
+
+
+class Tailnet(pyfuse3.Operations):
+    def __init__(self, notify=True, icons=True):
+        super().__init__()
+        self.notify, self.icons = notify, icons
+        self.devices = {}       # the node's ID -> Device
+        self.by_inode = {}      # inode -> Device or Sent
+        self.next_inode = pyfuse3.ROOT_INODE + 1
+        self.batches = {}       # device's inode -> [last activity, [sent], [(failed, error)]]
+        self.uid, self.gid = os.getuid(), os.getgid()
+        self.started = time.time_ns()
+        self.stopped = False
+
+    # --- the devices ---------------------------------------------------------------
+
+    def inode(self):
+        self.next_inode += 1
+        return self.next_inode - 1
+
+    def update(self, status):
+        """The peers of `tailscale status --json` become the folders. True if
+        the list changed."""
+        me = (status.get("Self") or {}).get("UserID")
+        users = status.get("User") or {}
+        seen, names, changed = set(), set(), False
+        peers = sorted((status.get("Peer") or {}).values(), key=lambda p: p.get("ID", ""))
+        for peer in peers:
+            node = peer.get("ID") or peer.get("PublicKey")
+            ips = peer.get("TailscaleIPs") or []
+            if not node or not ips:
+                continue
+            seen.add(node)
+            device = self.devices.get(node)
+            if device is None:
+                device = self.devices[node] = Device(self.inode())
+                self.by_inode[device.inode] = device
+                changed = True
+            dns = (peer.get("DNSName") or "").rstrip(".")
+            # The name the device gave itself, else its name on the tailnet
+            name = (peer.get("HostName") or "").replace("/", "-").strip().lstrip(".")
+            if not name or name in names:
+                name = dns.split(".")[0] or ips[0]
+            while name in names:
+                name += "_"
+            names.add(name)
+            online = bool(peer.get("Online"))
+            if "TaildropTarget" in peer:
+                taildrop = peer["TaildropTarget"] == TAILDROP_AVAILABLE
+            else:
+                taildrop = online and peer.get("UserID") == me
+            host = (device.whois.get("Node") or {}).get("Hostinfo") or {}
+            system = peer.get("OS") or host.get("OS") or ""
+            user = users.get(str(peer.get("UserID"))) or {}
+            info = {
+                "name": name, "dns": dns, "online": online, "taildrop": online and taildrop,
+                "mine": peer.get("UserID") == me, "os": system,
+                "os_version": host.get("OSVersion", ""), "model": host.get("DeviceModel", ""),
+                "tailscale": host.get("IPNVersion", ""),
+                "ipv4": next((ip for ip in ips if ":" not in ip), ""),
+                "ipv6": next((ip for ip in ips if ":" in ip), ""),
+                "owner": user.get("LoginName", ""), "last_seen": peer.get("LastSeen", ""),
+                "key_expiry": peer.get("KeyExpiry", ""),
+                "direct": bool(peer.get("CurAddr")), "relay": peer.get("Relay", ""),
+                "kind": kind(system, host.get("DeviceModel", "")),
+            }
+            changed |= name != device.name
+            device.name, device.info = name, info
+        for node in set(self.devices) - seen:
+            del self.by_inode[self.devices.pop(node).inode]
+            changed = True
+        return changed
+
+    def refresh_whois(self):
+        """A device's versions and model aren't in the status: one whois each,
+        now and then (blocking: from a thread)."""
+        for device in list(self.devices.values()):
+            address = device.info.get("ipv4") or device.info.get("ipv6")
+            if address and time.monotonic() - device.whois_time > WHOIS_SECONDS:
+                device.whois_time = time.monotonic()
+                device.whois = tailscale("whois", "--json", address) or {}
+
+    def save_state(self):
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        tmp = STATE + ".new"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"mount": MOUNT,
+                       "devices": {d.name: d.info for d in self.devices.values()}}, fh)
+        os.replace(tmp, STATE)
+
+    def set_icons(self):
+        """Each folder's icon, by system and by whether the device is there
+        (blocking, and through this filesystem: from a thread)."""
+        from gi.repository import Gio
+        for device in list(self.devices.values()):
+            icon = device.info["kind"] + ("" if device.info["online"] else "-offline")
+            if icon == device.icon:
+                continue
+            uri = Gio.File.new_for_path(os.path.join(ICONS, icon + ".svg")).get_uri()
+            try:
+                Gio.File.new_for_path(os.path.join(MOUNT, device.name)).set_attribute_string(
+                    "metadata::custom-icon", uri, Gio.FileQueryInfoFlags.NONE, None)
+                device.icon = icon
+            except Exception as e:  # GLib.Error: no metadata daemon, say
+                log(f"icon of {device.name}: {e}")
+                return
+
+    # --- the filesystem ------------------------------------------------------------
+
+    def attr(self, inode):
+        entry = pyfuse3.EntryAttributes()
+        entry.st_ino = inode
+        entry.st_uid, entry.st_gid = self.uid, self.gid
+        entry.st_blksize = 128 * 1024
+        entry.entry_timeout = entry.attr_timeout = 1
+        node = self.by_inode.get(inode)
+        when = self.started
+        if inode == pyfuse3.ROOT_INODE:
+            entry.st_mode, entry.st_nlink = stat.S_IFDIR | 0o555, 2
+        elif isinstance(node, Device):
+            entry.st_mode = stat.S_IFDIR | (0o755 if node.can_receive else 0o555)
+            entry.st_nlink, when = 2, node.created
+        elif isinstance(node, Sent):
+            entry.st_mode, entry.st_nlink = stat.S_IFREG | 0o644, 1
+            entry.st_size, when = node.size, node.time
+            entry.st_blocks = (node.size + 511) // 512
+        else:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+        entry.st_atime_ns = entry.st_mtime_ns = entry.st_ctime_ns = when
+        return entry
+
+    def children(self, inode):
+        """[(name, inode)] of a folder, in the order of the inodes."""
+        if inode == pyfuse3.ROOT_INODE:
+            found = [(d.name, d.inode) for d in self.devices.values()]
+        else:
+            found = [(n.name, n.inode) for n in self.by_inode.values()
+                     if isinstance(n, Sent) and n.device.inode == inode]
+        return sorted(found, key=lambda entry: entry[1])
+
+    def folder(self, inode):
+        node = self.by_inode.get(inode)
+        if not isinstance(node, Device):
+            raise pyfuse3.FUSEError(errno.EPERM if inode == pyfuse3.ROOT_INODE else errno.ENOENT)
+        return node
+
+    async def getattr(self, inode, ctx=None):
+        return self.attr(inode)
+
+    async def lookup(self, parent_inode, name, ctx=None):
+        name = os.fsdecode(name)
+        for child, inode in self.children(parent_inode):
+            if child == name:
+                return self.attr(inode)
+        raise pyfuse3.FUSEError(errno.ENOENT)
+
+    async def opendir(self, inode, ctx):
+        if inode != pyfuse3.ROOT_INODE and not isinstance(self.by_inode.get(inode), Device):
+            raise pyfuse3.FUSEError(errno.ENOTDIR)
+        return inode
+
+    async def readdir(self, fh, start_id, token):
+        for name, inode in self.children(fh):
+            if inode > start_id and not pyfuse3.readdir_reply(
+                    token, os.fsencode(name), self.attr(inode), inode):
+                break
+
+    async def statfs(self, ctx):
+        # Room for anything: what's sent isn't kept here
+        data = pyfuse3.StatvfsData()
+        data.f_bsize = data.f_frsize = 4096
+        data.f_blocks = data.f_bfree = data.f_bavail = 2 ** 40
+        data.f_files = data.f_ffree = data.f_favail = 2 ** 20
+        data.f_namemax = 255
+        return data
+
+    async def mkdir(self, parent_inode, name, mode, ctx):
+        raise pyfuse3.FUSEError(errno.EPERM)    # Taildrop sends files
+
+    async def setattr(self, inode, attr, fields, fh, ctx):
+        # A copy's last touches (times, permissions): there's nothing to keep
+        if not isinstance(self.by_inode.get(inode), Sent):
+            raise pyfuse3.FUSEError(errno.EPERM)
+        return self.attr(inode)
+
+    async def unlink(self, parent_inode, name, ctx):
+        name = os.fsdecode(name)
+        for child, inode in self.children(parent_inode):
+            if child == name and isinstance(self.by_inode[inode], Sent):
+                if self.by_inode[inode].proc is not None:
+                    raise pyfuse3.FUSEError(errno.EBUSY)
+                del self.by_inode[inode]
+                return
+        raise pyfuse3.FUSEError(errno.ENOENT)
+
+    def send(self, sent):
+        device = sent.device
+        if not device.can_receive:
+            raise pyfuse3.FUSEError(errno.EHOSTDOWN)
+        try:
+            sent.start(device.info["ipv4"] or device.info["ipv6"])
+        except OSError as e:
+            log(f"tailscale file cp: {e}")
+            raise pyfuse3.FUSEError(errno.EIO)
+        return pyfuse3.FileInfo(fh=sent.inode, direct_io=True, nonseekable=True)
+
+    async def create(self, parent_inode, name, mode, flags, ctx):
+        device = self.folder(parent_inode)
+        name = os.fsdecode(name)
+        if any(child == name for child, _ in self.children(parent_inode)):
+            raise pyfuse3.FUSEError(errno.EEXIST)
+        sent = Sent(self.inode(), device, name)
+        info = self.send(sent)
+        self.by_inode[sent.inode] = sent
+        return info, self.attr(sent.inode)
+
+    async def open(self, inode, flags, ctx):
+        sent = self.by_inode.get(inode)
+        # Written again: sent again. There's nothing to read back.
+        if not isinstance(sent, Sent) or flags & os.O_ACCMODE == os.O_RDONLY:
+            raise pyfuse3.FUSEError(errno.EACCES)
+        if sent.proc is not None:
+            raise pyfuse3.FUSEError(errno.EBUSY)
+        return self.send(sent)
+
+    async def write(self, fh, off, buf):
+        sent = self.by_inode.get(fh)
+        if not isinstance(sent, Sent) or sent.proc is None or off != sent.size:
+            raise pyfuse3.FUSEError(errno.EIO)
+        try:
+            await trio.to_thread.run_sync(sent.write, bytes(buf))
+        except OSError:
+            # tailscale gave up: its reason comes at the close
+            raise pyfuse3.FUSEError(errno.EIO)
+        sent.size += len(buf)
+        return len(buf)
+
+    async def finish(self, fh):
+        sent = self.by_inode.get(fh)
+        if not isinstance(sent, Sent) or sent.proc is None:
+            return None
+        error = await trio.to_thread.run_sync(sent.finish)
+        batch = self.batches.setdefault(sent.device.inode, [0, [], []])
+        batch[0] = time.monotonic()
+        if error:
+            log(f"{sent.name} to {sent.device.name}: {error}")
+            batch[2].append((sent.name, error))
+            self.by_inode.pop(sent.inode, None)     # nothing was sent: no record
+        else:
+            batch[1].append(sent.name)
+        return error
+
+    async def flush(self, fh):
+        # The close of the file: where a writer learns that it wasn't sent
+        if await self.finish(fh):
+            raise pyfuse3.FUSEError(errno.EIO)
+
+    async def release(self, fh):
+        await self.finish(fh)
+
+    # --- around it ---------------------------------------------------------------
+
+    def tell(self, device, sent, failed):
+        if not self.notify:
+            return
+        messages = []
+        if sent:
+            messages.append((t("sent_one", file=sent[0], device=device) if len(sent) == 1
+                             else t("sent_many", count=len(sent), device=device),
+                             "" if len(sent) == 1 else ", ".join(sent)[:200], "network-vpn-symbolic"))
+        if failed:
+            messages.append((t("failed_one", file=failed[0][0], device=device) if len(failed) == 1
+                             else t("failed_many", count=len(failed), device=device),
+                             failed[-1][1][:200], "dialog-warning"))
+        for summary, body, icon in messages:
+            try:
+                subprocess.run(["notify-send", "--app-name=Tailscale", f"--icon={icon}", summary, body],
+                               capture_output=True)
+            except OSError as e:
+                log(f"notify-send: {e}")
+
+    async def housekeeping(self):
+        """Every second: the notifications of the transfers that ended, and
+        the sent files that have been listed long enough."""
+        while True:
+            await trio.sleep(1)
+            now = time.monotonic()
+            busy = {n.device.inode for n in self.by_inode.values()
+                    if isinstance(n, Sent) and n.proc is not None}
+            for inode, (last, sent, failed) in list(self.batches.items()):
+                if inode not in busy and now - last > NOTIFY_AFTER_SECONDS:
+                    del self.batches[inode]
+                    device = self.by_inode.get(inode)
+                    await trio.to_thread.run_sync(self.tell, device.name if device else "?",
+                                                  sent, failed)
+            for inode, node in list(self.by_inode.items()):
+                if isinstance(node, Sent) and node.done and now - node.done > LINGER_SECONDS:
+                    del self.by_inode[inode]
+                    try:
+                        pyfuse3.invalidate_entry_async(node.device.inode, os.fsencode(node.name))
+                    except OSError:
+                        pass
+
+    async def watch(self):
+        """Every few seconds: the devices again. Off the tailnet, the end."""
+        while True:
+            status = await trio.to_thread.run_sync(tailscale, "status", "--json")
+            if not status or status.get("BackendState") != "Running":
+                log("off the tailnet: unmounting")
+                pyfuse3.terminate()
+                return
+            self.update(status)
+            await trio.to_thread.run_sync(self.refresh_whois)
+            self.update(status)     # with what whois said
+            self.save_state()
+            if self.icons:
+                await trio.to_thread.run_sync(self.set_icons)
+            await trio.sleep(POLL_SECONDS)
+
+
+def on_tailnet():
+    status = tailscale("status", "--json")
+    return status if status and status.get("BackendState") == "Running" else None
+
+
+def clear_mount():
+    """A mount left by a daemon that was killed answers ENOTCONN."""
+    try:
+        os.stat(MOUNT)
+        stale = os.path.ismount(MOUNT)
+    except OSError as e:
+        stale = e.errno == errno.ENOTCONN
+    if stale:
+        subprocess.run(["fusermount3", "-u", "-z", MOUNT], capture_output=True)
+
+
+async def stop_on_signal(fs):
+    with trio.open_signal_receiver(signal.SIGTERM, signal.SIGINT) as signals:
+        async for _ in signals:
+            fs.stopped = True
+            pyfuse3.terminate()
+            return
+
+
+async def serve(fs):
+    async with trio.open_nursery() as nursery:
+        nursery.start_soon(stop_on_signal, fs)
+        nursery.start_soon(fs.housekeeping)
+        nursery.start_soon(fs.watch)
+        await pyfuse3.main()
+        nursery.cancel_scope.cancel()
+
+
+def main():
+    global MOUNT
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--mount", default=MOUNT)
+    parser.add_argument("--no-notify", action="store_true")
+    parser.add_argument("--no-icons", action="store_true")
+    args = parser.parse_args()
+    MOUNT = os.path.abspath(args.mount)
+
+    while True:
+        status = on_tailnet()
+        if not status:
+            # No folder off the tailnet: Files would show an empty one
+            try:
+                os.remove(STATE)
+            except OSError:
+                pass
+            time.sleep(POLL_SECONDS)
+            continue
+        clear_mount()
+        os.makedirs(MOUNT, exist_ok=True)
+        fs = Tailnet(notify=not args.no_notify, icons=not args.no_icons)
+        fs.update(status)
+        pyfuse3.init(fs, MOUNT, set(pyfuse3.default_options) | {"fsname=tailscale", "subtype=tailnet"})
+        log(f"mounted {MOUNT}")
+        try:
+            trio.run(serve, fs)
+        finally:
+            pyfuse3.close(unmount=True)
+        if fs.stopped:
+            return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

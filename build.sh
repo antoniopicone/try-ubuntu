@@ -20,7 +20,7 @@ usage() {
   cat <<'EOF'
 Usage: ./build.sh [--arch arm|x86] [--hardware] [--xkb LAYOUT] [--oauth-clients FILE] [--clean]
 
-  --arch ARCH    arm (arm64, the default) or x86 (amd64)
+  --arch ARCH    arm (arm64) or x86 (amd64); default: this computer's
   --hardware     for real computers: the generic kernel, all of
                  linux-firmware, CPU microcode (dist/ubuntu-live-<arch>-hardware.iso)
   --xkb LAYOUT   keyboard layout for the session and the login screen
@@ -38,7 +38,12 @@ EOF
 
 project_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 dist_dir="$project_dir/dist"
-arch=arm64
+# This computer's architecture, unless --arch says otherwise: the other one
+# builds emulated
+case $(uname -m) in
+  x86_64|amd64) arch=amd64 ;;
+  *) arch=arm64 ;;
+esac
 hardware=0
 xkb_layout=us
 oauth_clients=""
@@ -113,10 +118,24 @@ if [[ $host_arch != "$arch" ]]; then
   # needs it installed (or podman build fails on the first RUN)
   emulator=qemu-aarch64
   [[ $arch == amd64 ]] && emulator=qemu-x86_64
-  if [[ $(uname -s) == Linux ]] && ! compgen -G "/proc/sys/fs/binfmt_misc/$emulator*" >/dev/null; then
-    echo "Building $arch on $host_arch needs qemu-user registered with binfmt_misc:" >&2
-    echo "install qemu-user-binfmt or qemu-user-static (install.sh --on-usb does)" >&2
-    exit 1
+  registered() { compgen -G "/proc/sys/fs/binfmt_misc/$emulator*" >/dev/null; }
+  if [[ $(uname -s) == Linux ]] && ! registered; then
+    echo "==> Installing qemu-user (to run $arch containers)"
+    if command -v apt-get >/dev/null; then
+      # qemu-user-static became qemu-user and qemu-user-binfmt (Debian 13, Ubuntu 25.04)
+      apt-get update -qq
+      if apt-cache show qemu-user-binfmt >/dev/null 2>&1; then apt-get install -y qemu-user-binfmt
+      else apt-get install -y qemu-user-static; fi
+    elif command -v dnf >/dev/null; then dnf install -y qemu-user-static
+    elif command -v pacman >/dev/null; then
+      pacman -S --needed --noconfirm qemu-user-static qemu-user-static-binfmt
+    fi
+    registered || systemctl restart systemd-binfmt.service || true
+    if ! registered; then
+      echo "Building $arch on $host_arch needs qemu-user registered with binfmt_misc:" >&2
+      echo "install qemu-user-binfmt or qemu-user-static with your package manager" >&2
+      exit 1
+    fi
   fi
   echo "==> Building $arch on $host_arch: emulated, it takes a long time"
 fi
@@ -185,5 +204,5 @@ echo "Done: $dist_dir/$iso_name"
 if ((hardware)); then
   echo "Write it to a USB stick with: ./install.sh --on-usb (or dd)"
 else
-  echo "Boot it with: ./run-qemu.sh$([[ $arch == amd64 ]] && echo " --iso $dist_dir/$iso_name")"
+  echo "Boot it with: ./run-qemu.sh$([[ $arch == "$host_arch" ]] || echo " --iso $dist_dir/$iso_name")"
 fi

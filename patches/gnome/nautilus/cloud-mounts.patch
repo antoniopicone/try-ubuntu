@@ -1,12 +1,108 @@
 From: Live ISO builder <live@localhost>
-Subject: A cloud in the sidebar for the clouds' FUSE mounts
+Subject: The clouds' and the tailnet's FUSE mounts: their icon, and no unmounting
 
 gvfs gives every mount without a volume, as FUSE mounts in the home folder
-are, the symbolic icon of a removable drive. The clouds that Cloud Config
-mounts with rclone (device "live-cloud:<id>") and icloud-linux's iCloud
-Drive (fuse.icloud) get live-cloud-symbolic instead, rclone's other mounts
-(Samba, SFTP) folder-remote-symbolic.
+are, the symbolic icon of a removable drive, and Files offers to unmount
+it. The clouds that Cloud Config mounts with rclone (device
+"live-cloud:<id>") and icloud-linux's iCloud Drive (fuse.icloud) get
+live-cloud-symbolic instead, rclone's other mounts (Samba, SFTP)
+folder-remote-symbolic, and live-tailnet's devices of the Tailscale network
+(fuse.tailnet) network-vpn-symbolic.
+
+The clouds and the Tailscale network can't be unmounted from Files either
+(the sidebar's button and menu, the views' menu): their services mount them
+at every login, and an unmounted iCloud Drive stops syncing without a word.
 ---
+--- a/src/nautilus-file-utilities.c
++++ b/src/nautilus-file-utilities.c
+@@ -39,6 +39,7 @@
+ #include <glib/gi18n.h>
+ #include <glib/gstdio.h>
+ #include <gio/gio.h>
++#include <gio/gunixmounts.h>
+ #include <unistd.h>
+ #include <stdlib.h>
+ #include <sys/vfs.h>
+@@ -337,6 +338,43 @@ nautilus_get_mounted_mount_for_root (GFile *location)
+     return result;
+ }
+ 
++/* Is it the FUSE mount of a cloud: one that Cloud Config mounts with rclone
++ * (device "live-cloud:<id>"), icloud-linux's iCloud Drive, or live-tailnet's
++ * devices of the Tailscale network? They belong to their services, which
++ * mount them at every login: Files shows them with their own icon, and
++ * doesn't offer to unmount them. */
++gboolean
++nautilus_mount_is_cloud (GMount *mount)
++{
++    g_autoptr (GFile) root = NULL;
++    g_autofree char *path = NULL;
++    g_autoptr (GUnixMountEntry) entry = NULL;
++    const char *fs_type;
++
++    if (mount == NULL)
++    {
++        return FALSE;
++    }
++
++    root = g_mount_get_root (mount);
++    path = g_file_get_path (root);
++    if (path != NULL)
++    {
++        entry = g_unix_mount_entry_at (path, NULL);
++    }
++    if (entry == NULL)
++    {
++        return FALSE;
++    }
++
++    fs_type = g_unix_mount_entry_get_fs_type (entry);
++
++    return g_strcmp0 (fs_type, "fuse.icloud") == 0 ||
++           g_strcmp0 (fs_type, "fuse.tailnet") == 0 ||
++           (g_strcmp0 (fs_type, "fuse.rclone") == 0 &&
++            g_str_has_prefix (g_unix_mount_entry_get_device_path (entry), "live-cloud:"));
++}
++
+ GFile *
+ nautilus_generate_unique_file_in_directory (GFile      *directory,
+                                             const char *basename,
+--- a/src/nautilus-file-utilities.h
++++ b/src/nautilus-file-utilities.h
+@@ -51,6 +51,7 @@ nautilus_is_directory_empty (GFile              *directory,
+                              gpointer            callback_data);
+ 
+ GMount * nautilus_get_mounted_mount_for_root         (GFile *location);
++gboolean nautilus_mount_is_cloud                     (GMount *mount);
+ 
+ gboolean nautilus_should_use_templates_directory     (void);
+ char *   nautilus_get_templates_directory            (void);
+--- a/src/nautilus-file.c
++++ b/src/nautilus-file.c
+@@ -1094,6 +1094,11 @@ nautilus_file_can_unmount (NautilusFile *file)
+         return FALSE;
+     }
+ 
++    if (nautilus_mount_is_cloud (file->details->mount))
++    {
++        return FALSE;
++    }
++
+     return file->details->can_unmount ||
+            (file->details->mount != NULL &&
+             g_mount_can_unmount (file->details->mount));
+@@ -1109,6 +1114,11 @@ nautilus_file_can_eject (NautilusFile *file)
+         return FALSE;
+     }
+ 
++    if (nautilus_mount_is_cloud (file->details->mount))
++    {
++        return FALSE;
++    }
++
+     return file->details->can_eject ||
+            (file->details->mount != NULL &&
+             g_mount_can_eject (file->details->mount));
 --- a/src/nautilus-sidebar.c
 +++ b/src/nautilus-sidebar.c
 @@ -18,6 +18,7 @@
@@ -17,15 +113,12 @@ Drive (fuse.icloud) get live-cloud-symbolic instead, rclone's other mounts
  #ifdef HAVE_CLOUDPROVIDERS
  #include <cloudproviders.h>
  #endif
-@@ -349,7 +350,40 @@
-     {
-         separator = gtk_separator_new (GTK_ORIENTATION_HORIZONTAL);
-         gtk_list_box_row_set_header (row, separator);
-+    }
-+}
-+
-+/* The FUSE mounts of the clouds (rclone's with the device "live-cloud:<id>",
-+ * and icloud-linux's) get a cloud: gvfs gives every mount without a volume a
+@@ -352,6 +353,41 @@ list_box_header_func (GtkListBoxRow *row,
+     }
+ }
+ 
++/* The FUSE mounts of the clouds (nautilus_mount_is_cloud) get a cloud, and the
++ * Tailscale network's a VPN: gvfs gives every mount without a volume a
 + * removable drive. rclone's other mounts (Samba, SFTP) get a network folder. */
 +static GIcon *
 +get_mount_symbolic_icon (GMount *mount,
@@ -33,7 +126,7 @@ Drive (fuse.icloud) get live-cloud-symbolic instead, rclone's other mounts
 +{
 +    g_autofree char *path = g_file_get_path (root);
 +    g_autoptr (GUnixMountEntry) entry = NULL;
-+    const char *fs_type;
++    const char *fs_type = NULL;
 +
 +    if (path != NULL)
 +    {
@@ -42,23 +135,27 @@ Drive (fuse.icloud) get live-cloud-symbolic instead, rclone's other mounts
 +    if (entry != NULL)
 +    {
 +        fs_type = g_unix_mount_entry_get_fs_type (entry);
-+        if (g_strcmp0 (fs_type, "fuse.icloud") == 0 ||
-+            (g_strcmp0 (fs_type, "fuse.rclone") == 0 &&
-+             g_str_has_prefix (g_unix_mount_entry_get_device_path (entry), "live-cloud:")))
-+        {
-+            return g_themed_icon_new ("live-cloud-symbolic");
-+        }
-+        if (g_strcmp0 (fs_type, "fuse.rclone") == 0)
-+        {
-+            return g_themed_icon_new ("folder-remote-symbolic");
-+        }
-     }
++    }
++    if (g_strcmp0 (fs_type, "fuse.tailnet") == 0)
++    {
++        return g_themed_icon_new ("network-vpn-symbolic");
++    }
++    if (nautilus_mount_is_cloud (mount))
++    {
++        return g_themed_icon_new ("live-cloud-symbolic");
++    }
++    if (g_strcmp0 (fs_type, "fuse.rclone") == 0)
++    {
++        return g_themed_icon_new ("folder-remote-symbolic");
++    }
 +
 +    return g_mount_get_symbolic_icon (mount);
- }
- 
++}
++
  static GtkWidget *
-@@ -995,7 +1029,7 @@
+ add_place (NautilusSidebar           *sidebar,
+            NautilusSidebarRowType     place_type,
+@@ -995,7 +1031,7 @@ update_places (NautilusSidebar *sidebar)
              continue;
          }
  
@@ -67,3 +164,16 @@ Drive (fuse.icloud) get live-cloud-symbolic instead, rclone's other mounts
          mount_uri = g_file_get_uri (root);
          name = g_mount_get_name (mount);
          tooltip = g_file_get_parse_name (root);
+@@ -1692,6 +1728,12 @@ check_unmount_and_eject (GMount   *mount,
+     *show_unmount = FALSE;
+     *show_eject = FALSE;
+ 
++    /* A cloud stays: its service mounts it, not the user */
++    if (nautilus_mount_is_cloud (mount))
++    {
++        return;
++    }
++
+     if (drive != NULL)
+     {
+         *show_eject = g_drive_can_eject (drive);

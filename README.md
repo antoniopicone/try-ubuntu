@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
 curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/install.sh | sh -s -- --arch x86 --on-usb
 ```
 
-- **Which ISO**: `--arch arm` (the default) or `--arch x86`. The releases
+- **Which ISO**: this computer's architecture's, or `--arch arm` / `--arch x86`. The releases
   have `ubuntu-live-arm64.iso` and `ubuntu-live-amd64.iso`. An ISO runs
   with hardware acceleration on a host of its own architecture (hvf on
   Apple Silicon or an Intel Mac, kvm on an x86 or arm64 Linux), and
@@ -79,9 +79,9 @@ curl -fsSL https://raw.githubusercontent.com/antoniopicone/try-ubuntu/main/insta
 ## Build it
 
 ```bash
-./build.sh --xkb it          # → dist/ubuntu-live-arm64.iso (~1.4 GB)
+./build.sh --xkb it          # → dist/ubuntu-live-<arch>.iso (~1.4 GB), for this computer's architecture
 ./build.sh --arch x86        # → dist/ubuntu-live-amd64.iso (emulated on an arm64 host: slow)
-./build.sh --hardware        # → dist/ubuntu-live-arm64-hardware.iso, for real computers
+./build.sh --hardware        # → dist/ubuntu-live-<arch>-hardware.iso, for real computers
 ./qemu/build.sh              # → dist/qemu-macos-arm64 or dist/qemu-linux-<arch> (optional: GPU, nested virtualization on a Mac)
 ./run-qemu.sh                # boot it in a window (--serial: serial console in the terminal too)
 ./run-qemu.sh --lang de_DE   # boot in German instead of the host's language
@@ -97,10 +97,11 @@ survives reboots. After `./build.sh` makes a new ISO, the next
 On Linux, `build.sh` needs root (`sudo ./build.sh`, with the same
 options): rootless podman can't make the rootfs's device nodes or
 loop-mount the ISO's btrfs image. The ISO and `dist/` are handed back to
-you at the end. An ISO of the other architecture (`--arch x86` on arm64,
-the default arm64 on x86) builds emulated, with qemu-user registered in
-binfmt_misc (`qemu-user-binfmt` or `qemu-user-static`; `install.sh
---on-usb` installs it). `qemu/build.sh` needs neither root nor emulation.
+you at the end. The ISO is of this computer's architecture unless `--arch`
+says otherwise: the other one (`--arch x86` on arm64, `--arch arm` on x86)
+builds emulated, with qemu-user registered in
+binfmt_misc (`qemu-user-binfmt` or `qemu-user-static`; `build.sh`
+installs it when it's missing). `qemu/build.sh` needs neither root nor emulation.
 
 From a checkout, `run-qemu.sh` looks for QEMU in `dist/qemu-macos-arm64`
 (`dist/qemu-linux-<arch>` on Linux), which only `./qemu/build.sh` creates
@@ -372,6 +373,28 @@ files install.sh keeps, pass
   stays on `@home` itself. `SYNC_ACL` lets the user (`ALLOW_USERS`: the
   live user, then the one the welcome app creates) list them and go into
   them. Inside, their files keep their own permissions.
+- **Tailscale in Files**: on a tailnet, the sidebar has "Tailscale" (the
+  VPN icon), a folder per device of the network: `~/Tailscale`, a FUSE
+  mount of [live-tailnet](overlay/usr/local/bin/live-tailnet), a user
+  service (pyfuse3) that reads `tailscale status` every few seconds. Off
+  the tailnet the folder isn't there.
+  - **The devices** have their system's icon
+    ([iPhone, iPad, Android, Mac, Windows, Linux, or a server](overlay/usr/local/share/live-tailnet/icons/)),
+    with a green dot when they're online and greyed out when they aren't.
+  - **Taildrop**: drop files on a device, or copy them into its folder,
+    and they're sent to it. A file written there is the input of
+    `tailscale file cp`, so nothing is kept on this computer and the
+    copy's progress is the transfer's; a notification says what was sent,
+    or why it wasn't. The devices that can't receive (offline, or someone
+    else's) are read-only folders. Folders can't be sent: Taildrop sends
+    files.
+  - **Properties and menus**, from a Nautilus extension
+    ([live-tailnet.py](overlay/usr/share/nautilus-python/extensions/live-tailnet.py)):
+    a device's Properties have a "Tailscale" page (addresses, name on the
+    network, system and model, Tailscale's version, owner, last seen, the
+    key's expiry, whether it receives files); its menu copies its address
+    or name and has "Send Files…"; any file's menu has "Send with
+    Taildrop", with the devices that can receive now.
 - **Previous Versions** in Files: right-click a file or folder in a home
   folder, or a folder's background. A Nautilus extension
   ([live-file-versions.py](overlay/usr/share/nautilus-python/extensions/live-file-versions.py))
@@ -499,7 +522,7 @@ started by install.sh):
 | `--efivars FILE` | UEFI variable store (default `dist/efivars.fd`); give each VM running at the same time its own |
 | `--shared-folder PATH` | share a host folder with the guest, read/write, in `/media/<name>` (see above) |
 | `--no-audio` | no sound device |
-| `--mem`, `--cpus`, `--ssh`, `--iso` | RAM in MiB (default: a third of the host's, at least 4096), vCPUs (default: half of the host's), SSH port, ISO path |
+| `--mem`, `--cpus`, `--ssh`, `--iso` | RAM in MiB (default: a third of the host's, at least 4096), vCPUs (default: half of the host's), SSH port, ISO path (default: `dist/ubuntu-live-<arch>.iso`, with `--arch`'s architecture or else this computer's) |
 | `-- ARGS…` | extra arguments passed straight to QEMU (e.g. `-- -monitor tcp:127.0.0.1:4444,server,nowait`) |
 
 With a window the terminal stays quiet: the guest's serial console is
@@ -1113,14 +1136,18 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
     of the package's own patches (`gnome-51`'s gdm3 fix, a double free in
     26.10's `prefer_ubuntu_session_fallback.patch`, isn't needed: 26.04's
     gdm 50.1 doesn't have the bug):
-    - [nautilus](patches/gnome/nautilus/cloud-mount-icon.patch): gvfs gives
+    - [nautilus](patches/gnome/nautilus/cloud-mounts.patch): gvfs gives
       every FUSE mount in the home folder a removable drive for icon. The
       sidebar shows a cloud
       ([live-cloud-symbolic](overlay/usr/local/share/icons/hicolor/scalable/apps/live-cloud-symbolic.svg),
       as in the mockups) for the clouds' mounts instead: rclone's with the
       device `live-cloud:<id>` (`--devname`), and icloud-linux's
       (`fuse.icloud`). rclone's other mounts (Samba, SFTP) get a network
-      folder.
+      folder, and the Tailscale network's (`fuse.tailnet`) the VPN icon.
+      The clouds and the tailnet also can't be unmounted from Files (the
+      sidebar's button and menu, the views' menu): their services mount
+      them at every login, and an unmounted iCloud Drive stops syncing
+      without a word.
   - The rootfs installs from that repository, which is mounted only for the
     build, and the build fails unless the core is at version 50.
   - A package is rebuilt again only when 26.04's source version or its

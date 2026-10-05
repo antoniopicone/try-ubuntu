@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- A device of the tailnet in Files (server, offline): live-tailnet sets it on the folder -->
+  <g opacity=".45"><rect x="9" y="9" width="46" height="20" rx="4" fill="#f6f5f4" stroke="#5e5c64" stroke-width="2.500" stroke-linejoin="round"/><rect x="9" y="35" width="46" height="20" rx="4" fill="#f6f5f4" stroke="#5e5c64" stroke-width="2.500" stroke-linejoin="round"/><circle cx="18" cy="19" r="2.200" fill="#3d3846"/><circle cx="18" cy="45" r="2.200" fill="#3d3846"/><path d="M26 19h20M26 45h20" stroke="#c0bfbc" stroke-width="2.500" stroke-linecap="round"/></g>
+  <circle cx="54" cy="54" r="7" fill="#9a9996" stroke="#ffffff" stroke-width="2.500"/>
+</svg>

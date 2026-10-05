@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Boots the live ISO (see build.sh) in qemu-system-aarch64 with UEFI (edk2),
-# hardware acceleration (hvf on macOS, kvm on Linux) and a virtio-gpu display.
-# An x86 ISO (ubuntu-live-amd64*.iso, or --arch x86) boots in
-# qemu-system-x86_64 instead: accelerated on an x86 host (kvm, or hvf on an
-# Intel Mac), emulated (slow) on Apple Silicon.
+# Boots the live ISO (see build.sh) with UEFI (edk2), hardware acceleration
+# (hvf on macOS, kvm on Linux) and a virtio-gpu display: this computer's
+# architecture's (dist/ubuntu-live-<arch>.iso) unless --iso or --arch say
+# otherwise. An arm64 ISO boots in qemu-system-aarch64, an x86 one
+# (ubuntu-live-amd64*.iso) in qemu-system-x86_64: accelerated on a host of
+# its own architecture, emulated (slow) on the other.
 # On Apple Silicon it uses the QEMU from qemu/build.sh when it's there
 # (dist/qemu-macos-arm64, which install.sh downloads from the release): the
 # desktop then renders on the Mac's GPU (virtio-gpu-gl, VirGL -> ANGLE ->
@@ -35,7 +36,8 @@ usage() {
   cat <<'EOF'
 Usage: ./run-qemu.sh [options]
 
-  --iso PATH     ISO to boot (default: dist/ubuntu-live-arm64.iso)
+  --iso PATH     ISO to boot (default: dist/ubuntu-live-<arch>.iso, with
+                 --arch's architecture or else this computer's)
   --arch ARCH    the ISO's architecture, arm or x86 (default: from the ISO's
                  name, ubuntu-live-amd64* being x86)
   --lang LOCALE  language of the live session (e.g. it_IT, de; default: the
@@ -72,7 +74,7 @@ EOF
 }
 
 project_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-iso="$project_dir/dist/ubuntu-live-arm64.iso"
+iso=""
 lang=""
 mem=""
 cpus=""
@@ -120,6 +122,15 @@ while (($#)); do
   esac
 done
 
+# No --iso: the one build.sh makes by default, this computer's architecture's
+# (or --arch's)
+if [[ -z "$iso" ]]; then
+  iso_arch=$arch
+  if [[ -z "$iso_arch" ]]; then
+    case "$(uname -m)" in x86_64|amd64) iso_arch=amd64 ;; *) iso_arch=arm64 ;; esac
+  fi
+  iso="$project_dir/dist/ubuntu-live-$iso_arch.iso"
+fi
 [[ -f "$iso" ]] || {
   echo "ISO not found: $iso (run ./build.sh first, or install.sh to download it)" >&2; exit 1; }
 if [[ -z "$arch" ]]; then
