@@ -226,6 +226,9 @@ packages=(
   podman uidmap passt
   # tools (eza: ls with icons, aliased in /etc/skel/.zshrc)
   git curl wget eza
+  # the questions packages ask when installed from a terminal (debconf's
+  # dialogs: without it, a warning and plain text questions)
+  whiptail
   # development: Python (pip, venv; uv is installed below), zsh
   python3-pip python3-venv zsh
   # Flatpak (Flathub is added below; GNOME Software's plugin comes with the
