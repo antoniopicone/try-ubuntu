@@ -19,8 +19,10 @@ desktop.py for the GNOME settings).
   - Automatic: a new wallpaper every hour, day, week or login, from the
     photo of the day, the collection or a saved search: systemd user units
     run /usr/local/lib/live-wallpapers/rotate.
-  - Sources: which services are on, Pixabay's API key, and the ones left
-    out (Unsplash, Pexels: their API terms forbid wallpaper apps).
+  - Sources: which services are on, the user's own folders of pictures
+    (searched with their subfolders, on any disk that's mounted), Pixabay's
+    API key, and the ones left out (Unsplash, Pexels: their API terms forbid
+    wallpaper apps).
 """
 import copy
 import os
@@ -104,6 +106,7 @@ STRINGS = {
         "no_sources": "No Source to Ask",
         "no_sources_body": "With these filters, none of the sources that are on can answer.",
         "why_off": "off in Sources",
+        "why_folder": "no folder chosen",
         "why_key": "needs a key",
         "why_license": "licenses not stated",
         "why_kind": "none of this type",
@@ -112,6 +115,18 @@ STRINGS = {
         "err_network": "{names}: no answer.",
         "public_domain": "public domain",
         "license_unknown": "license not stated",
+        "your_file": "your picture",
+        "my_folders": "My folders",
+        "folders_sub": "Your own pictures, from any disk that's connected: this computer's, "
+                       "a cloud's, the network's. Subfolders are searched too, by the "
+                       "files' names.",
+        "folders_use": "Search my folders",
+        "add_folder": "Add a Folder…",
+        "remove_folder": "Remove",
+        "folder_away": "not connected now",
+        "auto_folder": "My folders",
+        "auto_folder_sub": "A picture of yours, a different one each time",
+        "auto_no_folder": "none chosen yet",
         "license_free": "free for any use",
         "by": "By {name}",
         "colors": "The wallpaper's colors",
@@ -241,6 +256,7 @@ STRINGS = {
         "no_sources": "Nessuna sorgente a cui chiedere",
         "no_sources_body": "Con questi filtri nessuna delle sorgenti attive può rispondere.",
         "why_off": "spenta in Sorgenti",
+        "why_folder": "nessuna cartella scelta",
         "why_key": "serve una chiave",
         "why_license": "licenze non dichiarate",
         "why_kind": "non ha questo tipo",
@@ -249,6 +265,18 @@ STRINGS = {
         "err_network": "{names}: nessuna risposta.",
         "public_domain": "pubblico dominio",
         "license_unknown": "licenza non dichiarata",
+        "your_file": "una tua immagine",
+        "my_folders": "Le mie cartelle",
+        "folders_sub": "Le tue immagini, da qualsiasi disco collegato: di questo computer, "
+                       "di un cloud, di rete. Si cerca anche nelle sottocartelle, per nome "
+                       "dei file.",
+        "folders_use": "Cerca nelle mie cartelle",
+        "add_folder": "Aggiungi una cartella…",
+        "remove_folder": "Rimuovi",
+        "folder_away": "non collegata in questo momento",
+        "auto_folder": "Le mie cartelle",
+        "auto_folder_sub": "Una tua immagine, ogni volta diversa",
+        "auto_no_folder": "nessuna scelta",
         "license_free": "libera per ogni uso",
         "by": "Di {name}",
         "colors": "Colori dello sfondo",
@@ -361,6 +389,9 @@ def t(key, /, **kw):
     return STRINGS.get(lang, STRINGS["en"]).get(key, STRINGS["en"][key]).format(**kw)
 
 
+sources.BY_ID["folder"].name = t("my_folders")
+
+
 def in_thread(work, done):
     """work() in a thread, then done(result, error) in the main loop."""
     def run():
@@ -387,7 +418,10 @@ def load_image(where, done, fallback=None, max_size=None):
 
     def run():
         try:
-            if where.startswith("/"):
+            if where.startswith("/") and not max_size and not where.startswith(store.DATA):
+                # One of the user's own pictures: its small copy, kept on disk
+                texture = desktop.texture(sources.thumbnail(where))
+            elif where.startswith("/"):
                 texture = desktop.texture_from_file(where, *(max_size or (640, 640)))
             else:
                 texture = desktop.texture(sources.thumbnail(where))
@@ -427,6 +461,8 @@ def license_label(item):
         return {"cc0": "CC0", "pixabay": "Pixabay"}[item.license]
     if item.license == "pdm":
         return t("public_domain")
+    if item.license == "own":
+        return t("your_file")
     return "CC " + item.license.upper() if item.license else t("license_unknown")
 
 
@@ -1039,6 +1075,7 @@ class Search(Adw.NavigationPage):
         for source in sources.SOURCES:
             check, why = self.source_checks[source.id]
             reason = ("why_off" if not config["sources"].get(source.id, source.default)
+                      else "why_folder" if source.id == "folder" and not config["folders"]
                       else "why_key" if source.needs_key and not config.get(source.id + "_key")
                       else "why_license" if query.free and not source.free
                       else "why_kind" if query.kinds and not set(query.kinds) & set(source.kinds)
@@ -1517,7 +1554,7 @@ class Automatic(Adw.PreferencesPage):
 
         group = Adw.PreferencesGroup(title=t("auto_from"))
         self.froms = {}
-        for key in ("daily", "collection", "search"):
+        for key in ("daily", "collection", "folder", "search"):
             check = Gtk.CheckButton(active=auto["from"] == key, valign=Gtk.Align.CENTER)
             if self.froms:
                 check.set_group(self.froms["daily"])
@@ -1531,6 +1568,9 @@ class Automatic(Adw.PreferencesPage):
                 self.no_search = Gtk.Label(label=t("auto_no_search"), css_classes=["dim-label"])
                 row.add_suffix(self.searches)
                 row.add_suffix(self.no_search)
+            if key == "folder":
+                self.no_folder = Gtk.Label(label=t("auto_no_folder"), css_classes=["dim-label"])
+                row.add_suffix(self.no_folder)
             self.froms[key] = check
             group.add(row)
         self.add(group)
@@ -1582,6 +1622,8 @@ class Automatic(Adw.PreferencesPage):
         self.searches.set_visible(bool(names))
         self.no_search.set_visible(not names)
         self.froms["search"].set_sensitive(bool(names))
+        self.froms["folder"].set_sensitive(bool(config["folders"]))
+        self.no_folder.set_visible(not config["folders"])
         if config["auto"]["search"] in names:
             self.searches.set_selected(names.index(config["auto"]["search"]))
         for which, path in desktop.wallpapers().items():
@@ -1649,9 +1691,14 @@ class Sources(Adw.NavigationPage):
         config = win.config
         page = Adw.PreferencesPage()
 
+        self.folders = Adw.PreferencesGroup(title=t("my_folders"), description=t("folders_sub"))
+        self.folder_rows = []
+        self._folders()
+        page.add(self.folders)
+
         group = Adw.PreferencesGroup(title=t("ready"), description=t("ready_sub"))
         for source in sources.SOURCES:
-            if not source.needs_key:
+            if not source.needs_key and source.id != "folder":
                 group.add(self._switch(source))
         page.add(group)
 
@@ -1684,9 +1731,57 @@ class Sources(Adw.NavigationPage):
         view.add_top_bar(Adw.HeaderBar())
         self.set_child(view)
 
-    def _switch(self, source):
+    def _folders(self):
+        """The user's folders, each with its way out, and the row that adds one."""
         config = self.win.config
-        row = Adw.SwitchRow(title=source.name, subtitle=t("src_" + source.id),
+        for row in self.folder_rows:
+            self.folders.remove(row)
+        use = self._switch(sources.BY_ID["folder"], title=t("folders_use"))
+        self.folder_rows = [use]
+        for folder in config["folders"]:
+            there = os.path.isdir(os.path.expanduser(folder))
+            row = Adw.ActionRow(title=GLib.markup_escape_text(folder),
+                                subtitle="" if there else t("folder_away"))
+            row.add_prefix(Gtk.Image(icon_name="folder-pictures-symbolic"))
+            remove = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER,
+                                tooltip_text=t("remove_folder"), css_classes=["flat"])
+            remove.connect("clicked", lambda _b, folder=folder: self._set_folders(
+                [f for f in config["folders"] if f != folder]))
+            row.add_suffix(remove)
+            self.folder_rows.append(row)
+        add = Adw.ButtonRow(title=t("add_folder"), start_icon_name="list-add-symbolic")
+        add.connect("activated", lambda *_: self._add_folder())
+        self.folder_rows.append(add)
+        for row in self.folder_rows:
+            self.folders.add(row)
+
+    def _set_folders(self, folders):
+        self.win.config["folders"] = folders
+        store.save_config(self.win.config)
+        self._folders()
+        self.win.auto.refresh()
+
+    def _add_folder(self):
+        def chosen(dialog, result):
+            try:
+                path = dialog.select_folder_finish(result).get_path()
+            except GLib.Error:  # dismissed
+                return
+            if not path:
+                return
+            # In the home folder: "~/...", so that it's still right for
+            # another user name (a backup restored elsewhere)
+            home = os.path.expanduser("~")
+            if path == home or path.startswith(home + "/"):
+                path = "~" + path[len(home):]
+            if path not in self.win.config["folders"]:
+                self._set_folders(self.win.config["folders"] + [path])
+        Gtk.FileDialog(title=t("add_folder").rstrip("…")).select_folder(self.win, None, chosen)
+
+    def _switch(self, source, title=None):
+        config = self.win.config
+        row = Adw.SwitchRow(title=title or source.name,
+                            subtitle="" if title else t("src_" + source.id),
                             active=config["sources"].get(source.id, source.default))
 
         def changed(*_):

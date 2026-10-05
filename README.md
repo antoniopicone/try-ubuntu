@@ -388,13 +388,19 @@ files install.sh keeps, pass
     or why it wasn't. The devices that can't receive (offline, or someone
     else's) are read-only folders. Folders can't be sent: Taildrop sends
     files.
+  - **Receiving**: what your other devices send to this computer goes to
+    the Downloads folder as it comes (`tailscale file get --wait`; a
+    same-named file gets a number), with a notification that opens it or
+    shows it in Files.
   - **Properties and menus**, from a Nautilus extension
     ([live-tailnet.py](overlay/usr/share/nautilus-python/extensions/live-tailnet.py)):
     a device's Properties have a "Tailscale" page (addresses, name on the
     network, system and model, Tailscale's version, owner, last seen, the
     key's expiry, whether it receives files); its menu copies its address
     or name and has "Send Files…"; any file's menu has "Send with
-    Taildrop", with the devices that can receive now.
+    Taildrop", with the devices that can receive now. Both ask Files
+    itself to copy (`org.gnome.Nautilus.FileOperations2`), so the transfer
+    is one of its operations, with its progress, like a drop.
 - **Previous Versions** in Files: right-click a file or folder in a home
   folder, or a folder's background. A Nautilus extension
   ([live-file-versions.py](overlay/usr/share/nautilus-python/extensions/live-file-versions.py))
@@ -856,7 +862,9 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
     keys, browser, extensions, other apps). Nothing is deleted: files that
     are only here stay. Never restored: the keyring (sealed with the old
     password), the backups' own settings, the iCloud session, caches.
-    GNOME's settings are loaded into the running session (`dconf load`),
+    GNOME's settings are loaded into the running session (`dconf load`;
+    those that name files in the home folder, the wallpaper's, follow it
+    to this user's when the name changed),
     and the profile picture, which run-backup copies into the backup from
     AccountsService, is set back through AccountsService. The status page
     can restore the newest backup at any time.
@@ -910,6 +918,14 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
     on disk (`~/.cache/live-wallpapers`: searches for 6 hours, Pixabay's
     for the day its terms ask for, thumbnails for a month), so the
     anonymous quotas last.
+
+    **Your own folders** are a source too: Sources adds folders of
+    pictures from any disk that's mounted (this computer's, a cloud's, the
+    network's), searched with their subfolders, by the files' names (JPEG,
+    PNG, WebP; not the hidden folders). Their pictures come with the
+    others in a search, marked "your picture", and never in the photo of
+    the day or the moods. Setting one copies it next to the downloaded
+    images, so the wallpaper stays when its disk isn't connected.
   - **Discover**: a search, the photo of the day (a public-domain one,
     the same all day, from the sources that are on in turn), seven moods
     (searches ready to run, each with its first result for cover) and a
@@ -944,8 +960,9 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
     their thumbnails, so they show without the network. "Download" copies
     the image to a "Wallpapers" folder in Pictures.
   - **Automatic**: a new wallpaper every hour, day, week or login, from
-    the photo of the day, the collection (the least recently used) or a
-    saved search (a result not set lately). "Day and night" sets two: of
+    the photo of the day, the collection (the least recently used), your
+    own folders (a landscape picture not set lately) or a saved search (a
+    result not set lately). "Day and night" sets two: of
     six candidates, the lightest for the light style and the darkest for
     the dark one. Not on metered networks, unless allowed.
     [rotate](overlay/usr/local/lib/live-wallpapers/rotate) does it,
@@ -960,12 +977,18 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
     ([store.py](overlay/usr/local/lib/live-wallpapers/store.py)): the
     downloaded images in `~/.local/share/live-wallpapers/images`, where
     only those of the wallpapers in use, of the collection and of the last
-    few set stay.
+    few set stay. Cloud Backup has all of it, as it has everything in the
+    home folder but the caches: the settings
+    (`~/.config/live-wallpapers`: sources, folders, saved searches, the
+    automatic change), the collection and the wallpaper in use come back
+    with a restore.
 
 - **AI** ([live-ai](overlay/usr/local/bin/live-ai), icon
   [assets/ai-app.svg](assets/ai-app.svg)) comes last at the first login:
   Cloud Backup's last button (or "Set Up Later") opens it. Afterwards it's
-  in the app grid. Every part is optional, and nothing of it is in the ISO
+  in the app grid. At that first run its page ends with an invitation to
+  choose a wallpaper (it opens Wallpapers, which never opens by itself)
+  above the "Done" button. Every part is optional, and nothing of it is in the ISO
   but the app and its tools: what you pick is downloaded then.
   - **This computer**: CPU, memory, graphics and free disk
     ([live-ai-resources](overlay/usr/local/bin/live-ai-resources)), which

@@ -19,6 +19,10 @@ is on a tailnet, and not otherwise.
     files stay listed for a moment, for the copy to finish with them.
   - Folders can't be sent (Taildrop sends files), nor anything to a device
     that is offline or someone else's: those folders are read-only.
+  - What the other devices send here waits in tailscaled's inbox: it's
+    moved to the Downloads folder as it comes (`tailscale file get --wait`,
+    a same-named file gets a number), with a notification that opens it or
+    shows it in Files.
 
 What Files' extension shows (the properties, the menus:
 /usr/share/nautilus-python/extensions/live-tailnet.py) is in
@@ -27,7 +31,8 @@ $XDG_RUNTIME_DIR/live-tailnet/devices.json, written here.
 A systemd user service (live-tailnet.service, on for every user).
 
 For tests: LIVE_TAILNET_TAILSCALE is the tailscale command to run instead,
---mount the folder, --no-notify and --no-icons leave the desktop alone.
+--mount the folder, --downloads where received files go, --no-notify and
+--no-icons leave the desktop alone.
 """
 import argparse
 import errno
@@ -37,6 +42,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 
 import pyfuse3
@@ -49,7 +55,7 @@ STATE = os.path.join(STATE_DIR, "devices.json")
 ICONS = "/usr/local/share/live-tailnet/icons"
 POLL_SECONDS = 10            # tailscale status
 WHOIS_SECONDS = 3600         # a device's versions
-LINGER_SECONDS = 20          # a sent file stays listed
+LINGER_SECONDS = 5           # a sent file stays listed
 NOTIFY_AFTER_SECONDS = 2     # one notification for the files sent together
 TAILDROP_AVAILABLE = 1       # ipnstate.TaildropTargetAvailable
 
@@ -59,12 +65,20 @@ STRINGS = {
         "sent_many": "Sent {count} files to {device}",
         "failed_one": "{file} wasn't sent to {device}",
         "failed_many": "{count} files weren't sent to {device}",
+        "received_one": "Received {file}",
+        "received_many": "Received {count} files",
+        "received_body": "From your Tailscale network, in {folder}",
+        "open": "Open", "show": "Show in Files",
     },
     "it": {
         "sent_one": "{file} inviato a {device}",
         "sent_many": "{count} file inviati a {device}",
         "failed_one": "{file} non è stato inviato a {device}",
         "failed_many": "{count} file non sono stati inviati a {device}",
+        "received_one": "Ricevuto {file}",
+        "received_many": "Ricevuti {count} file",
+        "received_body": "Dalla tua rete Tailscale, in {folder}",
+        "open": "Apri", "show": "Mostra in File",
     },
 }
 
@@ -147,9 +161,9 @@ class Sent:
 
 
 class Tailnet(pyfuse3.Operations):
-    def __init__(self, notify=True, icons=True):
+    def __init__(self, notify=True, icons=True, downloads=None):
         super().__init__()
-        self.notify, self.icons = notify, icons
+        self.notify, self.icons, self.downloads = notify, icons, downloads
         self.devices = {}       # the node's ID -> Device
         self.by_inode = {}      # inode -> Device or Sent
         self.next_inode = pyfuse3.ROOT_INODE + 1
@@ -425,6 +439,58 @@ class Tailnet(pyfuse3.Operations):
             except OSError as e:
                 log(f"notify-send: {e}")
 
+    def tell_received(self, names):
+        """The notification of what came, with its buttons: notify-send waits
+        for the click, so this is a thread of its own."""
+        paths = [os.path.join(self.downloads, name) for name in names]
+        summary = (t("received_one", file=names[0]) if len(names) == 1
+                   else t("received_many", count=len(names)))
+        cmd = ["notify-send", "--app-name=Tailscale", "--icon=network-vpn-symbolic",
+               f"--action=show={t('show')}"]
+        if len(names) == 1:
+            cmd.append(f"--action=open={t('open')}")
+        try:
+            action = subprocess.run(
+                cmd + [summary, t("received_body", folder=os.path.basename(self.downloads))],
+                capture_output=True, text=True).stdout.strip()
+            if action == "open":
+                subprocess.Popen(["xdg-open", paths[0]], start_new_session=True)
+            elif action == "show":
+                uris = ", ".join("'file://%s'" % path.replace("'", "%27") for path in paths)
+                subprocess.run(["gdbus", "call", "--session", "--dest",
+                                "org.freedesktop.FileManager1", "--object-path",
+                                "/org/freedesktop/FileManager1", "--method",
+                                "org.freedesktop.FileManager1.ShowItems", f"[{uris}]", ""],
+                               capture_output=True)
+        except OSError as e:
+            log(f"notify-send: {e}")
+
+    async def receive(self):
+        """What the other devices send: out of tailscaled's inbox, into the
+        Downloads folder, as it comes."""
+        complained = False
+        while True:
+            os.makedirs(self.downloads, exist_ok=True)
+            before = set(os.listdir(self.downloads))
+            got = await trio.run_process(
+                [TAILSCALE, "file", "get", "--wait", "--conflict=rename", self.downloads],
+                check=False, capture_stdout=True, capture_stderr=True)
+            names = sorted(set(os.listdir(self.downloads)) - before)
+            if got.returncode != 0 and not names:
+                if not complained:
+                    complained = True
+                    log("file get: " + (got.stderr.decode(errors="replace").strip()
+                                        or str(got.returncode)))
+                await trio.sleep(30)
+                continue
+            if names:
+                log(f"received {', '.join(names)}")
+                if self.notify:
+                    threading.Thread(target=self.tell_received, args=(names,),
+                                     daemon=True).start()
+            else:
+                await trio.sleep(1)
+
     async def housekeeping(self):
         """Every second: the notifications of the transfers that ended, and
         the sent files that have been listed long enough."""
@@ -469,6 +535,12 @@ def on_tailnet():
     return status if status and status.get("BackendState") == "Running" else None
 
 
+def downloads_folder():
+    from gi.repository import GLib
+    return (GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD)
+            or os.path.expanduser("~/Downloads"))
+
+
 def clear_mount():
     """A mount left by a daemon that was killed answers ENOTCONN."""
     try:
@@ -493,6 +565,7 @@ async def serve(fs):
         nursery.start_soon(stop_on_signal, fs)
         nursery.start_soon(fs.housekeeping)
         nursery.start_soon(fs.watch)
+        nursery.start_soon(fs.receive)
         await pyfuse3.main()
         nursery.cancel_scope.cancel()
 
@@ -501,6 +574,7 @@ def main():
     global MOUNT
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--mount", default=MOUNT)
+    parser.add_argument("--downloads")
     parser.add_argument("--no-notify", action="store_true")
     parser.add_argument("--no-icons", action="store_true")
     args = parser.parse_args()
@@ -518,7 +592,9 @@ def main():
             continue
         clear_mount()
         os.makedirs(MOUNT, exist_ok=True)
-        fs = Tailnet(notify=not args.no_notify, icons=not args.no_icons)
+        fs = Tailnet(notify=not args.no_notify, icons=not args.no_icons,
+                     downloads=os.path.abspath(args.downloads) if args.downloads
+                     else downloads_folder())
         fs.update(status)
         pyfuse3.init(fs, MOUNT, set(pyfuse3.default_options) | {"fsname=tailscale", "subtype=tailnet"})
         log(f"mounted {MOUNT}")

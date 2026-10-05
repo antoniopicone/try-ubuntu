@@ -8,15 +8,16 @@ live-tailnet's mount).
   - Any file's menu gets "Send with Taildrop", with the devices that can
     receive now.
 
-Sending is copying into the device's folder: live-tailnet hands the file to
-Taildrop and says how it went. What's known of the devices comes from its
+Sending is copying into the device's folder, and Files itself is asked to
+do it (org.gnome.Nautilus.FileOperations2): the copy shows in its
+operations, with its progress, like any other. live-tailnet hands the file
+to Taildrop and says how it went. What's known of the devices comes from its
 $XDG_RUNTIME_DIR/live-tailnet/devices.json."""
 import datetime
 import json
 import os
-import threading
 
-from gi.repository import Gdk, Gio, GObject, Gtk, Nautilus
+from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Nautilus
 
 STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "live-tailnet", "devices.json")
 
@@ -92,21 +93,16 @@ def when(iso):
 
 
 def send(paths, device):
-    """Copy the files into the device's folder, away from the window's thread:
+    """Have Files copy the files into the device's folder, as if they were
+    dropped there: its own operation, with its progress and its errors.
     live-tailnet sends them, and tells how it went."""
-    folder = os.path.join(state()["mount"], device["name"])
-
-    def copy():
-        for path in paths:
-            try:
-                with open(path, "rb") as src, open(os.path.join(folder, os.path.basename(path)),
-                                                   "wb") as dst:
-                    while chunk := src.read(1024 * 1024):
-                        dst.write(chunk)
-            except OSError:
-                pass    # live-tailnet's notification says why
-
-    threading.Thread(target=copy, daemon=True).start()
+    folder = Gio.File.new_for_path(os.path.join(state()["mount"], device["name"]))
+    uris = [Gio.File.new_for_path(path).get_uri() for path in paths]
+    Gio.bus_get_sync(Gio.BusType.SESSION).call(
+        "org.gnome.Nautilus", "/org/gnome/Nautilus/FileOperations2",
+        "org.gnome.Nautilus.FileOperations2", "CopyURIs",
+        GLib.Variant("(assa{sv})", (uris, folder.get_uri(), {})),
+        None, Gio.DBusCallFlags.NONE, -1, None, None)
 
 
 def copy_text(text):

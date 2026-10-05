@@ -18,6 +18,7 @@ Cloud Backup (live-backup --first-run opens it with --first-run); afterwards
 it's in the app grid.
 """
 import os
+import shutil
 import sys
 import threading
 
@@ -117,6 +118,7 @@ STRINGS = {
         "crash_watch": "Offer a diagnosis when an app crashes",
         "crash_watch_body": "A notification hands it to your default agent",
         "done": "Done",
+        "wallpaper": "Now, if you like, choose a wallpaper to make this desktop truly yours",
         "done_hint": "Come back any time from the app grid: AI.",
         "back": "Back",
         "error_title": "Something Went Wrong",
@@ -205,6 +207,7 @@ STRINGS = {
         "crash_watch": "Proponi una diagnosi quando un'app va in crash",
         "crash_watch_body": "Una notifica la passa al tuo agente predefinito",
         "done": "Fatto",
+        "wallpaper": "Ora, se vuoi, scegli uno sfondo per rendere davvero tuo questo desktop",
         "done_hint": "Puoi tornare qui quando vuoi dalla griglia delle app: AI.",
         "back": "Indietro",
         "error_title": "Qualcosa è andato storto",
@@ -400,6 +403,13 @@ class AIWindow(Adw.ApplicationWindow):
         self.crash_row = Adw.SwitchRow(title=t("crash_watch"), subtitle=t("crash_watch_body"))
         self.crash_handler = self.crash_row.connect("notify::active", lambda *_: self._set_crash())
         crash.add(self.crash_row)
+        # The first run's last word: Wallpapers isn't opened, it's offered
+        self.wallpaper = Gtk.Button(halign=Gtk.Align.CENTER, css_classes=["flat", "accent"],
+                                    child=Gtk.Label(label=t("wallpaper"), wrap=True,
+                                                    justify=Gtk.Justification.CENTER))
+        self.wallpaper.connect("clicked", lambda *_: Gio.Subprocess.new(
+            ["live-wallpapers"], Gio.SubprocessFlags.NONE))
+        self.wallpaper.set_visible(self.first_run and bool(shutil.which("live-wallpapers")))
         self.done = self._button(t("done"), suggested=True)
         self.done.connect("clicked", lambda *_: self.close())
         self.done_hint = Gtk.Label(label=t("done_hint"), wrap=True,
@@ -408,7 +418,8 @@ class AIWindow(Adw.ApplicationWindow):
         self.done.set_visible(self.first_run)
         self.done_hint.set_visible(self.first_run)
         return self._page(intro, self.computer, self.apps_group, self.agents_group,
-                          self.local_group, self.kb_group, crash, self.done, self.done_hint)
+                          self.local_group, self.kb_group, crash, self.wallpaper, self.done,
+                          self.done_hint)
 
     def _refresh(self):
         def work():

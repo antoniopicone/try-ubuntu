@@ -1,17 +1,25 @@
 """store: what Wallpapers keeps on this computer.
 
   ~/.config/live-wallpapers/config.json   the sources that are on, the API
-                                          keys, the saved searches, the
-                                          automatic change, the screen's size
+                                          keys, the user's own folders, the
+                                          saved searches, the automatic
+                                          change, the screen's size
   ~/.local/share/live-wallpapers/
       collection.json                     the wallpapers the user saved
       history.json                        the last ones set (the automatic
                                           change doesn't repeat them)
-      images/                             the downloaded images
+      images/                             the downloaded images, and the
+                                          copies of those from the user's
+                                          folders: a wallpaper stays when
+                                          its disk isn't mounted
       thumbs/                             the collection's thumbnails
 
 The images of the wallpapers in use, of the collection and of the history
 stay; prune() deletes the others.
+
+Cloud Backup keeps both folders, as it does everything in the home folder
+but the caches: the settings, the collection and the wallpaper in use come
+back with a restore.
 """
 import copy
 import hashlib
@@ -35,13 +43,16 @@ DEFAULTS = {
     # Source id -> on; a source not listed here is on unless it says otherwise
     "sources": {},
     "pixabay_key": "",
+    # The user's own folders of pictures, searched with their subfolders
+    # ("~/..." for those in the home folder, whoever's it is)
+    "folders": [],
     # "Match the theme": the accent color follows the wallpaper
     "match_theme": True,
     # [{"name": ..., "query": Query.to_dict()}]
     "searches": [],
     "auto": {
         "enabled": False,
-        "from": "daily",      # daily, collection, search
+        "from": "daily",      # daily, collection, folder, search
         "search": "",         # a saved search's name
         "every": "daily",     # hourly, daily, weekly, login
         "metered": True,      # no downloads on metered networks
@@ -139,6 +150,16 @@ def download(item, progress=None):
     if os.path.exists(path):
         return path
     os.makedirs(IMAGES, exist_ok=True)
+    if item.source == "folder":
+        # One of the user's own pictures: a copy, for when its disk is away
+        try:
+            shutil.copyfile(item.full, path + ".part")
+        except OSError as e:
+            if os.path.exists(path + ".part"):
+                os.remove(path + ".part")
+            raise sources.SourceError("network", str(e)) from e
+        os.replace(path + ".part", path)
+        return path
     try:
         source = sources.BY_ID.get(item.source)
         url = source.fresh(item) if source else item.full

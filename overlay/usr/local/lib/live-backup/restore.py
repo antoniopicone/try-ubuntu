@@ -236,6 +236,10 @@ def _restore_dconf(config, env, snapshot, remote, home):
                                   capture_output=True, text=True, check=True).stdout
         finally:
             os.remove(target)
+        # The settings that name files in the home folder (the wallpaper):
+        # the same files in this one, when the user's name changed
+        if snapshot["home"].rstrip("/") != home.rstrip("/"):
+            dump = dump.replace(snapshot["home"].rstrip("/") + "/", home.rstrip("/") + "/")
         subprocess.run(["dconf", "load", "/"], input=dump, text=True, capture_output=True,
                        check=True)
 

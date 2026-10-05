@@ -17,6 +17,9 @@
     users made, many about Linux and its desktops, no key. Each says its
     own license, or none; the files' sizes are read from their names
   - Pixabay: needs the user's own (free) API key
+  - The user's own folders (config.json's "folders"), with their
+    subfolders: the pictures on any disk that's mounted (this computer's,
+    a cloud's, the network's). A search looks at the files' names
 
 Unsplash and Pexels aren't here: their API terms forbid wallpaper apps.
 
@@ -160,8 +163,39 @@ def get_json(url, ttl=6 * HOUR):
     return parsed
 
 
+def _pixbuf():
+    """gdk-pixbuf, for the user's own pictures: brought in when they're asked
+    for (not GTK: rotate has no display)."""
+    import gi
+    gi.require_version("GdkPixbuf", "2.0")
+    from gi.repository import GdkPixbuf, GLib
+    return GdkPixbuf, GLib
+
+
+def _own_thumbnail(path):
+    """A picture of the user's as a small JPEG, kept on disk until the file
+    changes: the disk it's on may be slow, or a cloud's."""
+    GdkPixbuf, GLib = _pixbuf()
+    try:
+        stat = os.stat(path)
+        cache = _cache_file("thumbs", f"{path}:{stat.st_mtime_ns}:{stat.st_size}")
+        try:
+            with open(cache, "rb") as f:
+                return f.read()
+        except OSError:
+            pass
+        pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 640, 640, True)
+        data = pixbuf.save_to_bufferv("jpeg", ["quality"], ["85"])[1]
+    except (OSError, GLib.Error) as e:
+        raise SourceError("network", str(e)) from e
+    _write(cache, data)
+    return data
+
+
 def thumbnail(url):
     """A thumbnail's bytes, kept on disk."""
+    if url.startswith("/"):
+        return _own_thumbnail(url)
     path = _cache_file("thumbs", url)
     try:
         with open(path, "rb") as f:
@@ -546,8 +580,65 @@ class OpenDesktop(Source):
         return files[0][3] if files else item.full
 
 
-SOURCES = [Openverse(), Commons(), Artic(), Cleveland(), Nasa(), OpenDesktop(), Wallhaven(),
-           Pixabay()]
+class Folder(Source):
+    """The pictures in the user's folders (config["folders"]) and in their
+    subfolders. Their license is "own": not a service's free works, so the
+    photo of the day and the moods leave them out."""
+    id, name = "folder", "My folders"   # the app gives it its translated name
+    kinds = ("photo",)
+    free = False
+    TYPES = (".jpg", ".jpeg", ".png", ".webp")
+    PAGE = 30
+    MOST = 20000   # files looked at, per folder
+
+    def usable(self, query, config):
+        return bool(config.get("folders")) and super().usable(query, config)
+
+    def files(self, folder):
+        """[[path, when it changed]] of the pictures under `folder`, kept for
+        ten minutes: a disk on the network takes its time to list. Not the
+        hidden folders, nor through links to elsewhere."""
+        def walk():
+            found = []
+            for where, dirs, names in os.walk(folder):
+                dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+                for name in sorted(names):
+                    if name.lower().endswith(self.TYPES) and not name.startswith("."):
+                        path = os.path.join(where, name)
+                        try:
+                            found.append([path, os.path.getmtime(path)])
+                        except OSError:
+                            continue
+                if len(found) >= self.MOST:
+                    break
+            return found
+        return cached(f"folder-{folder}", 600, walk) or []
+
+    def item(self, path, changed):
+        _format, width, height = _pixbuf()[0].Pixbuf.get_file_info(path)
+        # A file that changes is another wallpaper: its copy is made again
+        digest = hashlib.sha1(f"{path}:{changed}".encode()).hexdigest()[:16]
+        return Item(self.id, digest, os.path.splitext(os.path.basename(path))[0], "", "own",
+                    path, path, "file://" + urllib.parse.quote(os.path.dirname(path)),
+                    width or 0, height or 0)
+
+    def search(self, query, page, config):
+        files = []
+        for folder in config.get("folders", []):
+            files += self.files(os.path.expanduser(folder))
+        words = query.text.lower().split()
+        files = [f for f in files if all(word in f[0].lower() for word in words)]
+        if query.sort == "latest":
+            files.sort(key=lambda f: -f[1])
+        elif query.sort == "random":
+            # The same order for an hour: the pages of one search don't repeat
+            random.Random(int(time.time() // HOUR)).shuffle(files)
+        return [self.item(path, changed)
+                for path, changed in files[(page - 1) * self.PAGE:page * self.PAGE]]
+
+
+SOURCES = [Folder(), Openverse(), Commons(), Artic(), Cleveland(), Nasa(), OpenDesktop(),
+           Wallhaven(), Pixabay()]
 BY_ID = {source.id: source for source in SOURCES}
 # Left out, and why (shown under "Sources"): name, the terms that say so
 UNAVAILABLE = [

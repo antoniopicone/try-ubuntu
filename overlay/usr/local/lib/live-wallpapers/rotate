@@ -6,6 +6,7 @@ Started by live-wallpapers@<hourly|daily|weekly>.timer, or at every login
 sets is the app's choice (config.json's "auto"):
   - daily: the photo of the day
   - collection: one of the saved wallpapers, the least recently used
+  - folder: a picture from the user's own folders, one that wasn't set lately
   - search: a result of a saved search, one that wasn't set lately
 With "pair" it sets two: of a handful of candidates, the lightest for the
 light style and the darkest for the dark one. With "match_theme" the accent
@@ -37,6 +38,11 @@ def candidates(config):
         # Those never set first, then the ones set longest ago
         return sorted(items, key=lambda item: -recent.index(item.key)
                       if item.key in recent else -len(recent) - 1)
+    if auto["from"] == "folder":
+        query = Query("", sort="random", sources=["folder"], screen=tuple(config["screen"]))
+        items = [item for item in sources.search_all(query, config)[0]
+                 if item.width >= item.height]
+        return [item for item in items if item.key not in recent] or items
     if auto["from"] == "search":
         saved = store.saved_search(config, auto["search"])
         if saved:
@@ -71,7 +77,8 @@ def main():
     auto = config["auto"]
     if not auto["enabled"]:
         return 0
-    if auto["metered"] and desktop.metered():
+    # The user's own folders need no download
+    if auto["metered"] and auto["from"] != "folder" and desktop.metered():
         print("rotate: metered network, the wallpaper stays")
         return 0
     items = candidates(config)
@@ -80,6 +87,10 @@ def main():
         items += sources.highlights(config)
     if not items and auto["from"] == "collection":
         print("rotate: the collection is empty, the wallpaper stays")
+        return 0
+    if not items and auto["from"] == "folder":
+        print("rotate: no pictures in the folders (a disk that isn't mounted?), "
+              "the wallpaper stays")
         return 0
     if not items:
         print("rotate: no source answered", file=sys.stderr)
