@@ -207,7 +207,7 @@ in_chroot apt-get update
 # console-setup, ubuntu-pro-client and friends.
 packages=(
   # minimal server base
-  systemd-sysv systemd-resolved systemd-timesyncd udev kmod dbus procps
+  systemd-sysv systemd-resolved systemd-timesyncd tzdata udev kmod dbus procps
   iproute2 iputils-ping netbase openssh-server sudo less nano
   # installing on a disk (install-system): partitions, the EFI system
   # partition, the firmware's boot entry
@@ -294,7 +294,8 @@ echo "$LIVE_HOSTNAME" > "$ROOTFS/etc/hostname"
 printf '127.0.0.1 localhost\n127.0.1.1 %s\n::1 localhost ip6-localhost ip6-loopback\n' \
   "$LIVE_HOSTNAME" > "$ROOTFS/etc/hosts"
 echo 'LANG=C.UTF-8' > "$ROOTFS/etc/default/locale"
-# No tzdata: without /etc/localtime the system runs on UTC.
+# Without /etc/localtime the system runs on UTC, until Cloud Config's
+# timezone step sets the user's (timesetup.py).
 rm -f "$ROOTFS/etc/localtime"
 
 install -m 644 "$OVERLAY/etc/skel/.zshrc" "$ROOTFS/etc/skel/.zshrc"
@@ -316,8 +317,9 @@ grep -q '"first_run_finished":true' "$ROOTFS/etc/skel/.config/BraveSoftware/Brav
 in_chroot useradd -m -s /usr/bin/zsh -G sudo,video,render,input "$LIVE_USER"
 echo "$LIVE_USER:$LIVE_PASSWORD" | in_chroot chpasswd
 
-in_chroot systemctl enable systemd-resolved.service bluetooth.service \
-  power-profiles-daemon.service avahi-daemon.service tailscaled.service ufw.service
+in_chroot systemctl enable systemd-resolved.service systemd-timesyncd.service \
+  bluetooth.service power-profiles-daemon.service avahi-daemon.service \
+  tailscaled.service ufw.service
 in_chroot systemctl set-default graphical.target
 # Crash notifications for every user (the AI app's live-crash-watch: it only
 # speaks up once the user has an AI agent; a user turns it off by masking it).

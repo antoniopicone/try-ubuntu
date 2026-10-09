@@ -5,10 +5,11 @@
 # it's the btrfs "sprout" of the seed image live/rootfs.btrfs on the ISO
 # that created it (see the btrfslive initramfs script), and macOS can't read
 # btrfs anyway. So, like build.sh, this works inside a privileged container
-# of the podman machine: the ISO's seed goes on a loop device, the qcow2 on
-# an nbd device, and the @home subvolume is mounted read-only and served
-# over SMB on 127.0.0.1, which the Mac mounts and opens in the Finder.
-# Ctrl-C unmounts everything.
+# of the podman machine, or of docker's VM (whichever is there: podman when
+# both are, CONTAINER_ENGINE picks one): the ISO's seed goes on a loop
+# device, the qcow2 on an nbd device, and the @home subvolume is mounted
+# read-only and served over SMB on 127.0.0.1, which the Mac mounts and opens
+# in the Finder. Ctrl-C unmounts everything.
 #
 # Read-only on purpose: the VM must be off (its disk would be changing
 # under the mount), and nothing here can harm the disk.
@@ -68,24 +69,55 @@ if [[ -n "$disk_id" && "$disk_id" != "$iso_id" ]]; then
   exit 1
 fi
 
-command -v podman >/dev/null || {
-  echo "podman is required: brew install podman && podman machine init --now" >&2
-  exit 1
-}
-if ! podman machine inspect --format '{{.State}}' 2>/dev/null | grep -qx running; then
-  echo "==> Starting the podman machine"
-  podman machine start
+# The container engine: podman or docker, whichever is installed
+engine=${CONTAINER_ENGINE:-}
+if [[ -z $engine ]]; then
+  for engine in podman docker ""; do
+    [[ -z $engine ]] || ! command -v "$engine" >/dev/null || break
+  done
 fi
-# Kernel modules come from the machine, not from the container
-podman machine ssh "sudo modprobe -a nbd isofs btrfs" >/dev/null
+case $engine in
+  podman|docker)
+    command -v "$engine" >/dev/null || { echo "$engine isn't installed" >&2; exit 1; } ;;
+  "")
+    echo "podman or docker is required: brew install podman && podman machine init --now" >&2
+    exit 1 ;;
+  *) echo "CONTAINER_ENGINE must be podman or docker" >&2; exit 64 ;;
+esac
+if [[ $engine == podman ]]; then
+  if ! podman machine inspect --format '{{.State}}' 2>/dev/null | grep -qx running; then
+    echo "==> Starting the podman machine"
+    podman machine start
+  fi
+  machine_arch=$(podman info --format '{{.Host.Arch}}')
+else
+  docker info >/dev/null 2>&1 || {
+    echo "docker isn't running: start Docker Desktop (or your docker VM) first" >&2
+    exit 1
+  }
+  # The kernel's name for it: aarch64, x86_64
+  case $(docker info --format '{{.Architecture}}') in
+    x86_64|amd64) machine_arch=amd64 ;;
+    *) machine_arch=arm64 ;;
+  esac
+fi
 
 echo "==> Mount image"
-podman build -q --platform "linux/$(podman info --format '{{.Host.Arch}}')" -t "$image" \
+"$engine" build -q --platform "linux/$machine_arch" -t "$image" \
   -f - "$project_dir" >/dev/null <<'EOF'
 FROM docker.io/library/ubuntu:26.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       btrfs-progs qemu-utils samba util-linux && rm -rf /var/lib/apt/lists/*
 EOF
+
+# Kernel modules come from the machine, not from the container. Docker's VM
+# has no ssh: a container in its init's namespaces runs its modprobe.
+if [[ $engine == podman ]]; then
+  podman machine ssh "sudo modprobe -a nbd isofs btrfs" >/dev/null
+else
+  docker run --rm --privileged --pid=host "$image" \
+    nsenter -t 1 -m -u -n -i modprobe -a nbd isofs btrfs >/dev/null
+fi
 
 # What runs in the container: the mounts, then smbd until stopped.
 inner=$(cat <<'EOF'
@@ -169,8 +201,8 @@ EOF
 )
 
 password=$(openssl rand -hex 16)
-podman rm -f "$name" >/dev/null 2>&1 || true
-podman run -d --name "$name" --privileged \
+"$engine" rm -f "$name" >/dev/null 2>&1 || true
+"$engine" run -d --name "$name" --privileged \
   -v /dev:/dev \
   -v "$iso:/live.iso:ro" \
   -v "$persist:/persist.qcow2:ro" \
@@ -186,28 +218,30 @@ stop() {
     umount "$mnt" 2>/dev/null || diskutil unmount force "$mnt" >/dev/null || true
   fi
   rmdir "$mnt" 2>/dev/null || true
-  podman stop -t 30 "$name" >/dev/null 2>&1 || true
-  podman rm -f "$name" >/dev/null 2>&1 || true
+  "$engine" stop -t 30 "$name" >/dev/null 2>&1 || true
+  "$engine" rm -f "$name" >/dev/null 2>&1 || true
 }
 trap stop EXIT INT TERM
 
 echo "==> Mounting the persistent disk"
 ready=""
 for i in $(seq 150); do
-  ready=$(podman logs "$name" 2>/dev/null | sed -n 's/^READY //p') || true
+  ready=$("$engine" logs "$name" 2>/dev/null | sed -n 's/^READY //p') || true
   [[ -n "$ready" ]] && break
-  if [[ $(podman inspect -f '{{.State.Running}}' "$name" 2>/dev/null) != true ]]; then
-    podman logs "$name" >&2 || true
+  if [[ $("$engine" inspect -f '{{.State.Running}}' "$name" 2>/dev/null) != true ]]; then
+    "$engine" logs "$name" >&2 || true
     echo "The disk could not be mounted." >&2
     exit 1
   fi
   sleep 0.2
 done
-[[ -n "$ready" ]] || { podman logs "$name" >&2; echo "Timed out." >&2; exit 1; }
+[[ -n "$ready" ]] || { "$engine" logs "$name" >&2; echo "Timed out." >&2; exit 1; }
 
 mkdir -p "$mnt"
 mount_smbfs -N "//mac:$password@127.0.0.1:$port/home" "$mnt"
 open "$mnt"
 echo "Home of ${ready} (read-only) in $mnt"
 echo "Ctrl-C to unmount."
-while [[ $(podman inspect -f '{{.State.Running}}' "$name" 2>/dev/null) == true ]]; do sleep 2; done
+while [[ $("$engine" inspect -f '{{.State.Running}}' "$name" 2>/dev/null) == true ]]; do
+  sleep 2
+done

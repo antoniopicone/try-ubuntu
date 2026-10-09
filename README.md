@@ -96,7 +96,8 @@ survives reboots. After `./build.sh` makes a new ISO, the next
 
 On Linux, `build.sh` needs root (`sudo ./build.sh`, with the same
 options): rootless podman can't make the rootfs's device nodes or
-loop-mount the ISO's btrfs image. The ISO and `dist/` are handed back to
+loop-mount the ISO's btrfs image (with docker it's for installing
+qemu-user and handing the ISO back). The ISO and `dist/` are handed back to
 you at the end. The ISO is of this computer's architecture unless `--arch`
 says otherwise: the other one (`--arch x86` on arm64, `--arch arm` on x86)
 builds emulated, with qemu-user registered in
@@ -130,11 +131,13 @@ app takes over: it creates your user and logs out to GDM (see
    wpa_supplicant, the Vulkan drivers and, on x86, the CPU microcode. That
    ISO is over GitHub's 2 GiB limit for a release asset, hence the local
    build. It uses the release's sources (or the checkout install.sh is run
-   from) and podman. On a Mac, install.sh installs podman with Homebrew and
-   creates a rootful machine if there's none. On Linux it installs podman
-   with apt, dnf or pacman and runs the build with sudo. For the other
+   from) and podman, or docker when that's what is installed (it must be
+   running). With neither, install.sh installs podman: on a Mac with
+   Homebrew, creating a rootful machine if there's none; on Linux with
+   apt, dnf or pacman. On Linux the build runs with sudo. For the other
    architecture (x86 on Apple Silicon or an arm64 Linux, arm64 on an x86
-   Linux) everything runs emulated (qemu-user: in the podman machine, or
+   Linux) everything runs emulated (qemu-user: in the podman machine or
+   Docker Desktop's VM, or
    installed and registered with binfmt_misc on Linux), so it takes many
    hours. Later builds reuse the cache. In an emulated build, the ISO
    step runs in a native container on the same cache, since qemu-user
@@ -315,10 +318,13 @@ This means the live session runs on real btrfs, so snapshots,
 persistent disk, in the Finder, with the VM switched off. The disk can't be
 mounted on its own: it's a sprout, so it needs the seed of the ISO that
 made it, and macOS can't read btrfs anyway. Like `build.sh`, the script
-works in a privileged container on the podman machine:
+works in a privileged container on the podman machine (or in docker's VM,
+picked as `build.sh` does):
 
-1. It loads `nbd`, `isofs` and `btrfs` in the podman machine and builds a
-   small image (`try-ubuntu-mount`: btrfs-progs, qemu-utils, Samba).
+1. It builds a small image (`try-ubuntu-mount`: btrfs-progs, qemu-utils,
+   Samba) and loads `nbd`, `isofs` and `btrfs` in the machine (over
+   `podman machine ssh`, or with docker from a container in the VM's own
+   namespaces).
 2. It loop-mounts the ISO and its `live/rootfs.btrfs` (the seed), attaches
    the qcow2 with `qemu-nbd --read-only`, and mounts the `@home` subvolume
    read-only. If the session didn't shut down cleanly, it skips the btrfs
@@ -431,14 +437,16 @@ files install.sh keeps, pass
 
 ## Build
 
-`build.sh` runs everything in a privileged **podman** container
-(`ubuntu:26.04`, of the ISO's architecture: native arm64 on the podman
-machine on Apple Silicon, native for its own architecture on Linux, where
-it needs root):
+`build.sh` runs everything in a privileged **podman** or **docker**
+container (`ubuntu:26.04`, of the ISO's architecture: native arm64 on the
+podman machine or Docker Desktop on Apple Silicon, native for its own
+architecture on Linux, where it needs root). It uses the one that's
+installed, podman when both are; `CONTAINER_ENGINE=docker ./build.sh`
+picks. Each engine has its own cache and builder images:
 
 1. [scripts/build-gnome.sh](scripts/build-gnome.sh) rebuilds the GNOME
    packages with local fixes (see [The desktop](#the-desktop)), if any.
-   It's cached in the podman volume `try-ubuntu-gnome50-cache` (GNOME 51's
+   It's cached in the volume `try-ubuntu-gnome50-cache` (GNOME 51's
    builds, on the branch `gnome-51`, keep `try-ubuntu-cache`), then skipped.
 2. [scripts/build-apfs-fuse.sh](scripts/build-apfs-fuse.sh) builds
    apfs-fuse, and [scripts/build-icloud-linux.sh](scripts/build-icloud-linux.sh)
@@ -726,17 +734,47 @@ GNOME 50 the way Ubuntu's desktop looks, all without recommends:
   The session then logs out to GDM, where only the new user is listed.
 - **Cloud Config** ([live-cloud-config](overlay/usr/local/bin/live-cloud-config),
   icon [assets/cloud-config-app.svg](assets/cloud-config-app.svg)) opens by
-  itself at the new user's first login, in three steps:
+  itself at the new user's first login, in four steps:
   1. **The network**
      ([netsetup.py](overlay/usr/local/lib/live-backup/netsetup.py)), when
      NetworkManager says there's none: plug in a cable when the computer
      has a wired port, or pick a Wi-Fi network and type its password
      (`nmcli`). It goes on by itself once the network is up.
-  2. **Tailscale**, explained in two lines, to add the computer to your
+  2. **The timezone**
+     ([timesetup.py](overlay/usr/local/lib/live-backup/timesetup.py)): a
+     world map with the time zones
+     ([tzmap.py](overlay/usr/local/lib/live-backup/tzmap.py)) to click, and
+     a search of some 6000 cities that completes as you type; the zone's
+     name, its time and its next clock change show underneath.
+     - It starts from where the computer seems to be: with a Wi-Fi card,
+       from the access points in range (their addresses and signal
+       strength, looked up in [BeaconDB](https://beacondb.net), right to
+       some tens of metres); or else from the public IP address
+       ([geoip.ubuntu.com](https://geoip.ubuntu.com/lookup), as Ubuntu's
+       installer does, right to the city). The page says which, and
+       "Find Again" asks again. Without a network nothing is asked.
+     - "Continue" sets the timezone (`timedatectl`, which
+       [a polkit rule](overlay/etc/polkit-1/rules.d/49-live-timezone.rules)
+       lets the administrators do without a password), "Exact Time from
+       the Network" (systemd-timesyncd's NTP, on) and "Change Time Zone
+       When I Travel" (GNOME's automatic timezone with the location
+       services, on for laptops). Summer time needs nothing: the clock
+       runs on UTC and the changes come with the zone's rules (tzdata).
+       Until then, and with "Not Now", the system is on UTC.
+     - The map's data
+       ([tzmap.json](overlay/usr/local/share/live-timezone/tzmap.json),
+       370 KiB) is made by
+       [scripts/build-tzmap.py](scripts/build-tzmap.py), by hand: the land
+       from [Natural Earth](https://www.naturalearthdata.com) (public
+       domain), the zones from
+       [timezone-boundary-builder](https://github.com/evansiroky/timezone-boundary-builder)
+       (© OpenStreetMap contributors, ODbL), the cities and their Italian
+       names from [GeoNames](https://www.geonames.org) (CC BY 4.0).
+  3. **Tailscale**, explained in two lines, to add the computer to your
      tailnet: `pkexec tailscale up --operator=<you>` opens the sign-in
      page in the browser, and the app waits for it. Skipped when the
      computer is already on a tailnet.
-  3. **Your clouds**: Google Drive, OneDrive, Dropbox, Nextcloud and
+  4. **Your clouds**: Google Drive, OneDrive, Dropbox, Nextcloud and
      iCloud Drive, each connected or with a Connect button. A connected one
      is an account
      ([accounts.py](overlay/usr/local/lib/live-backup/accounts.py)): an
@@ -1268,7 +1306,11 @@ git tag v1.0.0 && git push origin v1.0.0
 - The welcome app is a first draft:
   - its UI only speaks English and Italian
   - it offers six languages and ten keyboard layouts
-  - it has no timezone page
+  - it has no timezone page: the live session and the installer run on
+    UTC, and the timezone is set at the new user's first login (Cloud
+    Config)
+- The timezone step's Wi-Fi positioning and "Change Time Zone When I
+  Travel" haven't been tried on real hardware yet.
 - The host's language reaches the guest only under QEMU (`run-qemu.sh`);
   on other hypervisors or hardware the live session starts in English.
 - The QEMU flavour (the releases' ISOs) has no sound drivers other than

@@ -29,7 +29,8 @@
 # space). The releases' ISOs are made for QEMU (the "virtual" kernel, no
 # firmware): this builds the real-computer flavour locally instead
 # (build.sh --hardware: the generic kernel, all of linux-firmware), from the
-# release's sources (or the checkout this script is in), with podman (many
+# release's sources (or the checkout this script is in), with podman or
+# docker, whichever is there, or else podman, which it installs (many
 # hours for the other architecture, emulated: x86 on Apple Silicon, through
 # qemu-user on Linux). Then it lists the USB disks, asks which one to erase, asks
 # again, and writes the ISO to it. Other arguments go to build.sh (--xkb it).
@@ -582,13 +583,35 @@ get_sources() {
   fi
 }
 
-# podman, with a machine able to build (on a Mac: rootful, for loop
-# devices; room and memory for compiling GNOME). For an ISO of the other
-# architecture its containers are emulated: the podman machine can, a Linux
-# needs qemu-user registered with binfmt_misc.
-get_podman() {
+# The container engine build.sh uses: podman, or docker when that's what is
+# installed (build.sh picks the same way). With neither, podman: with a
+# machine able to build (on a Mac: rootful, for loop devices; room and
+# memory for compiling GNOME). For an ISO of the other architecture the
+# containers are emulated: the podman machine and Docker Desktop's VM can, a
+# Linux needs qemu-user registered with binfmt_misc.
+get_engine() {
+  engine=${CONTAINER_ENGINE:-}
+  if [ -z "$engine" ]; then
+    engine=podman
+    if ! has podman && has docker; then engine=docker; fi
+  fi
+  case "$engine" in
+    podman) ;;
+    docker)
+      has docker || die "docker isn't installed"
+      # On Linux the build runs with sudo: so does this
+      if [ "$os" = Darwin ]; then
+        docker info >/dev/null 2>&1 ||
+          die "docker isn't running: start Docker Desktop, then run this again"
+      else
+        sudo_run docker info >/dev/null 2>&1 ||
+          die "docker isn't running: start it (systemctl start docker), then run this again"
+      fi ;;
+    *) die "CONTAINER_ENGINE must be podman or docker" ;;
+  esac
   case "$os" in
     Darwin)
+      [ "$engine" = podman ] || return 0
       if ! has podman; then
         has brew || die "podman is needed and Homebrew isn't installed: see https://brew.sh"
         say "Installing podman (brew install podman)"
@@ -602,7 +625,7 @@ get_podman() {
       podman machine inspect --format '{{.State}}' 2>/dev/null | grep -qx running ||
         podman machine start ;;
     Linux)
-      if ! has podman; then
+      if [ "$engine" = podman ] && ! has podman; then
         say "Installing podman"
         if has apt-get; then sudo_run apt-get update -qq && sudo_run apt-get install -y podman
         elif has dnf; then sudo_run dnf install -y podman
@@ -711,7 +734,7 @@ on_usb() {
   step
   get_sources
   step
-  get_podman
+  get_engine
   iso="$src/dist/ubuntu-live-$arch-hardware.iso"
   stamp="$iso.release"
   # From the release's sources, a new release means a new build; from a
@@ -728,9 +751,10 @@ on_usb() {
     fi
     if [ "$os" = Linux ]; then
       # Rootful podman: the ISO step needs loop devices
-      sudo_run bash "$src/build.sh" --arch "$arch_opt" --hardware "$@" </dev/null
+      sudo_run env CONTAINER_ENGINE="$engine" bash "$src/build.sh" --arch "$arch_opt" \
+        --hardware "$@" </dev/null
     else
-      bash "$src/build.sh" --arch "$arch_opt" --hardware "$@" </dev/null
+      CONTAINER_ENGINE="$engine" bash "$src/build.sh" --arch "$arch_opt" --hardware "$@" </dev/null
     fi
     printf '%s\n' "$tag" > "$stamp"
   else
@@ -781,7 +805,7 @@ main() {
 
   plan "Find the latest release"
   if [ "$on_usb" = 1 ]; then
-    plan "Get the sources" "Get podman" "Build the ISO for real computers" \
+    plan "Get the sources" "Get podman or docker" "Build the ISO for real computers" \
       "Choose the USB stick" "Write the live system to it"
     ui_begin "a live USB stick for a real computer ($arch_opt)"
   else

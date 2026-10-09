@@ -13,10 +13,12 @@ Files" is off.
 
 At the first login of the user live-welcome created it starts by itself
 (--first-run, ~/.config/autostart): first the network (the clouds need it:
-a cable, or a Wi-Fi network and its password) when there is none, then
-Tailscale, then the clouds, and "Continue with the Backups" opens Cloud
-Backup (live-backup --first-run).
+a cable, or a Wi-Fi network and its password) when there is none, then the
+timezone (a world map to click and a city search, starting from where the
+computer seems to be: timesetup.py), then Tailscale, then the clouds, and
+"Continue with the Backups" opens Cloud Backup (live-backup --first-run).
 """
+import datetime
 import os
 import re
 import subprocess
@@ -27,7 +29,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 sys.path.insert(0, "/usr/local/lib/live-backup")
 sys.path.insert(0, "/usr/local/lib/live-common")
@@ -37,6 +39,8 @@ import livespinner  # noqa: E402
 import mount  # noqa: E402
 import netsetup  # noqa: E402
 import providers  # noqa: E402
+import timesetup  # noqa: E402
+import tzmap  # noqa: E402
 
 APP_ID = "org.ubuntu.LiveCloudConfig"
 AUTOSTART = os.path.expanduser(f"~/.config/autostart/{APP_ID}.desktop")
@@ -118,7 +122,7 @@ STRINGS = {
         "required": "Fill in the fields above.",
         "show_files": "Show the clouds in Files",
         "show_files_body": "In the sidebar; files are downloaded when you open them",
-        "step": "Step {n} of 3",
+        "step": "Step {n} of 4",
         "title": "Cloud Config",
         "ts_add": "Add to My Tailscale Network",
         "ts_again": "Open the Browser Again",
@@ -129,6 +133,32 @@ STRINGS = {
         "ts_later": "Not Now",
         "ts_title": "Tailscale",
         "ts_wait": "Sign in to Tailscale in the browser that just opened, and approve this computer.",
+        "tz_again": "Find Again",
+        "tz_auto": "Change Time Zone When I Travel",
+        "tz_auto_body": "From the computer's position (Wi-Fi or IP address); turns the location services on",
+        "tz_back": "Back to {city}",
+        "tz_backward": "{date} · standard time is back, clocks go back {amount}",
+        "tz_body": "For the right time on the clock. Click the map, or search for your city.",
+        "tz_failed": "Couldn't set the time zone: {error}",
+        "tz_finding": "Finding where you are…",
+        "tz_forward": "{date} · summer time starts, clocks go forward {amount}",
+        "tz_hour": "1 hour",
+        "tz_ip": "From your IP address: <b>{city}</b>",
+        "tz_ip_note": "Right to the city or the province",
+        "tz_manual": "You picked <b>{city}</b>",
+        "tz_minutes": "{n} minutes",
+        "tz_next": "Next Clock Change",
+        "tz_next_none": "None: the time doesn't change during the year here",
+        "tz_none": "No city found. Try a bigger one nearby.",
+        "tz_ntp": "Exact Time from the Network",
+        "tz_ntp_body": "The clock sets itself from the time servers",
+        "tz_search": "Search for a city…",
+        "tz_title": "Time Zone",
+        "tz_unknown": "Couldn't find where you are",
+        "tz_unknown_note": "Click the map, or search for your city",
+        "tz_utc": "No time zone picked: the computer stays on UTC",
+        "tz_wifi": "From the Wi-Fi networks nearby: <b>{city}</b>",
+        "tz_wifi_note": "Right to some tens of metres",
         "wait_title": "Sign In",
     },
     "it": {
@@ -196,7 +226,7 @@ STRINGS = {
         "required": "Compila i campi qui sopra.",
         "show_files": "Mostra i cloud in File",
         "show_files_body": "Nella barra laterale; i file si scaricano quando li apri",
-        "step": "Passo {n} di 3",
+        "step": "Passo {n} di 4",
         "title": "Cloud Config",
         "ts_add": "Aggiungi alla mia rete Tailscale",
         "ts_again": "Apri di nuovo il browser",
@@ -207,6 +237,32 @@ STRINGS = {
         "ts_later": "Non ora",
         "ts_title": "Tailscale",
         "ts_wait": "Accedi a Tailscale nel browser che si è appena aperto, e approva questo computer.",
+        "tz_again": "Rileva di nuovo",
+        "tz_auto": "Cambia fuso quando viaggi",
+        "tz_auto_body": "Dalla posizione del computer (Wi-Fi o indirizzo IP); attiva i servizi di posizione",
+        "tz_back": "Torna a {city}",
+        "tz_backward": "{date} · torna l'ora solare, lancette indietro di {amount}",
+        "tz_body": "Serve per mostrare l'ora giusta. Fai clic sulla mappa o cerca la tua città.",
+        "tz_failed": "Impossibile impostare il fuso orario: {error}",
+        "tz_finding": "Ricerca della tua posizione…",
+        "tz_forward": "{date} · inizia l'ora legale, lancette avanti di {amount}",
+        "tz_hour": "1 ora",
+        "tz_ip": "Dall'indirizzo IP: <b>{city}</b>",
+        "tz_ip_note": "Precisa a livello di città o provincia",
+        "tz_manual": "Hai scelto <b>{city}</b>",
+        "tz_minutes": "{n} minuti",
+        "tz_next": "Prossimo cambio dell'ora",
+        "tz_next_none": "Nessuno: qui l'ora non cambia durante l'anno",
+        "tz_none": "Nessuna città trovata. Prova con una più grande lì vicino.",
+        "tz_ntp": "Ora esatta dalla rete",
+        "tz_ntp_body": "L'orologio si regola da solo con i server dell'ora",
+        "tz_search": "Cerca una città…",
+        "tz_title": "Fuso orario",
+        "tz_unknown": "Posizione non trovata",
+        "tz_unknown_note": "Fai clic sulla mappa o cerca la tua città",
+        "tz_utc": "Nessun fuso scelto: il computer resta su UTC",
+        "tz_wifi": "Dalle reti Wi-Fi vicine: <b>{city}</b>",
+        "tz_wifi_note": "Precisa a qualche decina di metri",
         "wait_title": "Accedi",
     },
 }
@@ -230,8 +286,9 @@ def in_thread(work, done):
 
 class ConfigWindow(Adw.ApplicationWindow):
     def __init__(self, app, first_run):
+        # The first run's timezone step, with its map, is the tallest page
         super().__init__(application=app, title=t("title"), default_width=760,
-                         default_height=640)
+                         default_height=780 if first_run else 640)
         self.first_run = first_run
         self.provider = None
         self.login = self.login_url = self.icloud = self.ts_proc = None
@@ -242,6 +299,7 @@ class ConfigWindow(Adw.ApplicationWindow):
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
                                vexpand=True)
         for name, page in (("network", self._page_network()),
+                           ("timezone", self._page_timezone()),
                            ("tailscale", self._page_tailscale()),
                            ("clouds", self._page_clouds()), ("wait", self._page_wait()),
                            ("nextcloud", self._page_nextcloud()),
@@ -340,7 +398,7 @@ class ConfigWindow(Adw.ApplicationWindow):
 
     def _on_page(self, *_):
         name = self.stack.get_visible_child_name()
-        steps = {"network": 1, "tailscale": 2, "clouds": 3}
+        steps = {"network": 1, "timezone": 2, "tailscale": 3, "clouds": 4}
         self.window_title.set_subtitle(t("step", n=steps[name])
                                        if self.first_run and name in steps else "")
         focus = {"nextcloud": self.nc_server, "icloud": self.apple_id, "code": self.code_entry}
@@ -371,7 +429,7 @@ class ConfigWindow(Adw.ApplicationWindow):
         self.stack.set_visible_child_name("error")
         self.back.set_visible(bool(self.history))
 
-    # --- first run: the network, then Tailscale ---------------------------------------
+    # --- first run: the network, the timezone, then Tailscale -------------------------
 
     def _onboard(self):
         if netsetup.online():
@@ -394,6 +452,9 @@ class ConfigWindow(Adw.ApplicationWindow):
         return GLib.SOURCE_CONTINUE
 
     def _after_network(self):
+        self._show_timezone()
+
+    def _after_timezone(self):
         if netsetup.online() and netsetup.tailscale_available() \
                 and not netsetup.tailscale_running():
             self._show("tailscale", remember=False)
@@ -482,6 +543,262 @@ class ConfigWindow(Adw.ApplicationWindow):
                 return
             self._after_network()
         in_thread(lambda: netsetup.wifi_connect(ssid, password), done)
+
+    # --- first run: the timezone ------------------------------------------------------
+
+    def _page_timezone(self):
+        self.places = self.tz_map = self.tz_city = self.tz_found = None
+        self.tz_source = None  # of tz_city: "wifi", "ip", "manual"
+        self.tz_locating = False
+        title = Gtk.Label(label=t("tz_title"), xalign=0)
+        title.add_css_class("title-2")
+        body = Gtk.Label(label=t("tz_body"), xalign=0, wrap=True)
+        body.add_css_class("dim-label")
+        heading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        heading.append(title)
+        heading.append(body)
+
+        # Where the computer seems to be, and how that's known
+        self.tz_spinner = livespinner.Spinner(size=16)
+        self.tz_icon = Gtk.Image()
+        self.tz_status = Gtk.Label(xalign=0, wrap=True, hexpand=True, use_markup=True)
+        self.tz_action = Gtk.Button(valign=Gtk.Align.CENTER)
+        self.tz_action.add_css_class("flat")
+        self.tz_action.connect("clicked", lambda *_: self._tz_action())
+        status = Gtk.Box(spacing=10)
+        for child in (self.tz_spinner, self.tz_icon, self.tz_status, self.tz_action):
+            status.append(child)
+
+        self.tz_search = Gtk.SearchEntry(placeholder_text=t("tz_search"), hexpand=True)
+        self.tz_search.connect("search-changed", lambda *_: self._tz_search())
+        self.tz_search.connect("activate", lambda *_: self._tz_search_pick())
+        self.tz_search.connect("stop-search", lambda *_: self.tz_popover.popdown())
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._tz_search_key)
+        self.tz_search.add_controller(keys)
+        focus = Gtk.EventControllerFocus()
+        focus.connect("leave", lambda *_: self.tz_popover.popdown())
+        self.tz_search.add_controller(focus)
+        # The matches, under the entry, which keeps the keyboard: Up and Down
+        # move through them, Enter picks
+        self.tz_results = Gtk.ListBox(selection_mode=Gtk.SelectionMode.BROWSE, can_focus=False)
+        self.tz_results.connect("row-activated", lambda _l, row: self._tz_result_picked(row))
+        self.tz_popover = Gtk.Popover(autohide=False, has_arrow=False, child=self.tz_results,
+                                      position=Gtk.PositionType.BOTTOM)
+        self.tz_popover.set_parent(self.tz_search)
+        self.connect("destroy", lambda *_: self.tz_popover.unparent())
+
+        # The map goes in here once its data is read (_tz_loaded)
+        self.tz_map_box = Gtk.Box()
+        self.tz_map_box.append(livespinner.Spinner(size=32, hexpand=True, margin_top=120,
+                                                   margin_bottom=120))
+
+        group = Adw.PreferencesGroup()
+        self.tz_zone = Adw.ActionRow(subtitle_lines=2)
+        self.tz_clock = Gtk.Label(valign=Gtk.Align.CENTER)
+        self.tz_clock.add_css_class("title-1")
+        self.tz_clock.add_css_class("numeric")
+        self.tz_zone.add_suffix(self.tz_clock)
+        self.tz_next = Adw.ActionRow(title=t("tz_next"))
+        self.tz_ntp = Adw.SwitchRow(title=t("tz_ntp"), subtitle=t("tz_ntp_body"), active=True)
+        self.tz_auto = Adw.SwitchRow(title=t("tz_auto"), subtitle=t("tz_auto_body"),
+                                     active=timesetup.is_laptop())
+        for row in (self.tz_zone, self.tz_next, self.tz_ntp, self.tz_auto):
+            group.add(row)
+
+        self.tz_continue = self._button(t("continue"), suggested=True)
+        self.tz_continue.connect("clicked", lambda *_: self._tz_apply())
+        later = self._button(t("ts_later"))
+        later.connect("clicked", lambda *_: self._after_timezone())
+        buttons = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        buttons.append(self.tz_continue)
+        buttons.append(later)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        for child in (heading, status, self.tz_search, self.tz_map_box, group, buttons):
+            box.append(child)
+        # Wider than the other pages: the map needs the room
+        clamp = Adw.Clamp(maximum_size=700, child=box, margin_top=24, margin_bottom=24,
+                          margin_start=12, margin_end=12)
+        return Gtk.ScrolledWindow(child=clamp, hscrollbar_policy=Gtk.PolicyType.NEVER)
+
+    def _show_timezone(self):
+        self._show("timezone", remember=False)
+        if self.places is None:
+            self.tz_locating = True  # the spinner, while the map is read too
+            in_thread(timesetup.Places, self._tz_loaded)
+        self._tz_update()
+        GLib.timeout_add_seconds(10, self._tz_tick)
+
+    def _tz_loaded(self, places, error):
+        if error:  # no map, no cities: nothing to pick from
+            self._toast(error)
+            if self.stack.get_visible_child_name() == "timezone":
+                self._after_timezone()
+            return
+        self.places = places
+        self.tz_map = tzmap.TimezoneMap(places, lambda city: self._tz_pick(city, "manual"))
+        self.tz_map_box.remove(self.tz_map_box.get_first_child())
+        self.tz_map_box.append(self.tz_map)
+        # A timezone set before (the app's first run, run again) stays
+        current = timesetup.current_timezone()
+        if current and places.in_timezone(current):
+            self._tz_pick(places.in_timezone(current), "manual")
+        self._tz_locate()
+
+    def _tz_locate(self, replace=False):
+        """Looks for the computer's position, and picks its city: unless the
+        user has picked one, when it's not them asking (replace)."""
+        self.tz_found = None
+        self.tz_locating = netsetup.online()
+        self._tz_update()
+        if not self.tz_locating:
+            return
+
+        def done(place, _error):
+            self.tz_locating = False
+            if place:
+                city = self.places.nearest(place["lon"], place["lat"], tz=place["tz"])
+                self.tz_found = (city, place["source"])
+                if replace or self.tz_source != "manual":
+                    self._tz_pick(city, place["source"])
+                    return
+            self._tz_update()
+        in_thread(timesetup.locate, done)
+
+    def _tz_pick(self, city, source):
+        self.tz_city, self.tz_source = city, source
+        self.tz_popover.popdown()
+        self.tz_search.set_text(city.label if source == "manual" else "")
+        self.tz_map.set_city(city)
+        self._tz_update()
+
+    def _tz_action(self):
+        """The status line's button: back to the city that was found, or
+        look for the position again."""
+        if self.tz_source == "manual" and self.tz_found and self.tz_found[0] is not self.tz_city:
+            self._tz_pick(*self.tz_found)
+        else:
+            self._tz_locate(replace=True)
+
+    def _tz_update(self):
+        city = self.tz_city
+        self.tz_spinner.set_visible(self.tz_locating)
+        self.tz_icon.set_visible(not self.tz_locating)
+        self.tz_action.set_visible(not self.tz_locating and self.places is not None)
+        self.tz_action.set_label(t("tz_again"))
+        name = GLib.markup_escape_text(city.label) if city else ""
+        if self.tz_locating:
+            self.tz_status.set_label(t("tz_finding"))
+        elif city and self.tz_source == "manual":
+            self.tz_icon.set_from_icon_name("mark-location-symbolic")
+            self.tz_status.set_label(t("tz_manual", city=name))
+            if self.tz_found and self.tz_found[0] is not city:
+                self.tz_action.set_label(t("tz_back", city=self.tz_found[0].name))
+        elif city:
+            wifi = self.tz_source == "wifi"
+            self.tz_icon.set_from_icon_name("network-wireless-symbolic" if wifi
+                                            else "network-server-symbolic")
+            note = t("tz_wifi_note" if wifi else "tz_ip_note")
+            self.tz_status.set_label(t("tz_wifi" if wifi else "tz_ip", city=name)
+                                     + f"\n<small>{GLib.markup_escape_text(note)}</small>")
+        else:
+            self.tz_icon.set_from_icon_name("find-location-symbolic")
+            note = GLib.markup_escape_text(t("tz_unknown_note"))
+            self.tz_status.set_label(f"{t('tz_unknown')}\n<small>{note}</small>")
+
+        self.tz_continue.set_sensitive(city is not None)
+        tz = city.tz if city else "UTC"
+        self.tz_clock.set_label(timesetup.local_time(tz).strftime("%H:%M"))
+        if not city:
+            self.tz_zone.set_title("UTC")
+            self.tz_zone.set_subtitle(t("tz_utc"))
+            self.tz_next.set_subtitle("—")
+            return
+        offset = timesetup.utc_label(timesetup.utc_offset(tz))
+        self.tz_zone.set_title(tz)
+        self.tz_zone.set_subtitle(" · ".join(filter(None, (timesetup.abbreviation(tz), offset))))
+        change = timesetup.next_change(tz)
+        if not change:
+            self.tz_next.set_subtitle(t("tz_next_none"))
+            return
+        when, moved = change
+        # The day the clocks change on, there: the last minute of the old time
+        day = timesetup.local_time(tz, when - datetime.timedelta(minutes=1))
+        date = GLib.DateTime.new_local(day.year, day.month, day.day, 12, 0, 0)
+        date = date.format("%A %-d %B %Y")
+        amount = t("tz_hour") if abs(moved) == 60 else t("tz_minutes", n=abs(moved))
+        self.tz_next.set_subtitle(GLib.markup_escape_text(
+            t("tz_forward" if moved > 0 else "tz_backward",
+              date=date[:1].upper() + date[1:], amount=amount)))
+
+    def _tz_tick(self):
+        if self.stack.get_visible_child_name() != "timezone":
+            return GLib.SOURCE_REMOVE
+        self.tz_clock.set_label(timesetup.local_time(
+            self.tz_city.tz if self.tz_city else "UTC").strftime("%H:%M"))
+        if self.tz_map:
+            self.tz_map.queue_draw()
+        return GLib.SOURCE_CONTINUE
+
+    def _tz_search(self):
+        text = self.tz_search.get_text().strip()
+        if not self.places or not text or (self.tz_city and text == self.tz_city.label):
+            self.tz_popover.popdown()
+            return
+        self.tz_results.remove_all()
+        cities = self.places.search(text)
+        for city in cities:
+            row = Adw.ActionRow(title=GLib.markup_escape_text(city.name),
+                                subtitle=GLib.markup_escape_text(city.country),
+                                activatable=True, can_focus=False)
+            offset = timesetup.utc_label(timesetup.utc_offset(city.tz))
+            time = Gtk.Label(label=f"{timesetup.local_time(city.tz).strftime('%H:%M')}  {offset}")
+            time.add_css_class("dim-label")
+            time.add_css_class("numeric")
+            row.add_suffix(time)
+            row.city = city
+            self.tz_results.append(row)
+        if not cities:
+            none = Adw.ActionRow(title=t("tz_none"), can_focus=False, activatable=False,
+                                 selectable=False)
+            none.city = None
+            self.tz_results.append(none)
+        else:
+            self.tz_results.select_row(self.tz_results.get_row_at_index(0))
+        self.tz_popover.set_size_request(self.tz_search.get_width(), -1)
+        self.tz_popover.popup()
+
+    def _tz_search_key(self, _controller, keyval, _code, _state):
+        step = {Gdk.KEY_Down: 1, Gdk.KEY_Up: -1}.get(keyval)
+        row = self.tz_results.get_selected_row()
+        if not step or not self.tz_popover.get_visible() or not row:
+            return False
+        other = self.tz_results.get_row_at_index(row.get_index() + step)
+        if other:
+            self.tz_results.select_row(other)
+        return True
+
+    def _tz_search_pick(self):
+        row = self.tz_results.get_selected_row()
+        if self.tz_popover.get_visible() and row:
+            self._tz_result_picked(row)
+
+    def _tz_result_picked(self, row):
+        if row.city:
+            self._tz_pick(row.city, "manual")
+
+    def _tz_apply(self):
+        tz, ntp, auto = self.tz_city.tz, self.tz_ntp.get_active(), self.tz_auto.get_active()
+        self.tz_continue.set_sensitive(False)
+
+        def done(_result, error):
+            self.tz_continue.set_sensitive(True)
+            if error:
+                self._toast(t("tz_failed", error=error))
+            else:
+                self._after_timezone()
+        in_thread(lambda: timesetup.apply(tz, ntp, auto), done)
 
     def _page_tailscale(self):
         status = Adw.StatusPage(icon_name="network-vpn-symbolic", title=t("ts_title"),

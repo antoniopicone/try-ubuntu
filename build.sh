@@ -8,12 +8,14 @@
 # real computers (the generic kernel, all of linux-firmware, CPU microcode:
 # what install.sh --on-usb writes to a USB stick).
 #
-# Runs on macOS (Apple Silicon) and on Linux (x86 or arm64) through podman:
-# the build happens inside a privileged Ubuntu container of the ISO's
-# architecture. The computer's own architecture is native (arm64 on Apple
-# Silicon); the other runs emulated (qemu-user: in the podman machine on a
-# Mac, registered with binfmt_misc on Linux), which is slow. On Linux it
-# needs root (sudo ./build.sh): the ISO step uses loop devices.
+# Runs on macOS (Apple Silicon) and on Linux (x86 or arm64) through podman
+# or docker, whichever is there (podman when both are; CONTAINER_ENGINE
+# picks one): the build happens inside a privileged Ubuntu container of the
+# ISO's architecture. The computer's own architecture is native (arm64 on
+# Apple Silicon); the other runs emulated (qemu-user: in the podman machine
+# or Docker Desktop's VM on a Mac, registered with binfmt_misc on Linux),
+# which is slow. On Linux it needs root (sudo ./build.sh): the ISO step uses
+# loop devices.
 set -euo pipefail
 
 usage() {
@@ -89,33 +91,65 @@ case $arch in
 esac
 
 # Rootless podman can't create the rootfs's device nodes, nor loop-mount
-# the btrfs image (on a Mac the podman machine is rootful).
+# the btrfs image (on a Mac the podman machine is rootful). With docker,
+# whose daemon is root, it's for what this script does itself: installing
+# qemu-user, handing the ISO back to who ran it.
 if [[ $(uname -s) == Linux ]] && (($(id -u) != 0)); then
   echo "On Linux the build needs root: sudo $0 ..." >&2
   exit 1
 fi
 
+# The container engine: podman or docker, whichever is installed
+engine=${CONTAINER_ENGINE:-}
+if [[ -z $engine ]]; then
+  for engine in podman docker ""; do
+    [[ -z $engine ]] || ! command -v "$engine" >/dev/null || break
+  done
+fi
+case $engine in
+  podman|docker)
+    command -v "$engine" >/dev/null || { echo "$engine isn't installed" >&2; exit 1; } ;;
+  "")
+    if [[ $(uname -s) == Darwin ]]; then
+      echo "podman or docker is required: brew install podman && podman machine init --now" >&2
+    else
+      echo "podman or docker is required: install one with your package manager" >&2
+    fi
+    exit 1 ;;
+  *) echo "CONTAINER_ENGINE must be podman or docker" >&2; exit 64 ;;
+esac
+if [[ $engine == podman ]]; then
+  if [[ $(uname -s) == Darwin ]] && ! podman machine inspect --format '{{.State}}' 2>/dev/null | grep -qx running; then
+    echo "==> Starting the podman machine"
+    podman machine start
+  fi
+elif ! docker info >/dev/null 2>&1; then
+  if [[ $(uname -s) == Darwin ]]; then
+    echo "docker isn't running: start Docker Desktop (or your docker VM) first" >&2
+  else
+    echo "docker isn't running: systemctl start docker" >&2
+  fi
+  exit 1
+fi
+
 if ((clean)); then
-  podman volume rm -f "$cache_volume" >/dev/null && echo "Build cache removed ($arch)."
+  "$engine" volume rm -f "$cache_volume" >/dev/null && echo "Build cache removed ($arch)."
   exit 0
 fi
 
-command -v podman >/dev/null || {
-  if [[ $(uname -s) == Darwin ]]; then
-    echo "podman is required: brew install podman && podman machine init --now" >&2
-  else
-    echo "podman is required: install it with your package manager" >&2
-  fi
-  exit 1
-}
-if [[ $(uname -s) == Darwin ]] && ! podman machine inspect --format '{{.State}}' 2>/dev/null | grep -qx running; then
-  echo "==> Starting the podman machine"
-  podman machine start
+if [[ $engine == podman ]]; then
+  host_arch=$(podman info --format '{{.Host.Arch}}')
+else
+  # The kernel's name for it: aarch64, x86_64
+  case $(docker info --format '{{.Architecture}}') in
+    x86_64|amd64) host_arch=amd64 ;;
+    *) host_arch=arm64 ;;
+  esac
 fi
-host_arch=$(podman info --format '{{.Host.Arch}}')
 if [[ $host_arch != "$arch" ]]; then
-  # qemu-user through binfmt_misc: the podman machine has it, a Linux host
-  # needs it installed (or podman build fails on the first RUN)
+  # qemu-user through binfmt_misc: the podman machine and Docker Desktop's
+  # VM have it, a Linux host needs it installed (or the image's build fails
+  # on the first RUN)
   emulator=qemu-aarch64
   [[ $arch == amd64 ]] && emulator=qemu-x86_64
   registered() { compgen -G "/proc/sys/fs/binfmt_misc/$emulator*" >/dev/null; }
@@ -146,14 +180,15 @@ echo "==> Builder image ($arch)"
 # --network host, here and in builder: a bridge needs nft, which podman only
 # recommends, and its traffic is dropped by a host firewall that doesn't
 # forward (ufw), so the first apt-get resolves nothing.
-podman build -q --network host --platform "linux/$arch" -t "$image" -f "$project_dir/Containerfile" \
+"$engine" build -q --network host --platform "linux/$arch" -t "$image" -f "$project_dir/Containerfile" \
   "$project_dir" >/dev/null
 if [[ $host_arch != "$arch" ]]; then
   # The ISO step runs natively (see below): the host's builder too
-  podman build -q --network host --platform "linux/$host_arch" -t "$(builder_image "$host_arch")" \
+  "$engine" build -q --network host --platform "linux/$host_arch" -t "$(builder_image "$host_arch")" \
     -f "$project_dir/Containerfile" "$project_dir" >/dev/null
 fi
-podman volume exists "$cache_volume" || podman volume create "$cache_volume" >/dev/null
+"$engine" volume inspect "$cache_volume" >/dev/null 2>&1 \
+  || "$engine" volume create "$cache_volume" >/dev/null
 
 mkdir -p "$dist_dir"
 # --privileged plus the host's /dev: the ISO step loop-mounts the btrfs image
@@ -162,13 +197,15 @@ mkdir -p "$dist_dir"
 # persistent disk (run-qemu.sh --persist): btrfslive looks for both.
 # The cache volume holds the rootfs, with device nodes (debootstrap writes
 # to its /dev/null) and setuid files: podman 6 mounts named volumes nodev
-# and nosuid unless told otherwise.
+# and nosuid unless told otherwise (docker doesn't, and has no such options).
+cache_options=""
+[[ $engine == podman ]] && cache_options=:dev,suid
 # builder PLATFORM IMAGE STEPS...: the build steps in a builder container
 builder() {
   local platform=$1 builder_image=$2; shift 2
-  podman run --rm --privileged --network host --platform "linux/$platform" \
+  "$engine" run --rm --privileged --network host --platform "linux/$platform" \
     -v /dev:/dev \
-    -v "$cache_volume:/cache:dev,suid" \
+    -v "$cache_volume:/cache$cache_options" \
     -v "$project_dir:/src:ro" \
     -v "$dist_dir:/out" \
     -e XKB_LAYOUT="$xkb_layout" \

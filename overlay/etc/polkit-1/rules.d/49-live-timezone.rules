@@ -1,0 +1,11 @@
+// The timezone and the clock's NTP switch, without a password, for the
+// administrators (the user the welcome app creates) at the computer: Cloud
+// Config's timezone step (/usr/local/lib/live-backup/timesetup.py) and
+// GNOME's automatic timezone set them through systemd-timedated.
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.freedesktop.timedate1.set-timezone" ||
+         action.id == "org.freedesktop.timedate1.set-ntp") &&
+        subject.local && subject.active && subject.isInGroup("sudo")) {
+        return polkit.Result.YES;
+    }
+});
