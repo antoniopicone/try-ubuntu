@@ -5,8 +5,9 @@ backups (see /usr/local/lib/live-backup/accounts.py):
   - Google Drive, OneDrive, Dropbox: sign-in in the browser (rclone's own)
   - Nextcloud: the server's address, then approval in the browser (Login
     Flow v2, which gives an app password)
-  - iCloud Drive: Apple ID, password and the code sent by SMS (icloud-linux,
-    which then mounts it in ~/iCloud)
+  - iCloud Drive: Apple ID, password and the code sent by SMS, typed a
+    digit per box and asked again when it doesn't come (icloud-linux, which
+    then mounts it in ~/iCloud)
 See providers.py for each. Every account is mounted in the home folder,
 with its place in Files' sidebar (mount.py), unless "Show the clouds in
 Files" is off.
@@ -29,7 +30,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 sys.path.insert(0, "/usr/local/lib/live-backup")
 sys.path.insert(0, "/usr/local/lib/live-common")
@@ -59,7 +60,6 @@ CLOUDS = [
 STRINGS = {
     "en": {
         "apple_id": "Apple ID (email or phone number)",
-        "code": "Code",
         "code_title": "Verification Code",
         "icloud_body": "Sign in with your Apple ID. A verification code will arrive by text message. The password isn't kept: every few weeks Apple asks to sign in again, and Cloud Backup will tell you. iCloud Drive will also be in the Files sidebar (~/iCloud).",
         "icloud_title": "iCloud Drive",
@@ -76,6 +76,8 @@ STRINGS = {
         "clouds_title": "Your Clouds",
         "code_body": "Type the 6-digit code sent by text message to {phone}.",
         "code_body_any": "Type the 6-digit code sent to you by text message.",
+        "code_resend": "Send a New Code by Text Message",
+        "code_resend_in": "New code in {n} s",
         "code_working": "Checking the code…",
         "code_wrong": "That code wasn't accepted. Attempts left: {left}.",
         "connect": "Connect",
@@ -91,6 +93,7 @@ STRINGS = {
         "err_sign_in": "The sign-in didn't work.",
         "error_title": "Something Went Wrong",
         "icloud_mounting": "Opening iCloud Drive…",
+        "icloud_unavailable": "You're signed in, but iCloud Drive couldn't be opened.",
         "icloud_working": "Signing in to iCloud…",
         "in_files": "in Files as “{name}”",
         "more_actions": "More actions",
@@ -163,7 +166,6 @@ STRINGS = {
     },
     "it": {
         "apple_id": "ID Apple (email o numero di telefono)",
-        "code": "Codice",
         "code_title": "Codice di verifica",
         "icloud_body": "Accedi con il tuo ID Apple. Ti arriverà un codice di verifica via SMS. La password non viene conservata: ogni qualche settimana Apple chiede di accedere di nuovo, e Cloud Backup te lo dirà. iCloud Drive sarà anche nella barra laterale di File (~/iCloud).",
         "icloud_title": "iCloud Drive",
@@ -180,6 +182,8 @@ STRINGS = {
         "clouds_title": "I tuoi cloud",
         "code_body": "Scrivi il codice di 6 cifre inviato via SMS a {phone}.",
         "code_body_any": "Scrivi il codice di 6 cifre che ti è arrivato via SMS.",
+        "code_resend": "Invia di nuovo il codice via SMS",
+        "code_resend_in": "Nuovo codice tra {n} s",
         "code_working": "Verifica del codice…",
         "code_wrong": "Il codice non è stato accettato. Tentativi rimasti: {left}.",
         "connect": "Collega",
@@ -195,6 +199,7 @@ STRINGS = {
         "err_sign_in": "L'accesso non è riuscito.",
         "error_title": "Qualcosa è andato storto",
         "icloud_mounting": "Apertura di iCloud Drive…",
+        "icloud_unavailable": "L'accesso è riuscito, ma non è stato possibile aprire iCloud Drive.",
         "icloud_working": "Accesso a iCloud…",
         "in_files": "in File come «{name}»",
         "more_actions": "Altre azioni",
@@ -282,6 +287,80 @@ def in_thread(work, done):
             result, error = None, getattr(e, "message", None) or str(e) or type(e).__name__
         GLib.idle_add(lambda: done(result, error) and False)
     threading.Thread(target=run, daemon=True).start()
+
+
+# Seconds before a new verification code can be asked for
+RESEND_AFTER = 20
+
+
+class CodeEntry(Gtk.Box):
+    """A verification code, a digit per box, as on Apple's own pages: a digit
+    moves on to the next box, Backspace in an empty one goes back, a pasted
+    code fills them all. on_complete() once every box has its digit, and on
+    Enter."""
+
+    def __init__(self, on_complete, length=6):
+        super().__init__(spacing=8, halign=Gtk.Align.CENTER)
+        self.on_complete = on_complete
+        self._filling = False
+        self.boxes = []
+        big = Pango.AttrList()
+        big.insert(Pango.attr_scale_new(1.6))
+        big.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
+        for index in range(length):
+            # Two halves, as the code is read: 123 456
+            box = Gtk.Entry(width_chars=2, max_width_chars=2, xalign=0.5, attributes=big,
+                            input_purpose=Gtk.InputPurpose.DIGITS,
+                            margin_start=12 if index == length // 2 else 0)
+            box.connect("changed", self._changed)
+            box.connect("activate", lambda *_: self.on_complete())
+            keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+            keys.connect("key-pressed", self._key, box)
+            box.add_controller(keys)
+            self.boxes.append(box)
+            self.append(box)
+
+    def get_code(self):
+        return "".join(box.get_text() for box in self.boxes)
+
+    def clear(self):
+        self._filling = True
+        for box in self.boxes:
+            box.set_text("")
+        self._filling = False
+
+    def grab_focus(self):
+        return self.boxes[0].grab_focus()
+
+    def _changed(self, box):
+        if self._filling:
+            return
+        index = self.boxes.index(box)
+        digits = [c for c in box.get_text() if c.isdigit()][:len(self.boxes) - index]
+        # One digit stays here; more (a pasted code) go on in the next boxes
+        self._filling = True
+        box.set_text(digits[0] if digits else "")
+        for other, digit in zip(self.boxes[index + 1:], digits[1:]):
+            other.set_text(digit)
+        self._filling = False
+        if not digits:
+            return
+        # Focus selects the box's digit: typing there replaces it
+        self.boxes[min(index + len(digits), len(self.boxes) - 1)].grab_focus()
+        if len(self.get_code()) == len(self.boxes):
+            self.on_complete()
+
+    def _key(self, _controller, keyval, _code, _state, box):
+        index = self.boxes.index(box)
+        if keyval == Gdk.KEY_BackSpace and not box.get_text() and index:
+            self.boxes[index - 1].set_text("")
+            self.boxes[index - 1].grab_focus()
+            return True
+        step = {Gdk.KEY_Left: -1, Gdk.KEY_Right: 1}.get(keyval)
+        if step and 0 <= index + step < len(self.boxes):
+            self.boxes[index + step].grab_focus()
+            return True
+        return False
 
 
 class ConfigWindow(Adw.ApplicationWindow):
@@ -1173,17 +1252,34 @@ class ConfigWindow(Adw.ApplicationWindow):
             self.icloud_error.set_label(t("required"))
             return
         self.icloud_error.set_label("")
+        self.icloud_phone = None
+        self._icloud_start()
+
+    def _icloud_start(self):
         self._cancel()
         self._working(t("icloud_working"))
-        self.icloud = providers.ICloudSignIn(
-            apple_id, password, lambda kind, data: GLib.idle_add(
-                lambda: self._icloud_event(kind, data) and False))
-        self.icloud.start()
+        signin = self.icloud = providers.ICloudSignIn(
+            self.apple_id.get_text().strip(), self.apple_password.get_text(),
+            lambda kind, data: GLib.idle_add(
+                lambda: self._icloud_event(signin, kind, data) and False))
+        signin.start()
 
-    def _icloud_event(self, kind, data):
-        if self.icloud is None:  # cancelled
+    def _icloud_resend(self):
+        """Apple doesn't always send the text message, and icloudctl can't
+        ask for another: signing in again does, to the same number."""
+        self.code_message = ""
+        self._icloud_start()
+        # Back still leads to the sign-in form, not to this code's page
+        if self.history and self.history[-1] == "code":
+            self.history.pop()
+
+    def _icloud_event(self, signin, kind, data):
+        if signin is not self.icloud:  # cancelled, or an earlier sign-in's last words
             return
         if kind == "phones":
+            if self.icloud_phone is not None and self.icloud_phone < len(data):
+                self.icloud.choose(self.icloud_phone)  # asking for a new code
+                return
             for row in self.phone_rows:
                 self.phones_group.remove(row)
             self.phone_rows.clear()
@@ -1203,8 +1299,11 @@ class ConfigWindow(Adw.ApplicationWindow):
             self.code_group.set_description(t("code_body", phone=data) if data
                                             else t("code_body_any"))
             self.code_error.set_label(self.code_message)
+            # A code that wasn't accepted is asked again, not sent again
+            if not self.code_message:
+                self._code_countdown(RESEND_AFTER)
             self.code_message = ""
-            self.code_entry.set_text("")
+            self.code_entry.clear()
             self.stack.set_visible_child_name("code")
             self.back.set_visible(True)
         elif kind == "done":
@@ -1226,18 +1325,45 @@ class ConfigWindow(Adw.ApplicationWindow):
         return self._page(self.phones_group)
 
     def _icloud_phone(self, index):
+        self.icloud_phone = index
         self._working(t("icloud_working"))
         self.icloud.choose(index)
 
     def _page_code(self):
-        self.code_entry = self._entry("code")
-        self.code_entry.set_input_purpose(Gtk.InputPurpose.DIGITS)
-        page, self.code_group, self.code_error = self._form(
-            "code_title", "code_body_any", [self.code_entry], self._icloud_code)
-        return page
+        self.icloud_phone = None  # the number picked, for a new code
+        self.code_countdown = 0   # which countdown is running: the last one
+        self.code_group = Adw.PreferencesGroup(title=t("code_title"),
+                                               description=t("code_body_any"))
+        self.code_entry = CodeEntry(self._icloud_code)
+        self.code_error = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
+        self.code_error.add_css_class("error")
+        proceed = self._button(t("continue"), suggested=True)
+        proceed.connect("clicked", lambda *_: self._icloud_code())
+        # Counts down, then asks for a new code
+        self.code_resend = self._button("")
+        self.code_resend.connect("clicked", lambda *_: self._icloud_resend())
+        return self._page(self.code_group, self.code_entry, self.code_error, proceed,
+                          self.code_resend)
+
+    def _code_countdown(self, seconds):
+        self.code_countdown += 1
+        countdown = self.code_countdown
+
+        def tick():
+            nonlocal seconds
+            if countdown != self.code_countdown:
+                return GLib.SOURCE_REMOVE  # a newer one took over
+            seconds -= 1
+            self.code_resend.set_sensitive(seconds <= 0)
+            self.code_resend.set_label(t("code_resend_in", n=seconds) if seconds > 0
+                                       else t("code_resend"))
+            return GLib.SOURCE_CONTINUE if seconds > 0 else GLib.SOURCE_REMOVE
+        self.code_resend.set_sensitive(False)
+        self.code_resend.set_label(t("code_resend_in", n=seconds))
+        GLib.timeout_add_seconds(1, tick)
 
     def _icloud_code(self):
-        code = "".join(c for c in self.code_entry.get_text() if c.isdigit())
+        code = self.code_entry.get_code()
         if len(code) != 6 or not self.icloud:
             self.code_error.set_label(t("code_body_any"))
             return

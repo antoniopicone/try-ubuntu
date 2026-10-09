@@ -131,6 +131,7 @@ class TimezoneMap(Gtk.DrawingArea):
         w, h = w + 16, h + 6
         left = x + 10 if x + 10 + w <= width - 4 else x - 10 - w
         top = min(max(y - h / 2, 4), height - h - 4)
+        cr.new_path()
         _rounded(cr, left, top, w, h, 7)
         cr.set_source_rgba(*fill)
         cr.fill()
@@ -198,6 +199,7 @@ class TimezoneMap(Gtk.DrawingArea):
             x = _x(hours * 15) * k - w / 2
             y = map_height + 1 + (SCALE - 1 - h) / 2
             if marked:
+                cr.new_path()
                 _rounded(cr, x - 4, y - 1, w + 8, h + 2, 5)
                 cr.set_source_rgb(*accent)
                 cr.fill()
@@ -209,6 +211,9 @@ class TimezoneMap(Gtk.DrawingArea):
 
         if self.hover and self.hover is not self.city:
             x, y = _x(self.hover.lon) * k, _y(self.hover.lat) * map_height / HEIGHT
+            # new_path: the text drawn before leaves a current point, which
+            # an arc would start with a line from
+            cr.new_path()
             cr.arc(x, y, 3.5, 0, 2 * math.pi)
             cr.set_source_rgb(*card)
             cr.fill_preserve()
@@ -220,6 +225,7 @@ class TimezoneMap(Gtk.DrawingArea):
                       (*card, 0.95), (*fg, 1.0))
         if self.city:
             x, y = _x(self.city.lon) * k, _y(self.city.lat) * map_height / HEIGHT
+            cr.new_path()
             cr.arc(x, y, 5, 0, 2 * math.pi)
             cr.set_source_rgb(*accent)
             cr.fill_preserve()
@@ -231,6 +237,7 @@ class TimezoneMap(Gtk.DrawingArea):
                       (*accent, 1.0), (1.0, 1.0, 1.0, 1.0))
 
         cr.reset_clip()
+        cr.new_path()
         _rounded(cr, 0.5, 0.5, width - 1, height - 1, RADIUS)
         cr.set_source_rgba(*fg, 0.13)
         cr.set_line_width(1)
