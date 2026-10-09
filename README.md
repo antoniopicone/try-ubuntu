@@ -6,6 +6,10 @@
 
 <p align="center">A live ISO of a minimal Ubuntu for arm64, to try the amazing penguin ;)</p>
 
+<p align="center">
+  <img src="assets/try-ubuntu-demo.gif" width="800" alt="One command in a terminal downloads the ISO and boots the Ubuntu live session in QEMU">
+</p>
+
 - Ubuntu 26.04 LTS (resolute) with a minimal **GNOME 50**, 26.04's own
   (the branch `gnome-51` has GNOME 51 instead, backported from 26.10)
 - boots with Limine (EFI) and Plymouth
